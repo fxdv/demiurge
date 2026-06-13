@@ -2,7 +2,7 @@
 
 # Demiurge
 
-**A phase-aware, cache-locality-first load balancer for inference fleets** *(target design; Phase~0 scaffold shipped).*
+**A phase-aware, cache-locality-first load balancer for inference fleets** *(Phases 0–2 shipped; full three-plane design is target scope).*
 
 *Target: route prefill and decode as independent phases across two pools, with the KV cache as the explicit hand-off artifact — because an inference request is a lease on stateful accelerator memory, not a packet.*
 
@@ -18,11 +18,12 @@
 > formless chaos into an ordered cosmos — which is precisely this system's job:
 > imposing locality-aware order on chaotic inference traffic.
 
-> **Status: early scaffold.** What runs today is the cost-factor algebra and a
-> minimal phase-aware, cost-based TCP forwarder (least-cost backend selection
-> with live load). The three-plane architecture below — XDP admission, RDMA KV
-> hand-off, gossip, live migration, cross-tenant cache sharing — is **design
-> intent**, not yet built. See [Status](#status-what-exists).
+> **Status.** Phases **0–2** are implemented and gated in CI: cost algebra, async
+> routing with short-context fast path, KV hand-off (TCP proof transport),
+> overhead-aware reservation, and the Φ memory-pressure barrier. The three-plane
+> architecture below — XDP admission, RDMA KV hand-off, gossip, live migration,
+> cross-tenant cache sharing — remains **design intent** for later phases. See
+> [Status](#status-what-exists).
 
 ---
 
@@ -59,14 +60,17 @@ Demiurge is built to exploit exactly those three facts.
 
 | Area | State |
 |------|-------|
-| Cost-factor algebra (`demiurge-cost`), log-space, positive by construction, fail-expensive | **implemented + property-tested** |
-| Minimal forwarder (`demiurge-router`): phase pools, least-cost selection, live in-flight load | **implemented + tested** |
+| Cost-factor algebra (`demiurge-cost`), log-space, positive by construction, fail-expensive | **implemented + property-tested** (P0) |
+| Minimal forwarder (`demiurge-router`): phase pools, least-cost selection, live in-flight load | **implemented + tested** (P0) |
+| Async `Route` / non-blocking prefill + short-context fast path | **implemented + tested** (P1) |
+| KV hand-off (`demiurge-handoff`), reservation ledger (`demiurge-control`), Φ barrier | **implemented + tested** (P2) |
 | Design-conformance tooling (`xtask gen`/`lint`), CI, spec PDF | **implemented** |
 | CPU bench gates (`bench-gates.toml`, `cargo xtask bench-gate`) | **implemented** — in CI |
 | Local load bench (`load-bench.sh`, pseudo report) | **implemented** — CI runs `load-bench --ci` smoke |
-| XDP/L4 admission, io_uring data plane, RCU snapshots | design intent |
-| KV warmth map, RDMA hand-off, live migration | design intent |
-| Cross-tenant cache sharing, async prefill dispatch, learned corrector | design intent |
+| Real stress suite (`load-stress.sh`, strict zero-error gates) | **implemented** — local only, not in CI |
+| XDP/L4 admission, io_uring data plane, RCU snapshots | design intent (P5) |
+| KV warmth map, RDMA hand-off production path, live migration | design intent (P3–P6) |
+| Cross-tenant cache sharing, learned corrector graduation | design intent (P7–P8) |
 
 The `spec/` document is the *target* design; the generated conformance matrix
 marks each requirement `implemented` or `intended` so the two never blur.
@@ -124,9 +128,11 @@ flowchart TB
 | [`spec/demiurge.tex`](spec/) | Full target design; §1 lists shipped vs intended scope |
 | `spec/generated/` | `@generated` parameter & conformance tables — never hand-edited. |
 | [`crates/demiurge-cost/`](crates/demiurge-cost/) | The cost-function factor algebra and its property tests. |
-| [`crates/demiurge-router/`](crates/demiurge-router/) | Minimal phase-aware, cost-based forwarder (lib + binary). |
-| [`xtask/`](xtask/) | `gen` (regenerate artifacts) and `lint` (traceability) commands. |
-| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh`, `load-bench.sh` — local developer ergonomics. |
+| [`crates/demiurge-router/`](crates/demiurge-router/) | Phase-aware forwarder: async route, fast path, KV pool integration. |
+| [`crates/demiurge-handoff/`](crates/demiurge-handoff/) | KV hand-off descriptor, registry, TCP transport (RDMA trait later). |
+| [`crates/demiurge-control/`](crates/demiurge-control/) | Reservation ledger, TTL release, admit/reject metrics. |
+| [`xtask/`](xtask/) | `gen`, `lint`, `bench-gate`, `load-bench`, `load-report`. |
+| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh`, `load-bench.sh`, `load-stress.sh`. |
 
 ## Quickstart
 
@@ -137,6 +143,7 @@ cargo xtask lint              # enforce the spec ⇄ code ⇄ test join
 cargo run --release -q --package xtask -- bench-gate  # CPU hot-path gates
 cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-gate report
 ./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
+./scripts/load-stress.sh      # strict heavy stress — local only, not in gate.sh
 cargo test --all              # run the executable invariants (C>0, ±α)
 ./scripts/gate.sh             # run the full local gate (mirrors CI)
 ```
@@ -230,7 +237,7 @@ plans (short-context fast path, KV overhead accounting, dynamic pool
 rebalancing), and the live burndown — lives in **[`ROADMAP.md`](ROADMAP.md)**.
 
 Track progress: `cargo xtask lint` prints per-phase burndown
-(`P0: 4/4`, `P1: 2/2`, `P2: 4/4`, …). The spec conformance matrix includes a Phase column.
+(`P0: 4/4`, `P1: 2/2`, `P2: 5/5`, …). The spec conformance matrix includes a Phase column.
 
 ## Contributing
 

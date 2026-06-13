@@ -30,23 +30,27 @@ code that exists today.
 \end{abstract}
 
 \section{Implementation Status}\label{sec:status}
-\textbf{Shipped today (Phase~0).}
+\textbf{Shipped today (Phases~0--2).}
 \begin{itemize}[nosep]
-  \item Cost-factor algebra: log-space composition, fail-expensive clamping,
-        bounded corrector (\req{DEMI-COST-POS}, \req{DEMI-CORR-CLAMP},
-        \req{DEMI-FAIL-EXPENSIVE}).
-  \item Minimal forwarder: phase pools, minimum-cost backend selection
+  \item \textbf{Phase~0} --- Cost-factor algebra: log-space composition, fail-expensive
+        clamping, bounded corrector (\req{DEMI-COST-POS}, \req{DEMI-CORR-CLAMP},
+        \req{DEMI-FAIL-EXPENSIVE}); minimum-cost backend selection over phase pools
         (\req{DEMI-ROUTE-MINCOST}).
+  \item \textbf{Phase~1} --- Non-blocking \texttt{Route}: async prefill dispatch,
+        decode continuation on \texttt{OnPrefillComplete} (\req{ALG-ROUTE});
+        short-context colocated fast path (\req{DEMI-SHORT-FASTPATH}).
+  \item \textbf{Phase~2} --- KV hand-off over a TCP proof transport
+        (\req{DEMI-KV-HANDOFF}); overhead-aware reservation and fleet $\Phi$ barrier
+        (\req{DEMI-KV-OVERHEAD}, \req{DEMI-BARRIER-PHI}, \req{DEMI-KV-RELEASE});
+        hand-off transfer telemetry (\req{DEMI-KV-TRANSFER-TELEM}).
 \end{itemize}
-\textbf{Not shipped.} Everything else in this spec---including architecture
-planes (\S\ref{sec:arch}), KV overhead (\S\ref{sec:kv}), state plane
-(\S\ref{sec:state}), async \texttt{Route} (\S\ref{sec:route}),
-cross-tenant sharing (\S\ref{sec:sharing}), migration (\S\ref{sec:migration}),
-pool rebalancing (\S\ref{sec:control}), data-plane hardening
-(\S\ref{sec:dataplane}), and production corrector graduation
-(\S\ref{sec:corrector})---is \textbf{design intent} tracked by requirement IDs
-and development phases in \texttt{design/requirements.toml} and
-\texttt{ROADMAP.md}.
+\textbf{Not shipped.} Everything else in this spec---including data-plane hardening
+(\S\ref{sec:dataplane}), KV warmth map and gossip (\S\ref{sec:state}),
+production RDMA hand-off, cross-tenant sharing (\S\ref{sec:sharing}),
+live migration (\S\ref{sec:migration}), pool rebalancing actuation
+(\S\ref{sec:control}), and corrector graduation (\S\ref{sec:corrector})---is
+\textbf{design intent} tracked by requirement IDs and development phases in
+\texttt{design/requirements.toml} and \texttt{ROADMAP.md}.
 
 \begin{table}[h]
   \centering

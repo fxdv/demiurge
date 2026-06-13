@@ -24,12 +24,12 @@ gossip_interval_ms = 100
 frame_rate_hz = 50
 free_block_interrupt_pct = 20
 
-# Phase 1 — short-context fast path (design intent until implemented)
+# Phase 1 — short-context fast path (shipped)
 [routing]
 short_context_tokens = 512
 short_context_warmth_override = 0.15
 
-# Phase 2 — KV overhead accounting (design intent)
+# Phase 2 — KV overhead accounting (shipped)
 [kv]
 metadata_overhead_fraction = 0.08
 fragmentation_slack = 0.05

@@ -35,7 +35,7 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 |------:|------|--------------|--------|
 | **0** | Foundations | 4 / 4 | **done** |
 | **1** | Non-blocking routing loop | 2 / 2 | **done** |
-| **2** | KV hand-off & memory barriers | 4 / 4 | **done** |
+| **2** | KV hand-off & memory barriers | 5 / 5 | **done** |
 | **3** | State plane | 0 / 2 | planned |
 | **4** | Control plane & pairing | 0 / 2 | planned |
 | **5** | Data plane hardening | 0 / 2 | planned |
@@ -64,32 +64,34 @@ cargo run --release -q --package xtask -- bench-probe  # tune limits / find thin
 runs, and takes the **median** ns/op. Failure means the hot path regressed or a
 change added work to the routing loop.
 
-### Active gates (Phase 0)
+### Active CPU bench gates
 
-| ID | What it measures | Limit (local) |
-|----|------------------|---------------|
-| `BENCH-COMPOSE-8` | `compose()` — 4 barriers, 2 discounts, identity corrector | ≤ 120 ns/op |
-| `BENCH-BACKEND-COST` | `Backend::cost()` — single target load signal | ≤ 150 ns/op |
-| `BENCH-SELECT-64` | `select()` over 64 backends (full cost recompute per candidate) | ≤ 25 µs/op |
+Limits are canonical in [`design/bench-gates.toml`](design/bench-gates.toml);
+CI applies `settings.ci_slack` (2×) for runner jitter. Run
+`cargo xtask bench-probe` for floor/median/p95 when tuning.
 
-Tighten a limit only when deliberately optimizing that path. Loosening requires
-justification in the PR — perf regressions are not free.
+| ID | Phase | What it measures | Limit (local median) |
+|----|------:|------------------|----------------------|
+| `BENCH-COMPOSE-8` | 0 | `compose()` — 4 barriers, 2 discounts, identity corrector | ≤ 50 ns/op |
+| `BENCH-BACKEND-COST` | 0 | `Backend::cost()` — single target load signal | ≤ 8 ns/op |
+| `BENCH-SELECT-64` | 0 | `select()` over 64 backends (cost recomputed each pick) | ≤ 1 µs/op |
+| `BENCH-CLASSIFY` | 1 | HTTP head parse + fast-path / disaggregated classification | ≤ 350 ns/op |
+| `BENCH-ROUTE-DISPATCH` | 1 | Disaggregated path — RequestId alloc + admission (no I/O) | ≤ 350 ns/op |
+| `BENCH-KV-RESERVE` | 2 | `kv_breakdown()` + `phi_barrier_marginal()` hot path | ≤ 200 ns/op |
 
 ### Planned gates (register before closing the phase)
 
 | Phase | Proposed ID | Target |
 |------:|-------------|--------|
-| **1** | `BENCH-CLASSIFY` | HTTP head parse + prefill/decode/fast-path classification |
-| **1** | `BENCH-ROUTE-DISPATCH` | Async prefill dispatch + correlation handle alloc |
-| **2** | `BENCH-KV-RESERVE` | Overhead-aware reservation + Φ barrier check |
 | **3** | `BENCH-WARM-LOOKUP` | Cuckoo warmth probe per routing key block |
 | **4** | `BENCH-PAIR-GREEDY` | Greedy pf→dc pair selection over N×M candidates |
 | **4** | `BENCH-REBALANCE` | Pool pressure normalization + π* computation |
 | **5** | `BENCH-RCU-SNAPSHOT` | RCU table read on data-plane routing path |
 
 Each new gate gets a row in `bench-gates.toml` in the **same PR** that lands the
-code it measures. Phase exit checklists below include “bench gates pass” where
-applicable.
+code it measures. Tighten a limit only when deliberately optimizing that path;
+loosening requires justification in the PR. Phase exit checklists below include
+“bench gates pass” where applicable.
 
 ### Local load bench (optional)
 
@@ -251,7 +253,7 @@ flowchart LR
 | Release | Data plane | On connection close, migration abort, or TTL expiry for abandoned sessions. |
 | Reclaim | Backend + CP | `[kv].abandoned_session_ttl` frees orphaned reservations. |
 
-**Telemetry** (required before Phase 2 closes):
+**Telemetry** (Phase 2 — shipped):
 
 - `kv_bytes_live`, `kv_bytes_reserved`, `kv_overhead_ratio` per backend and pool.
 - `kv_admit_rejects_total` — admissions denied by Φ barrier.
@@ -266,7 +268,7 @@ flowchart LR
 | **4** | Predictor feeds `kv_tokens`; model `bytes_per_token` in RCU snapshot. |
 | **6** | Migration moves `kv_reserved` atomically; abort releases reservation on source. |
 
-**Requirements (registered `intended` in `requirements.toml`)**
+**Requirements (implemented in `requirements.toml`)**
 
 | ID | Summary |
 |----|---------|
@@ -274,14 +276,16 @@ flowchart LR
 | `DEMI-KV-OVERHEAD` | Reservation includes metadata + fragmentation terms, not raw token bytes alone. |
 | `DEMI-BARRIER-PHI` | Fleet aggregate reservation; never sum per-request p90 headroom. |
 | `DEMI-KV-RELEASE` | Session end, abort, or TTL always releases reservation. |
+| `DEMI-KV-TRANSFER-TELEM` | Hand-off transfer cost logged as p50/p99 bytes and wall time. |
 
-**Exit gate**
+**Exit gate (met in Phase 2)**
 
-- [ ] Reservation formula unit-tested against known model configs.
-- [ ] 10× prefill burst bench: decode pool stays under memory budget with overhead terms enabled.
-- [ ] `kv_reservation_error` bounded under steady load (no unbounded drift).
+- [x] Reservation formula unit-tested against known model configs.
+- [x] 10× prefill burst bench: decode pool stays under memory budget with overhead terms enabled.
+- [x] Hand-off transfer telemetry (bytes/wall p50/p99) in load scenarios.
+- [x] `kv_admit_rejects_total` and reservation metrics bounded under steady load.
 
-**Parameters** (to add when Phase 2 starts):
+**Parameters** (canonical in `design/demiurge.params.toml`):
 
 ```toml
 [kv]
@@ -413,7 +417,7 @@ fast path, KV overhead accounting, pool rebalancing.
 
 ---
 
-## Phase 1 — Non-blocking routing loop
+## Phase 1 — Non-blocking routing loop ✅ (shipped)
 
 **Goal.** Replace the synchronous proxy with the spec’s `Route` shape: admit,
 dispatch prefill **asynchronously**, return immediately; decode placement is a
@@ -449,7 +453,7 @@ fast path** classifier (colocated branch only; warmth override waits for Phase 3
 
 ---
 
-## Phase 2 — KV hand-off & memory barriers
+## Phase 2 — KV hand-off & memory barriers ✅ (shipped)
 
 **Goal.** Make the KV cache the explicit prefill→decode artifact; implement **KV
 overhead accounting** and the **Φ memory-pressure barrier** so a prefill burst
@@ -462,8 +466,9 @@ cannot OOM the decode pool.
 | `demiurge-handoff` (new) | Hand-off descriptor: `(request_id, kv_handle, byte_len, source_backend)`; pluggable transport (TCP blob channel first; RDMA trait behind feature flag). |
 | `demiurge-cost` | Wire `BarrierFactor` from aggregate decode-pool KV headroom using overhead-aware `kv_reserved`. |
 | `demiurge-router` | Prefill completion publishes hand-off; decode pick waits on handle availability. |
-| `demiurge-control` (stub) | Reservation ledger: admit, release, TTL reclaim (`DEMI-KV-RELEASE`). |
+| `demiurge-control` | Reservation ledger: admit, release, TTL reclaim (`DEMI-KV-RELEASE`). |
 | Bench | `benches/handoff_burst.rs` — 10× prefill burst against fixed decode pool memory budget. |
+| Load | `./scripts/load-stress.sh` — 11.6k strict local stress (REAL + KV army + flood). |
 
 **Requirements to register**
 
@@ -473,6 +478,7 @@ cannot OOM the decode pool.
 | `DEMI-KV-OVERHEAD` | Reservation includes metadata + fragmentation, not raw token bytes. |
 | `DEMI-BARRIER-PHI` | Fleet aggregate reservation; not per-request p90 sum. |
 | `DEMI-KV-RELEASE` | Session end, abort, or TTL releases reservation. |
+| `DEMI-KV-TRANSFER-TELEM` | Hand-off transfer cost logged as p50/p99 bytes and wall time. |
 
 **Exit gate**
 

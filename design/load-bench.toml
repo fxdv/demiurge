@@ -1,9 +1,11 @@
 # design/load-bench.toml — local end-to-end load scenarios for demiurge-router.
 #
 # Run:  ./scripts/load-bench.sh
+#       ./scripts/load-stress.sh   (strict heavy stress — local only, not in CI)
 #       (or: cargo xtask load-bench && cargo xtask load-report)
 #
 # Local full suite: ./scripts/load-bench.sh
+# Real stress:      ./scripts/load-stress.sh  (stress=true scenarios, zero errors)
 # CI regression: gate.sh and .github/workflows/ci.yml run `load-bench --ci`.
 # Optional soft gates (max_p99_ms): advisory on full runs; enforced with `--ci`.
 

@@ -33,6 +33,9 @@ lint, `cargo fmt --check`, release build, `cargo clippy -D warnings`, the test
 suite, CPU bench gates, load regression smoke (`load-bench --ci`), and (if
 `latexmk` is installed) compiles the spec.
 
+For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
+(strict zero-error gates; not part of `gate.sh` or CI).
+
 ## CI gates
 
 | Workflow | What it enforces |
