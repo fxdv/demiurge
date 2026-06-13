@@ -113,9 +113,7 @@ impl SelectBench {
         let addr: SocketAddr = "127.0.0.1:1".parse().expect("addr");
         Self {
             pool: (0..n)
-                .map(|i| {
-                    Backend::new(format!("b{i}"), addr, 0.01 + i as f64 * 0.000_5)
-                })
+                .map(|i| Backend::new(format!("b{i}"), addr, 0.01 + i as f64 * 0.000_5))
                 .collect(),
         }
     }

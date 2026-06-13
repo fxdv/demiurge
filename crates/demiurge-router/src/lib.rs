@@ -35,6 +35,12 @@ impl RequestId {
     }
 }
 
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Telemetry produced when prefill finishes; feeds decode placement.
 #[derive(Debug, Clone, Copy)]
 pub struct PrefillSignals {
@@ -240,7 +246,9 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
 
 /// Decode placement continuation after prefill completes. [ALG-ROUTE]
 pub fn on_prefill_complete(router: &Router, _signals: &PrefillSignals) -> Option<Arc<Backend>> {
-    router.pick(Phase::Decode).or_else(|| router.pick_colocated())
+    router
+        .pick(Phase::Decode)
+        .or_else(|| router.pick_colocated())
 }
 
 /// Dispatch prefill I/O on a worker thread; invoke `on_complete` when done.
@@ -326,12 +334,14 @@ fn handle_disaggregated(
         let _ = done_tx.send(Ok(decode));
     });
 
-    let decode = match done_rx.recv().map_err(|_| io::Error::other("prefill channel"))? {
+    let decode = match done_rx
+        .recv()
+        .map_err(|_| io::Error::other("prefill channel"))?
+    {
         Ok(d) => d,
         Err(RouteError::NoBackend) => {
-            let _ = client.write_all(
-                b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
-            );
+            let _ =
+                client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             return Ok(());
         }
     };
@@ -387,7 +397,9 @@ pub fn spawn_latch_prefill_backend() -> (SocketAddr, LatchBackend) {
             while !*started {
                 started = cv.wait(started).expect("wait");
             }
-            let _ = s.write_all(b"HTTP/1.1 200 OK\r\rx-demiurge-prefill-done: 1\r\ncontent-length: 0\r\n\r\n");
+            let _ = s.write_all(
+                b"HTTP/1.1 200 OK\r\rx-demiurge-prefill-done: 1\r\ncontent-length: 0\r\n\r\n",
+            );
             let _ = s.shutdown(Shutdown::Write);
         }
     });
