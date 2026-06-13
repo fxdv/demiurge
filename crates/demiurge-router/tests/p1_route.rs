@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use demiurge_router::{
-    dispatch_prefill, route, spawn_latch_prefill_backend, Backend, RoutePath, Router,
+    dispatch_prefill, route, spawn_latch_prefill_backend, Backend, RequestId, RoutePath, Router,
 };
 
 // [ALG-ROUTE] — dispatch_prefill returns before prefill I/O completes.
@@ -18,7 +18,7 @@ fn route_returns_before_prefill_complete() {
     let completed2 = Arc::clone(&completed);
 
     let dispatch_at = Instant::now();
-    let worker = dispatch_prefill(prefill, head, 2048, move |_| {
+    let worker = dispatch_prefill(prefill, head, RequestId::new(), 2048, move |_, _| {
         completed2.store(true, Ordering::SeqCst);
     });
 

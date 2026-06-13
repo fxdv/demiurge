@@ -9,7 +9,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use demiurge_cost::{compose, BarrierFactor, Corrector, Discount, TimeCore};
+use demiurge_cost::{
+    compose, kv_breakdown, phi_barrier_marginal, BarrierFactor, Corrector, Discount, TimeCore,
+};
 use demiurge_router::{
     estimate_prompt_tokens, parse_prompt_tokens, route, select, Backend, Router,
 };
@@ -178,6 +180,19 @@ const CLASSIFY_HEAD: &[u8] =
 
 const SHORT_HEAD: &[u8] = b"GET / HTTP/1.1\r\nhost: x\r\nx-demiurge-tokens: 32\r\n\r\n";
 
+fn bench_kv_reserve() {
+    let b = std::hint::black_box(kv_breakdown(
+        std::hint::black_box(2048_u64),
+        std::hint::black_box(128_u64),
+    ));
+    let phi = phi_barrier_marginal(
+        b.kv_reserved,
+        std::hint::black_box(b.kv_reserved / 2),
+        std::hint::black_box(b.kv_reserved.saturating_mul(10)),
+    );
+    std::hint::black_box(phi);
+}
+
 fn gate_limit(gate: &Gate, settings: &Settings) -> u64 {
     let slack = if std::env::var("CI").is_ok() {
         settings.ci_slack
@@ -224,6 +239,12 @@ fn run_gate(gate: &Gate, settings: &Settings) -> Result<(SampleStats, u64), Box<
             gate.bench_iters,
             settings.samples,
             || route_long.run(),
+        ),
+        "BENCH-KV-RESERVE" => sample_ns_per_op(
+            gate.warmup_iters,
+            gate.bench_iters,
+            settings.samples,
+            bench_kv_reserve,
         ),
         other => return Err(format!("unknown bench gate id {other:?}").into()),
     };

@@ -27,7 +27,12 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod generated_params;
+mod kv;
 pub use generated_params::*;
+pub use kv::{
+    fleet_marginal_bytes, fleet_marginal_bytes_wrong, kv_breakdown, percentile90, phi_barrier,
+    phi_barrier_marginal, KvBreakdown,
+};
 
 /// Corrector half-width α, sourced from the canonical params file.
 pub const ALPHA: f64 = generated_params::CORRECTOR_ALPHA;

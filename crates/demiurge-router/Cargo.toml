@@ -16,3 +16,5 @@ path = "src/lib.rs"
 
 [dependencies]
 demiurge-cost = { path = "../demiurge-cost" }
+demiurge-control = { path = "../demiurge-control" }
+demiurge-handoff = { path = "../demiurge-handoff" }

@@ -99,12 +99,12 @@ target. Canonical $\alpha$ and related constants are generated from
 \end{table}
 
 \section{KV Cache Overhead Accounting}\label{sec:kv}
-\intent{Per-request reservation uses block-aligned token counts plus metadata and
+Per-request reservation uses block-aligned token counts plus metadata and
 fragmentation slack (parameters \texttt{kv.*}). The $\Phi$ memory-pressure
 barrier uses \textbf{fleet-aggregate} occupancy, not a sum of per-request p90
 headroom \req{DEMI-BARRIER-PHI}. Reservations are released on session end, abort,
 or TTL expiry \req{DEMI-KV-RELEASE}. Overhead terms are mandatory in the
-reservation formula \req{DEMI-KV-OVERHEAD}.}
+reservation formula \req{DEMI-KV-OVERHEAD}.
 
 \section{Cross-Tenant Cache Sharing}\label{sec:sharing}
 \intent{Prefix-cache reuse across tenants is opt-in via a Shared-Prefix Group
@@ -156,9 +156,9 @@ disaggregation \req{DEMI-SHORT-FASTPATH}.
 \end{algorithm}
 
 \subsection{KV Hand-Off}\label{sec:handoff}
-\intent{Prefill completion publishes a KV hand-off handle; decode placement never
+Prefill completion publishes a KV hand-off handle; decode placement never
 proceeds without it \req{DEMI-KV-HANDOFF}. Transport is pluggable (TCP proof,
-then RDMA).}
+then RDMA).
 
 \subsection{Greedy Pairing}\label{sec:pairing}
 \intent{Joint pf$\to$dc placement is approximated greedily: fix prefill target,

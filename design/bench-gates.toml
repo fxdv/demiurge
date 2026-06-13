@@ -58,3 +58,13 @@ summary = "route() disaggregated path — RequestId alloc + admission (no I/O)"
 warmup_iters = 5_000
 bench_iters = 50_000
 max_median_ns = 350
+
+# --- Phase 2: KV reservation + Φ barrier ---------------------------------------
+
+[[gate]]
+id = "BENCH-KV-RESERVE"
+phase = 2
+summary = "kv_breakdown() + phi_barrier_marginal() hot path"
+warmup_iters = 5_000
+bench_iters = 50_000
+max_median_ns = 200

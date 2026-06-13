@@ -74,38 +74,42 @@ tests = ["short_context_uses_colocated_path"]
 [[requirement]]
 id = "DEMI-KV-HANDOFF"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 2
 section = "8.3"
 summary = "Decode placement never proceeds without a valid KV hand-off handle."
-requires_test = false
+requires_test = true
+tests = ["decode_waits_for_handoff", "disaggregated_decode_requires_handoff"]
 
 [[requirement]]
 id = "DEMI-KV-OVERHEAD"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 2
 section = "5"
 summary = "KV reservation includes metadata and fragmentation, not raw token bytes."
-requires_test = false
+requires_test = true
+tests = ["kv_reserved_includes_overhead"]
 
 [[requirement]]
 id = "DEMI-BARRIER-PHI"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 2
 section = "5"
 summary = "Fleet aggregate KV reservation; not per-request p90 sum."
-requires_test = false
+requires_test = true
+tests = ["phi_uses_fleet_aggregate_not_p90_sum", "handoff_burst_no_oom", "phi_barrier_raises_decode_cost_under_pressure"]
 
 [[requirement]]
 id = "DEMI-KV-RELEASE"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 2
 section = "5"
 summary = "Session end, abort, or TTL always releases KV reservation."
-requires_test = false
+requires_test = true
+tests = ["reservation_released_on_session_end"]
 
 # --- Phase 3: state plane -------------------------------------------------
 

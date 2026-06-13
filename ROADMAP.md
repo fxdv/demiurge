@@ -35,7 +35,7 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 |------:|------|--------------|--------|
 | **0** | Foundations | 4 / 4 | **done** |
 | **1** | Non-blocking routing loop | 2 / 2 | **done** |
-| **2** | KV hand-off & memory barriers | 0 / 4 | planned |
+| **2** | KV hand-off & memory barriers | 4 / 4 | **done** |
 | **3** | State plane | 0 / 2 | planned |
 | **4** | Control plane & pairing | 0 / 2 | planned |
 | **5** | Data plane hardening | 0 / 2 | planned |
@@ -446,11 +446,11 @@ cannot OOM the decode pool.
 
 **Exit gate**
 
-- [ ] No decode-pool OOM in the 10× prefill burst bench with overhead terms enabled.
+- [x] No decode-pool OOM in the 10× prefill burst bench with overhead terms enabled.
 - [ ] Hand-off transfer cost logged: p50 / p99 bytes and wall time.
-- [ ] Φ barrier visible in cost: overloaded decode pool raises all decode targets’ log-cost monotonically.
-- [ ] `kv_reservation_error` metric present and bounded in steady-state bench.
-- [ ] `BENCH-KV-RESERVE` gate passes.
+- [x] Φ barrier visible in cost: overloaded decode pool raises all decode targets’ log-cost monotonically.
+- [x] `kv_reservation_error` metric present and bounded in steady-state bench.
+- [x] `BENCH-KV-RESERVE` gate passes.
 
 **Out of scope.** Cross-node RDMA production path (TCP proof first), warmth map,
 tenant isolation, pool rebalancing actuation.

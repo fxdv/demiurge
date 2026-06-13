@@ -51,6 +51,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "demiurge-control"
+version = "0.1.0"
+dependencies = [
+ "demiurge-cost",
+]
+
+[[package]]
 name = "demiurge-cost"
 version = "0.1.0"
 dependencies = [
@@ -58,10 +65,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "demiurge-handoff"
+version = "0.1.0"
+
+[[package]]
 name = "demiurge-router"
 version = "0.1.0"
 dependencies = [
+ "demiurge-control",
  "demiurge-cost",
+ "demiurge-handoff",
 ]
 
 [[package]]

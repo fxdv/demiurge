@@ -1,9 +1,9 @@
 //! Phase-aware, cost-based TCP forwarder.
 //!
 //! **Phase 0:** min-cost selection over phase pools (`select`, `Router::pick`).
-//! **Phase 1:** async disaggregated `Route` + short-context colocated fast path
-//! ([ALG-ROUTE], [DEMI-SHORT-FASTPATH]). KV hand-off, warmth override, XDP, and
-//! gossip remain design intent (see `spec/`).
+//! **Phase 2:** KV hand-off registry + reservation ledger ([DEMI-KV-HANDOFF],
+//! [DEMI-KV-OVERHEAD], [DEMI-BARRIER-PHI], [DEMI-KV-RELEASE]). Warmth override,
+//! XDP, and gossip remain design intent (see `spec/`).
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -12,8 +12,13 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use demiurge_control::{AdmitError, ReservationGuard, ReservationLedger};
 use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
-use demiurge_cost::{compose, BarrierFactor, Corrector, Cost, TimeCore};
+use demiurge_cost::{compose, kv_breakdown, BarrierFactor, Corrector, Cost, TimeCore};
+use demiurge_handoff::{parse_prefill_handoff, HandoffRegistry};
+
+pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
+pub use demiurge_handoff::{HandoffRegistry as KvHandoffRegistry, KvHandle};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -33,6 +38,10 @@ impl RequestId {
     pub fn new() -> Self {
         Self(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
     }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 impl Default for RequestId {
@@ -44,6 +53,7 @@ impl Default for RequestId {
 /// Telemetry produced when prefill finishes; feeds decode placement.
 #[derive(Debug, Clone, Copy)]
 pub struct PrefillSignals {
+    pub request_id: RequestId,
     pub prompt_tokens: u64,
 }
 
@@ -66,12 +76,16 @@ pub enum RoutePath {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteError {
     NoBackend,
+    HandoffMissing,
+    KvAdmitRejected,
 }
 
 impl std::fmt::Display for RouteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RouteError::NoBackend => write!(f, "no backend available for route"),
+            RouteError::HandoffMissing => write!(f, "prefill completed without KV hand-off"),
+            RouteError::KvAdmitRejected => write!(f, "decode pool rejected KV reservation"),
         }
     }
 }
@@ -114,25 +128,88 @@ impl Backend {
         let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
         compose(core, &[queue], &[], Corrector::identity())
     }
+
+    pub fn cost_with_barriers(&self, extra: &[BarrierFactor]) -> Cost {
+        let core = TimeCore::clamped(self.base_service_seconds);
+        let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
+        if extra.is_empty() {
+            return compose(core, &[queue], &[], Corrector::identity());
+        }
+        let mut barriers = Vec::with_capacity(1 + extra.len());
+        barriers.push(queue);
+        barriers.extend_from_slice(extra);
+        compose(core, &barriers, &[], Corrector::identity())
+    }
 }
 
-/// Select the minimum-cost backend (spec §8.1). [DEMI-ROUTE-MINCOST]
+/// Select minimum-cost backend, optionally with extra barriers (e.g. Φ). [DEMI-ROUTE-MINCOST]
 pub fn select(candidates: &[Arc<Backend>]) -> Option<Arc<Backend>> {
+    select_with_barriers(candidates, &[])
+}
+
+pub fn select_with_barriers(
+    candidates: &[Arc<Backend>],
+    extra: &[BarrierFactor],
+) -> Option<Arc<Backend>> {
     candidates
         .iter()
-        .min_by(|a, b| a.cost().ln().total_cmp(&b.cost().ln()))
+        .min_by(|a, b| {
+            a.cost_with_barriers(extra)
+                .ln()
+                .total_cmp(&b.cost_with_barriers(extra).ln())
+        })
         .cloned()
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Router {
     prefill: Vec<Arc<Backend>>,
     decode: Vec<Arc<Backend>>,
+    ledger: Option<Arc<ReservationLedger>>,
+    handoffs: Option<Arc<HandoffRegistry>>,
+    bytes_per_token: u64,
 }
 
 impl Router {
     pub fn new(prefill: Vec<Arc<Backend>>, decode: Vec<Arc<Backend>>) -> Self {
-        Self { prefill, decode }
+        Self {
+            prefill,
+            decode,
+            ledger: None,
+            handoffs: None,
+            bytes_per_token: 128,
+        }
+    }
+
+    /// Phase 2 router with KV reservation ledger and hand-off registry.
+    pub fn with_kv_pool(
+        prefill: Vec<Arc<Backend>>,
+        decode: Vec<Arc<Backend>>,
+        decode_capacity_bytes: u64,
+        bytes_per_token: u64,
+    ) -> (Self, Arc<ReservationLedger>, Arc<HandoffRegistry>) {
+        let ledger = ReservationLedger::new(decode_capacity_bytes);
+        let handoffs = HandoffRegistry::new();
+        let router = Self {
+            prefill,
+            decode,
+            ledger: Some(Arc::clone(&ledger)),
+            handoffs: Some(Arc::clone(&handoffs)),
+            bytes_per_token,
+        };
+        (router, ledger, handoffs)
+    }
+
+    pub fn ledger(&self) -> Option<&Arc<ReservationLedger>> {
+        self.ledger.as_ref()
+    }
+
+    pub fn handoffs(&self) -> Option<&Arc<HandoffRegistry>> {
+        self.handoffs.as_ref()
+    }
+
+    pub fn bytes_per_token(&self) -> u64 {
+        self.bytes_per_token
     }
 
     pub fn pool(&self, phase: Phase) -> &[Arc<Backend>] {
@@ -143,7 +220,16 @@ impl Router {
     }
 
     pub fn pick(&self, phase: Phase) -> Option<Arc<Backend>> {
-        select(self.pool(phase))
+        self.pick_with_phi(phase, None)
+    }
+
+    pub fn pick_with_phi(&self, phase: Phase, phi: Option<BarrierFactor>) -> Option<Arc<Backend>> {
+        let extra: [BarrierFactor; 1] = [phi.unwrap_or(BarrierFactor::clamped(1.0))];
+        let barriers = if phi.is_some() { &extra[..] } else { &[] };
+        match phase {
+            Phase::Prefill => select(self.pool(Phase::Prefill)),
+            Phase::Decode => select_with_barriers(self.pool(Phase::Decode), barriers),
+        }
     }
 
     /// Colocated fast path uses the prefill pool (single hop prefill+decode).
@@ -244,34 +330,100 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
     })
 }
 
-/// Decode placement continuation after prefill completes. [ALG-ROUTE]
-pub fn on_prefill_complete(router: &Router, _signals: &PrefillSignals) -> Option<Arc<Backend>> {
-    router
-        .pick(Phase::Decode)
-        .or_else(|| router.pick_colocated())
+/// Decode placement after prefill; requires valid hand-off when KV pool is wired.
+/// [ALG-ROUTE] [DEMI-KV-HANDOFF]
+pub struct DecodePlacement {
+    pub backend: Arc<Backend>,
+    reservation: Option<ReservationGuard>,
 }
 
-/// Dispatch prefill I/O on a worker thread; invoke `on_complete` when done.
-/// Returns immediately without waiting for prefill (non-blocking dispatch).
-pub fn dispatch_prefill(
-    prefill: Arc<Backend>,
-    head: Vec<u8>,
-    prompt_tokens: u64,
-    on_complete: impl FnOnce(PrefillSignals) + Send + 'static,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let _ = run_prefill_io(&prefill, &head);
-        on_complete(PrefillSignals { prompt_tokens });
+impl DecodePlacement {
+    pub fn backend(&self) -> &Arc<Backend> {
+        &self.backend
+    }
+}
+
+pub fn on_prefill_complete(
+    router: &Router,
+    signals: &PrefillSignals,
+    prefill_response: &[u8],
+    prefill_label: &str,
+) -> Result<DecodePlacement, RouteError> {
+    let (handoff, reservation) = match (&router.ledger, &router.handoffs) {
+        (Some(ledger), Some(_handoffs)) => {
+            let handoff =
+                parse_prefill_handoff(prefill_response, signals.request_id.raw(), prefill_label)
+                    .filter(|h| h.is_valid())
+                    .ok_or(RouteError::HandoffMissing)?;
+
+            let expected = kv_breakdown(signals.prompt_tokens, router.bytes_per_token).kv_reserved;
+            if handoff.byte_len < expected {
+                return Err(RouteError::HandoffMissing);
+            }
+
+            let reservation = ledger
+                .try_reserve(handoff.request_id, handoff.byte_len)
+                .map_err(|e| match e {
+                    AdmitError::OverCapacity | AdmitError::DuplicateRequest => {
+                        RouteError::KvAdmitRejected
+                    }
+                })?;
+
+            (Some(handoff), Some(reservation))
+        }
+        _ => (None, None),
+    };
+
+    let phi = router
+        .ledger
+        .as_ref()
+        .map(|l| l.phi_barrier())
+        .filter(|b| b.get() > 1.0);
+
+    let backend = router
+        .pick_with_phi(Phase::Decode, phi)
+        .or_else(|| router.pick_colocated())
+        .ok_or(RouteError::NoBackend)?;
+
+    if let Some(h) = handoff {
+        if let Some(reg) = &router.handoffs {
+            reg.publish(h);
+        }
+    }
+
+    Ok(DecodePlacement {
+        backend,
+        reservation,
     })
 }
 
-fn run_prefill_io(prefill: &Backend, head: &[u8]) -> io::Result<()> {
+/// Dispatch prefill I/O on a worker thread; invoke `on_complete` when done.
+pub fn dispatch_prefill(
+    prefill: Arc<Backend>,
+    head: Vec<u8>,
+    request_id: RequestId,
+    prompt_tokens: u64,
+    on_complete: impl FnOnce(PrefillSignals, Vec<u8>) + Send + 'static,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let response = run_prefill_io(&prefill, &head).unwrap_or_default();
+        on_complete(
+            PrefillSignals {
+                request_id,
+                prompt_tokens,
+            },
+            response,
+        );
+    })
+}
+
+fn run_prefill_io(prefill: &Backend, head: &[u8]) -> io::Result<Vec<u8>> {
     let mut upstream = TcpStream::connect(prefill.addr)?;
     upstream.write_all(head)?;
     upstream.shutdown(Shutdown::Write)?;
-    let mut drain = [0u8; 4096];
-    while upstream.read(&mut drain)? > 0 {}
-    Ok(())
+    let mut resp = Vec::new();
+    upstream.read_to_end(&mut resp)?;
+    Ok(resp)
 }
 
 fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -319,34 +471,45 @@ fn handle_disaggregated(
     head: Vec<u8>,
     router: Arc<Router>,
     prefill: Arc<Backend>,
+    request_id: RequestId,
     prompt_tokens: u64,
 ) -> io::Result<()> {
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     let router2 = Arc::clone(&router);
-    let _prefill_worker = dispatch_prefill(prefill, head.clone(), prompt_tokens, move |signals| {
-        let decode = match on_prefill_complete(&router2, &signals) {
-            Some(d) => d,
-            None => {
-                let _ = done_tx.send(Err(RouteError::NoBackend));
-                return;
-            }
-        };
-        let _ = done_tx.send(Ok(decode));
-    });
+    let prefill_label = prefill.label.clone();
+    let _prefill_worker = dispatch_prefill(
+        prefill,
+        head.clone(),
+        request_id,
+        prompt_tokens,
+        move |signals, response| {
+            let placement = match on_prefill_complete(&router2, &signals, &response, &prefill_label)
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = done_tx.send(Err(e));
+                    return;
+                }
+            };
+            let _ = done_tx.send(Ok(placement));
+        },
+    );
 
-    let decode = match done_rx
+    let placement = match done_rx
         .recv()
         .map_err(|_| io::Error::other("prefill channel"))?
     {
-        Ok(d) => d,
-        Err(RouteError::NoBackend) => {
+        Ok(p) => p,
+        Err(RouteError::NoBackend | RouteError::HandoffMissing | RouteError::KvAdmitRejected) => {
             let _ =
                 client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             return Ok(());
         }
     };
 
-    proxy_to_backend(&mut client, &head, decode.as_ref())
+    let result = proxy_to_backend(&mut client, &head, placement.backend.as_ref());
+    drop(placement.reservation);
+    result
 }
 
 fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
@@ -359,10 +522,12 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
         }
         Ok(RoutePath::Disaggregated {
             prefill,
+            request_id,
             prompt_tokens,
-            ..
-        }) => handle_disaggregated(client, head, router, prefill, prompt_tokens),
-        Err(RouteError::NoBackend) => {
+        }) => handle_disaggregated(client, head, router, prefill, request_id, prompt_tokens),
+        Err(RouteError::NoBackend)
+        | Err(RouteError::HandoffMissing)
+        | Err(RouteError::KvAdmitRejected) => {
             let _ =
                 client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             Ok(())
@@ -398,7 +563,7 @@ pub fn spawn_latch_prefill_backend() -> (SocketAddr, LatchBackend) {
                 started = cv.wait(started).expect("wait");
             }
             let _ = s.write_all(
-                b"HTTP/1.1 200 OK\r\rx-demiurge-prefill-done: 1\r\ncontent-length: 0\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\nx-demiurge-prefill-done: 1\r\nx-demiurge-kv-handle: 1\r\nx-demiurge-kv-bytes: 4096\r\ncontent-length: 0\r\n\r\n",
             );
             let _ = s.shutdown(Shutdown::Write);
         }
