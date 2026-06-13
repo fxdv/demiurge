@@ -4,6 +4,8 @@
 # quiet machine. CI multiplies by `settings.ci_slack` to absorb runner jitter.
 #
 # Run locally:  cargo xtask bench-gate
+# Tune limits:   cargo xtask bench-probe   (reports floor/median/p95 + suggestions)
+#
 # Tighten a gate only when deliberately optimizing that path; loosening requires
 # justification in the PR (regressions are not free).
 
@@ -21,7 +23,7 @@ phase = 0
 summary = "compose() with 4 barriers + 2 discounts + identity corrector"
 warmup_iters = 10_000
 bench_iters = 100_000
-max_median_ns = 120
+max_median_ns = 50
 
 [[gate]]
 id = "BENCH-SELECT-64"
@@ -29,7 +31,7 @@ phase = 0
 summary = "select() minimum-cost pick over 64 backends (cost recomputed each pick)"
 warmup_iters = 1_000
 bench_iters = 10_000
-max_median_ns = 25_000
+max_median_ns = 1_000
 
 [[gate]]
 id = "BENCH-BACKEND-COST"
@@ -37,7 +39,7 @@ phase = 0
 summary = "Backend::cost() — single target load signal"
 warmup_iters = 10_000
 bench_iters = 100_000
-max_median_ns = 150
+max_median_ns = 8
 
 # --- Phase 1: route classification + async dispatch ----------------------------
 
@@ -47,7 +49,7 @@ phase = 1
 summary = "route() — HTTP head parse + fast-path / disaggregated classification"
 warmup_iters = 5_000
 bench_iters = 50_000
-max_median_ns = 2_000
+max_median_ns = 350
 
 [[gate]]
 id = "BENCH-ROUTE-DISPATCH"
@@ -55,4 +57,4 @@ phase = 1
 summary = "route() disaggregated path — RequestId alloc + admission (no I/O)"
 warmup_iters = 5_000
 bench_iters = 50_000
-max_median_ns = 2_000
+max_median_ns = 350

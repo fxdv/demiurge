@@ -12,6 +12,7 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 | [`design/requirements.toml`](design/requirements.toml) | Every normative claim has a `status` (`implemented` \| `intended`) and a `phase`. |
 | `cargo xtask lint` | Traceability join + **phase burndown** (`phase N: implemented/total`). |
 | `cargo xtask bench-gate` | Release-mode **CPU gates** vs `design/bench-gates.toml` (median ns/op). |
+| `cargo xtask bench-probe` | Extended sampling (floor/median/p95), thin-gate flags, hot-path stack. |
 | `spec/generated/conformance_matrix.tex` | Generated snapshot of requirement status (never hand-edited). |
 | `./scripts/gate.sh` | Local mirror of CI; must pass before every merge. |
 
@@ -56,6 +57,7 @@ jitter; local runs use the nominal limits.
 
 ```bash
 cargo run --release -q --package xtask -- bench-gate   # or: ./scripts/gate.sh
+cargo run --release -q --package xtask -- bench-probe  # tune limits / find thin gates
 ```
 
 **Method.** Each gate warms up, times `bench_iters` iterations over `samples`

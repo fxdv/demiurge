@@ -3,6 +3,7 @@
 //! `gen` regenerates every artifact derived from the canonical inputs,
 //! `lint` enforces the spec/code/test traceability join, and
 //! `bench-gate` runs release-mode CPU gates from `design/bench-gates.toml`,
+//! `bench-probe` samples floor/median/p95 to tune limits and find thin gates,
 //! `load-bench` runs local TCP load scenarios, and `load-report` renders the
 //! pseudo-graphical report from the last run.
 //!
@@ -72,6 +73,7 @@ fn main() {
         "gen" => gen(),
         "lint" => lint(),
         "bench-gate" => bench_gate::bench_gate(),
+        "bench-probe" => bench_gate::bench_probe(),
         "load-bench" => {
             let ci_only = std::env::args().skip(2).any(|a| a == "--ci");
             load_bench::load_bench(ci_only)
@@ -79,7 +81,7 @@ fn main() {
         "load-report" => load_bench::load_report(),
         other => {
             eprintln!(
-                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `load-bench`, or `load-report`"
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `bench-probe`, `load-bench`, or `load-report`"
             );
             exit(2);
         }

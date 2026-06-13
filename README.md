@@ -135,6 +135,7 @@ flowchart TB
 cargo xtask gen               # regenerate everything derived from canonical inputs
 cargo xtask lint              # enforce the spec ⇄ code ⇄ test join
 cargo run --release -q --package xtask -- bench-gate  # CPU hot-path gates
+cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-gate report
 ./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
 cargo test --all              # run the executable invariants (C>0, ±α)
 ./scripts/gate.sh             # run the full local gate (mirrors CI)
