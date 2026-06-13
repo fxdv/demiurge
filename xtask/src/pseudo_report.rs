@@ -152,18 +152,17 @@ pub fn render(report: &LoadBenchReport) -> String {
             }
             let _ = writeln!(out, "{}", pad_line(line));
         }
-        if let (Some(low), Some(high), Some(ratio)) =
-            (s.accept_p99_us_low, s.accept_p99_us_high, s.accept_p99_ratio)
-        {
+        if let (Some(low), Some(high), Some(ratio)) = (
+            s.accept_p99_us_low,
+            s.accept_p99_us_high,
+            s.accept_p99_ratio,
+        ) {
             let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
             let _ = writeln!(out, "{}", pad_line("ACCEPT DECOUPLE (P1)"));
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!(
-                    "  p99 low / high (µs) .. {:>6} / {}",
-                    low, high
-                ))
+                pad_line(&format!("  p99 low / high (µs) .. {:>6} / {}", low, high))
             );
             let _ = writeln!(
                 out,

@@ -412,13 +412,8 @@ pub fn admit_disaggregated(router: &Router, head: &[u8]) -> Result<Duration, Rou
             request_id,
             prompt_tokens,
         } => {
-            let _worker = dispatch_prefill(
-                prefill,
-                head.to_vec(),
-                request_id,
-                prompt_tokens,
-                |_, _| {},
-            );
+            let _worker =
+                dispatch_prefill(prefill, head.to_vec(), request_id, prompt_tokens, |_, _| {});
         }
         RoutePath::Colocated(_) | RoutePath::DecodeOnly(_) => {
             return Err(RouteError::NoBackend);

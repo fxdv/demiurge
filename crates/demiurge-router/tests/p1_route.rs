@@ -48,9 +48,8 @@ fn accept_latency_decoupled_from_prefill_duration_under_load() {
     const WORKERS: u32 = 16;
     const PER_WORKER: u32 = 50;
     const PROMPT: u64 = 2048;
-    let head = format!(
-        "GET /long/{PROMPT} HTTP/1.1\r\nhost: x\r\nx-demiurge-tokens: {PROMPT}\r\n\r\n"
-    );
+    let head =
+        format!("GET /long/{PROMPT} HTTP/1.1\r\nhost: x\r\nx-demiurge-tokens: {PROMPT}\r\n\r\n");
 
     let p99_fast = measure_admit_p99(
         head.as_bytes(),
@@ -94,15 +93,9 @@ fn measure_admit_p99(head: &[u8], prefill_delay: Duration, workers: u32, per_wor
         let head = head.to_vec();
         handles.push(thread::spawn(move || {
             for _ in 0..per_worker {
-                match admit_disaggregated(&router, &head) {
-                    Ok(d) => {
-                        ok.fetch_add(1, Ordering::Relaxed);
-                        latencies
-                            .lock()
-                            .expect("lat")
-                            .push(d.as_micros() as u64);
-                    }
-                    Err(_) => {}
+                if let Ok(d) = admit_disaggregated(&router, &head) {
+                    ok.fetch_add(1, Ordering::Relaxed);
+                    latencies.lock().expect("lat").push(d.as_micros() as u64);
                 }
             }
         }));

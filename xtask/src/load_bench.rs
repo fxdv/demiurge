@@ -11,7 +11,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use demiurge_cost::kv_breakdown;
-use demiurge_router::{admit_disaggregated, serve, spawn_delay_backend, Backend, KvHandoffRegistry, KvReservationLedger, Router};
+use demiurge_router::{
+    admit_disaggregated, serve, spawn_delay_backend, Backend, KvHandoffRegistry,
+    KvReservationLedger, Router,
+};
 use serde::{Deserialize, Serialize};
 
 const LOAD_BENCH: &str = "design/load-bench.toml";
@@ -410,23 +413,16 @@ fn run_admit_decouple_scenario(
         let low = sc.backend_delay_us.max(1);
         vec![low, low.saturating_mul(50).max(low + 1_000)]
     };
-    let head = request_line(
-        &sc.request_style,
-        sc.long_prompt_tokens,
-        true,
-        0,
-    );
+    let head = request_line(&sc.request_style, sc.long_prompt_tokens, true, 0);
 
     let mut p99_samples = Vec::with_capacity(delays.len());
     for &delay_us in &delays {
         let router = build_admit_router(sc, delay_us);
         for i in 0..warmup {
-            let _ = admit_disaggregated(&router, &request_line(
-                &sc.request_style,
-                sc.long_prompt_tokens,
-                true,
-                u64::from(i),
-            ));
+            let _ = admit_disaggregated(
+                &router,
+                &request_line(&sc.request_style, sc.long_prompt_tokens, true, u64::from(i)),
+            );
         }
         let mut samples = run_admit_workers(
             Arc::clone(&router),
@@ -517,10 +513,7 @@ fn run_admit_workers(
             for _ in 0..requests_per_worker {
                 let _slot = inflight.as_ref().map(|g| g.enter());
                 if let Ok(d) = admit_disaggregated(router.as_ref(), &head) {
-                    latencies
-                        .lock()
-                        .expect("lat")
-                        .push(d.as_micros() as u64);
+                    latencies.lock().expect("lat").push(d.as_micros() as u64);
                 }
             }
         }));
@@ -532,7 +525,10 @@ fn run_admit_workers(
     samples
 }
 
-fn run_e2e_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
+fn run_e2e_scenario(
+    sc: &Scenario,
+    warmup: u32,
+) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
     let kv_bytes = if sc.prefill_kv_headers {
         Some(kv_breakdown(sc.long_prompt_tokens, sc.bytes_per_token).kv_reserved)
     } else {
