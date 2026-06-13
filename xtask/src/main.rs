@@ -1,7 +1,10 @@
 //! Demiurge design-conformance tool.
 //!
-//! `gen` regenerates every artifact derived from the canonical inputs, and
-//! `lint` enforces the spec/code/test traceability join.
+//! `gen` regenerates every artifact derived from the canonical inputs,
+//! `lint` enforces the spec/code/test traceability join, and
+//! `bench-gate` runs release-mode CPU gates from `design/bench-gates.toml`,
+//! `load-bench` runs local TCP load scenarios, and `load-report` renders the
+//! pseudo-graphical report from the last run.
 //!
 //! ```text
 //! design/demiurge.params.toml -> crates/demiurge-cost/src/generated_params.rs
@@ -12,7 +15,7 @@
 //! Both commands are pure functions of the repository on disk, so CI can run
 //! `gen` and fail on any diff (drift), then run `lint` (traceability).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +23,10 @@ use std::process::exit;
 
 use regex::Regex;
 use serde::Deserialize;
+
+mod bench_gate;
+mod load_bench;
+mod pseudo_report;
 
 const PARAMS: &str = "design/demiurge.params.toml";
 const REQS: &str = "design/requirements.toml";
@@ -42,6 +49,10 @@ struct Requirement {
     kind: String,
     #[serde(default = "default_status")]
     status: String,
+    /// Development phase this requirement belongs to (see ROADMAP.md). Phase 0
+    /// is the shipped foundation; higher phases are the burndown.
+    #[serde(default)]
+    phase: u32,
     section: String,
     #[allow(dead_code)]
     summary: String,
@@ -60,8 +71,16 @@ fn main() {
     let res = match cmd.as_str() {
         "gen" => gen(),
         "lint" => lint(),
+        "bench-gate" => bench_gate::bench_gate(),
+        "load-bench" => {
+            let ci_only = std::env::args().skip(2).any(|a| a == "--ci");
+            load_bench::load_bench(ci_only)
+        }
+        "load-report" => load_bench::load_report(),
         other => {
-            eprintln!("xtask: unknown subcommand {other:?}; expected `gen` or `lint`");
+            eprintln!(
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `load-bench`, or `load-report`"
+            );
             exit(2);
         }
     };
@@ -337,6 +356,21 @@ fn lint() -> Result<(), Box<dyn Error>> {
             "lint: OK — {} requirements ({impl_n} implemented & test-backed, {intended_n} intended), all referenced.",
             declared.len()
         );
+
+        // Per-phase burndown (see ROADMAP.md): implemented / total per phase.
+        let mut by_phase: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
+        for r in &reqs.requirement {
+            let e = by_phase.entry(r.phase).or_default();
+            e.1 += 1;
+            if r.status == "implemented" {
+                e.0 += 1;
+            }
+        }
+        let phases: Vec<String> = by_phase
+            .iter()
+            .map(|(p, (done, total))| format!("P{p}: {done}/{total}"))
+            .collect();
+        println!("lint: phase burndown — {}", phases.join("  "));
         Ok(())
     } else {
         for e in &errors {

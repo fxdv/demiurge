@@ -17,6 +17,9 @@ the code is checked against it in CI. A few rules keep the two from drifting.
    `cargo xtask lint` must pass.
 4. **Decisions go in ADRs**, not in the spec. The spec is steady-state truth;
    the *why* is an architecture decision record.
+5. **Phased delivery.** Pick work from [`ROADMAP.md`](ROADMAP.md); register new
+   requirement IDs before implementing; close a phase by flipping `status` to
+   `implemented` with named tests.
 
 ## Before you push
 
@@ -26,7 +29,8 @@ the code is checked against it in CI. A few rules keep the two from drifting.
 ```
 
 `scripts/gate.sh` regenerates artifacts, fails on drift, runs the traceability
-lint, `cargo fmt --check`, `cargo clippy -D warnings`, the test suite, and (if
+lint, `cargo fmt --check`, release build, `cargo clippy -D warnings`, the test
+suite, CPU bench gates, load regression smoke (`load-bench --ci`), and (if
 `latexmk` is installed) compiles the spec.
 
 ## CI gates
@@ -34,5 +38,5 @@ lint, `cargo fmt --check`, `cargo clippy -D warnings`, the test suite, and (if
 | Workflow | What it enforces |
 |----------|------------------|
 | `design-conformance` | generated artifacts are not stale; spec ⇄ code ⇄ test links are intact |
-| `ci` | `fmt`, `clippy -D warnings`, tests |
+| `ci` | **Build** (release workspace + binary check); **lint & test**; **regression** (CPU bench gates + load smoke) |
 | `spec` | the design PDF compiles from regenerated inputs |

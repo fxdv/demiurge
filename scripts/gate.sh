@@ -22,11 +22,21 @@ cargo xtask lint
 bold "format check"
 cargo fmt --all -- --check
 
+bold "build (release workspace)"
+cargo build --release --workspace
+test -x target/release/demiurge-router
+
 bold "clippy (warnings are errors)"
 cargo clippy --all-targets --all-features -- -D warnings
 
 bold "tests (incl. invariant property tests)"
 cargo test --all
+
+bold "CPU bench gates (release hot paths)"
+cargo run --release -q --package xtask -- bench-gate
+
+bold "load regression smoke (CI scenarios)"
+cargo run --release -q --package xtask -- load-bench --ci
 
 bold "spec build (optional)"
 if command -v latexmk >/dev/null 2>&1; then

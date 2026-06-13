@@ -62,6 +62,8 @@ Demiurge is built to exploit exactly those three facts.
 | Cost-factor algebra (`demiurge-cost`), log-space, positive by construction, fail-expensive | **implemented + property-tested** |
 | Minimal forwarder (`demiurge-router`): phase pools, least-cost selection, live in-flight load | **implemented + tested** |
 | Design-conformance tooling (`xtask gen`/`lint`), CI, spec PDF | **implemented** |
+| CPU bench gates (`bench-gates.toml`, `cargo xtask bench-gate`) | **implemented** — in CI |
+| Local load bench (`load-bench.sh`, pseudo report) | **implemented** — CI runs `load-bench --ci` smoke |
 | XDP/L4 admission, io_uring data plane, RCU snapshots | design intent |
 | KV warmth map, RDMA hand-off, live migration | design intent |
 | Cross-tenant cache sharing, async prefill dispatch, learned corrector | design intent |
@@ -115,13 +117,16 @@ flowchart TB
 | Path | What it is |
 |------|------------|
 | [`design/demiurge.params.toml`](design/demiurge.params.toml) | **Single source of truth** for every tunable constant. |
-| [`design/requirements.toml`](design/requirements.toml) | Registry of normative/structural requirement IDs. |
+| [`design/bench-gates.toml`](design/bench-gates.toml) | CPU hot-path gate thresholds (median ns/op, release). |
+| [`design/load-bench.toml`](design/load-bench.toml) | Local TCP load scenarios + optional p99 soft gates. |
+| [`design/requirements.toml`](design/requirements.toml) | Registry of normative/structural requirement IDs + phase tags. |
+| [`ROADMAP.md`](ROADMAP.md) | **Concrete build plan** — phased deliverables, gates, burndown. |
 | [`spec/`](spec/) | The LaTeX design spec + the `\req{}` macro. |
 | `spec/generated/` | `@generated` parameter & conformance tables — never hand-edited. |
 | [`crates/demiurge-cost/`](crates/demiurge-cost/) | The cost-function factor algebra and its property tests. |
 | [`crates/demiurge-router/`](crates/demiurge-router/) | Minimal phase-aware, cost-based forwarder (lib + binary). |
 | [`xtask/`](xtask/) | `gen` (regenerate artifacts) and `lint` (traceability) commands. |
-| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh` — local developer ergonomics. |
+| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh`, `load-bench.sh` — local developer ergonomics. |
 
 ## Quickstart
 
@@ -129,6 +134,8 @@ flowchart TB
 ./scripts/bootstrap.sh        # once: toolchain components + pre-push gate hook
 cargo xtask gen               # regenerate everything derived from canonical inputs
 cargo xtask lint              # enforce the spec ⇄ code ⇄ test join
+cargo run --release -q --package xtask -- bench-gate  # CPU hot-path gates
+./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
 cargo test --all              # run the executable invariants (C>0, ±α)
 ./scripts/gate.sh             # run the full local gate (mirrors CI)
 ```
@@ -177,6 +184,7 @@ backend look cheap. The properties are asserted three ways:
 |-------|-----------|----------------|
 | Compile | positive-factor newtypes | structurally illegal cost terms |
 | CI | `proptest` (`[DEMI-COST-POS]`, `[DEMI-CORR-CLAMP]`) | regressions in composition |
+| CI | `cargo xtask bench-gate` | hot-path CPU regressions (median ns/op) |
 | Prod | `FACTOR_CLAMP_EVENTS` metric / alarms | drift the first two miss |
 
 ### Traceability: spec ⇄ code ⇄ test
@@ -215,9 +223,12 @@ looser.
 
 ## Roadmap & gates
 
-- **Day 30 — Survival.** Two-pool split, RDMA hand-off, `Φ` barrier. *Gate:* no decode-pool OOM under a 10× prefill burst; transfer cost characterized.
-- **Day 60 — Correctness.** Warmth map, analytic cost, transfer-aware pairing, pool-ratio controller; corrector off. *Gate:* `C>0` green in CI and shadow; pairing-regret p95 within budget.
-- **Day 90 — Exit.** Data-plane snapshots, SLO flow control, tenant isolation, abortable migration, corrector in shadow. *Exit:* targets met with corrector off; corrector adds shadow gain without violating its clamp.
+The full phased plan — deliverables, requirement IDs, exit gates, cross-cutting
+plans (short-context fast path, KV overhead accounting, dynamic pool
+rebalancing), and the live burndown — lives in **[`ROADMAP.md`](ROADMAP.md)**.
+
+Track progress: `cargo xtask lint` prints per-phase burndown
+(`phase 0: 4/4`, `phase 1: 0/1`, …).
 
 ## Contributing
 

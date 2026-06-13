@@ -2,16 +2,21 @@
 #
 # Each `id` must be referenced verbatim from the spec (\req{ID}) and/or code
 # ([ID]). `status` is "implemented" (backed by code + named tests) or "intended"
-# (design intent, no code yet). `cargo xtask lint` enforces:
+# (design intent, no code yet). `phase` ties the requirement to a ROADMAP.md
+# phase; the conformance matrix + `cargo xtask lint` burndown track progress.
+# `cargo xtask lint` enforces:
 #   - implemented  => requires_test = true, and every name in `tests` exists as
 #                     a real #[test]/proptest function;
 #   - intended     => requires_test = false;
 #   - every id is referenced somewhere; no reference is undeclared.
 
+# --- Phase 0: foundations (shipped) ---------------------------------------
+
 [[requirement]]
 id = "DEMI-COST-POS"
 kind = "normative"
 status = "implemented"
+phase = 0
 section = "4.3, 4.5"
 summary = "Cost is strictly positive by construction (log-space representation)."
 requires_test = true
@@ -21,6 +26,7 @@ tests = ["cost_strictly_positive", "cost_log_is_finite_at_extremes"]
 id = "DEMI-CORR-CLAMP"
 kind = "normative"
 status = "implemented"
+phase = 0
 section = "4.5, 7"
 summary = "Corrector multiplier is bounded to [1-alpha, 1+alpha]."
 requires_test = true
@@ -30,6 +36,7 @@ tests = ["corrector_multiplier_bounded"]
 id = "DEMI-FAIL-EXPENSIVE"
 kind = "normative"
 status = "implemented"
+phase = 0
 section = "4.5"
 summary = "Invalid signals saturate toward expensive; never cheapen a target."
 requires_test = true
@@ -39,31 +46,41 @@ tests = ["invalid_signal_never_cheapens"]
 id = "DEMI-ROUTE-MINCOST"
 kind = "normative"
 status = "implemented"
+phase = 0
 section = "8"
 summary = "The router forwards to the minimum-cost backend in the chosen pool."
 requires_test = true
 tests = ["selects_min_cost_backend"]
 
-[[requirement]]
-id = "DEMI-S1-DOMAIN"
-kind = "normative"
-status = "intended"
-section = "6.1"
-summary = "A non-member never obtains a shared cache-domain key."
-requires_test = false
-
-[[requirement]]
-id = "DEMI-MIG-SUBITL"
-kind = "normative"
-status = "intended"
-section = "8"
-summary = "Migration cutover never commits unless est <= eps * ITL budget."
-requires_test = false
+# --- Phase 1: production routing loop -------------------------------------
 
 [[requirement]]
 id = "ALG-ROUTE"
 kind = "structural"
 status = "intended"
+phase = 1
 section = "8"
 summary = "Route admits, dispatches prefill asynchronously, and returns immediately."
+requires_test = false
+
+# --- Phase 6: live migration ----------------------------------------------
+
+[[requirement]]
+id = "DEMI-MIG-SUBITL"
+kind = "normative"
+status = "intended"
+phase = 6
+section = "8"
+summary = "Migration cutover never commits unless est <= eps * ITL budget."
+requires_test = false
+
+# --- Phase 7: multi-tenancy & cache security ------------------------------
+
+[[requirement]]
+id = "DEMI-S1-DOMAIN"
+kind = "normative"
+status = "intended"
+phase = 7
+section = "6.1"
+summary = "A non-member never obtains a shared cache-domain key."
 requires_test = false

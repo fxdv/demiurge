@@ -1,0 +1,40 @@
+# design/bench-gates.toml — CPU performance gates for hot-path code.
+#
+# Thresholds are median nanoseconds per operation measured in `--release` on a
+# quiet machine. CI multiplies by `settings.ci_slack` to absorb runner jitter.
+#
+# Run locally:  cargo xtask bench-gate
+# Tighten a gate only when deliberately optimizing that path; loosening requires
+# justification in the PR (regressions are not free).
+
+[settings]
+# Multiplier applied to max_median_ns when CI=true.
+ci_slack = 2.0
+# Number of timed samples; median is taken.
+samples = 5
+
+# --- Phase 0: cost algebra + router selection --------------------------------
+
+[[gate]]
+id = "BENCH-COMPOSE-8"
+phase = 0
+summary = "compose() with 4 barriers + 2 discounts + identity corrector"
+warmup_iters = 10_000
+bench_iters = 100_000
+max_median_ns = 120
+
+[[gate]]
+id = "BENCH-SELECT-64"
+phase = 0
+summary = "select() minimum-cost pick over 64 backends (cost recomputed each pick)"
+warmup_iters = 1_000
+bench_iters = 10_000
+max_median_ns = 25_000
+
+[[gate]]
+id = "BENCH-BACKEND-COST"
+phase = 0
+summary = "Backend::cost() — single target load signal"
+warmup_iters = 10_000
+bench_iters = 100_000
+max_median_ns = 150

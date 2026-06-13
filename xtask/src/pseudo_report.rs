@@ -1,0 +1,170 @@
+//! Pseudo-graphical ASCII report for load-bench results.
+
+use std::fmt::Write as FmtWrite;
+
+use crate::load_bench::LoadBenchReport;
+
+const W: usize = 72;
+
+fn pad_line(inner: &str) -> String {
+    let content = if inner.len() > W - 4 {
+        format!("{}…", &inner[..W - 5])
+    } else {
+        inner.to_string()
+    };
+    format!("║ {content:<width$} ║", width = W - 4)
+}
+
+fn bar(f: &mut String, label: &str, value: f64, max: f64, width: usize) {
+    let frac = if max > 0.0 {
+        (value / max).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let filled = ((frac * width as f64).round() as usize).min(width);
+    let empty = width - filled;
+    let _ = write!(
+        f,
+        "{label:<14} {}{} {:>6.0}",
+        "█".repeat(filled),
+        "░".repeat(empty),
+        value
+    );
+}
+
+fn histogram(f: &mut String, latencies_us: &[u64], buckets: usize) {
+    if latencies_us.is_empty() {
+        let _ = writeln!(f, "  (no samples)");
+        return;
+    }
+    let max = *latencies_us.iter().max().unwrap_or(&1);
+    let min = *latencies_us.iter().min().unwrap_or(&0);
+    let span = (max - min).max(1);
+    let mut counts = vec![0u64; buckets];
+    for &us in latencies_us {
+        let b = ((us - min) as f64 / span as f64 * buckets as f64) as usize;
+        counts[b.min(buckets - 1)] += 1;
+    }
+    let peak = *counts.iter().max().unwrap_or(&1).max(&1);
+    let bar_w = 18usize;
+    for (i, &c) in counts.iter().enumerate() {
+        let lo = min + span * i as u64 / buckets as u64;
+        let hi = min + span * (i + 1) as u64 / buckets as u64;
+        let label = format!("{:>4}-{:>4}µs", lo, hi);
+        bar(f, &label, c as f64, peak as f64, bar_w);
+    }
+}
+
+fn fmt_ms(us: u64) -> String {
+    format!("{:.2}", us as f64 / 1000.0)
+}
+
+pub fn render(report: &LoadBenchReport) -> String {
+    let mut out = String::new();
+
+    let _ = writeln!(out, "╔{}╗", "═".repeat(W - 2));
+    let _ = writeln!(
+        out,
+        "{}",
+        pad_line("DEMIURGE · LOCAL LOAD BENCH · PSEUDO REPORT")
+    );
+    let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
+    let _ = writeln!(
+        out,
+        "{}",
+        pad_line(&format!("generated: {}", report.generated_at))
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        pad_line(&format!("host:      {}", report.hostname))
+    );
+    let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
+
+    for (idx, s) in report.scenarios.iter().enumerate() {
+        if idx > 0 {
+            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+        }
+        let _ = writeln!(out, "{}", pad_line(&format!("scenario:  {}", s.id)));
+        let _ = writeln!(out, "{}", pad_line(&format!("summary:   {}", s.summary)));
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(&format!(
+                "topology:  {} backends · {} workers × {} reqs · delay {}µs",
+                s.backends, s.concurrency, s.requests_per_worker, s.backend_delay_us
+            ))
+        );
+        let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+        let _ = writeln!(out, "{}", pad_line("THROUGHPUT"));
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(&format!("  total .............. {:>8}", s.total_requests))
+        );
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(&format!(
+                "  ok / errors ........ {:>8} / {}",
+                s.ok, s.errors
+            ))
+        );
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(&format!("  wall ............... {:>8.2}s", s.duration_secs))
+        );
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(&format!("  req/s .............. {:>8.1}", s.req_per_sec))
+        );
+        let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+        let _ = writeln!(out, "{}", pad_line("LATENCY"));
+        let _ = writeln!(out, "{}", pad_line("  min   p50   p90   p99   max  (ms)"));
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(&format!(
+                "  {:>5} {:>5} {:>5} {:>5} {:>5}",
+                fmt_ms(s.min_us),
+                fmt_ms(s.p50_us),
+                fmt_ms(s.p90_us),
+                fmt_ms(s.p99_us),
+                fmt_ms(s.max_us),
+            ))
+        );
+        let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+        let _ = writeln!(out, "{}", pad_line("HISTOGRAM (latency µs)"));
+        let mut hist = String::new();
+        histogram(&mut hist, &s.latencies_us, 8);
+        for line in hist.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let _ = writeln!(out, "{}", pad_line(line));
+        }
+        if let Some(limit) = s.max_p99_ms {
+            let gate = if s.ok == 0 {
+                "FAIL ✗ (no ok)"
+            } else if s.p99_us as f64 / 1000.0 <= limit {
+                "PASS ✓"
+            } else {
+                "FAIL ✗"
+            };
+            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+            let _ = writeln!(
+                out,
+                "{}",
+                pad_line(&format!(
+                    "soft gate p99 ≤ {limit:.1}ms → {gate} ({:.2}ms)",
+                    s.p99_us as f64 / 1000.0
+                ))
+            );
+        }
+    }
+
+    let _ = writeln!(out, "╚{}╝", "═".repeat(W - 2));
+    out
+}

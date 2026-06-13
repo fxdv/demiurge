@@ -1,0 +1,65 @@
+# design/load-bench.toml — local end-to-end load scenarios for demiurge-router.
+#
+# Run:  ./scripts/load-bench.sh
+#       (or: cargo xtask load-bench && cargo xtask load-report)
+#
+# Not part of ./scripts/gate.sh full suite — use `load-bench --ci` in CI regression.
+# Optional soft gates (max_p99_ms): advisory locally; enforced when `--ci` is passed.
+
+[settings]
+report_dir = "target/load-bench"
+warmup_requests = 16
+startup_delay_ms = 100
+# When true, max_p99_ms violations fail the bench step (local full runs only).
+gate_strict = false
+
+# --- CI regression (load-bench --ci) ----------------------------------------
+
+[[scenario]]
+id = "LOAD-CI-SMOKE"
+ci = true
+summary = "CI smoke: small pool, bounded p99, zero errors required"
+backends = 2
+base_cost_seconds = 0.01
+cost_step_seconds = 0.01
+backend_delay_us = 0
+concurrency = 8
+requests_per_worker = 25
+max_p99_ms = 500.0
+
+# --- Local scenarios (./scripts/load-bench.sh) ------------------------------
+
+[[scenario]]
+id = "LOAD-STEADY-PREFILL"
+summary = "Sustained prefill GETs, 4-backend pool, min-cost selection"
+backends = 4
+base_cost_seconds = 0.01
+cost_step_seconds = 0.005
+backend_delay_us = 0
+concurrency = 16
+requests_per_worker = 50
+# Soft local gate (optional). Comment out to disable.
+max_p99_ms = 100.0
+
+[[scenario]]
+id = "LOAD-MIXED-PHASE"
+summary = "70% prefill / 30% decode classification + routing"
+backends = 3
+base_cost_seconds = 0.01
+cost_step_seconds = 0.003
+backend_delay_us = 50
+concurrency = 24
+requests_per_worker = 80
+prefill_fraction = 0.7
+max_p99_ms = 150.0
+
+[[scenario]]
+id = "LOAD-HOT-SPOT"
+summary = "Skewed pool (1 cheap + 3 dear) under high concurrency"
+backends = 4
+base_cost_seconds = 0.005
+cost_step_seconds = 0.25
+backend_delay_us = 0
+concurrency = 48
+requests_per_worker = 60
+max_p99_ms = 200.0
