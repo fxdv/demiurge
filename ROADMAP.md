@@ -121,6 +121,7 @@ backend threads do not accumulate across scenarios. Thin-place scouts (local onl
 | `LOAD-LARGE-POOL` | `select()` over 64 backends (colocated short-context path) |
 | `LOAD-CLASSIFY-MIX` | Mixed short/long token headers + KV hand-off on long requests |
 | `LOAD-DISAGG-CHAIN` | Full disagg chain with backend I/O delay |
+| `LOAD-P1-ACCEPT-DECOUPLE` | P1 exit: admit p99 decoupled from 50× prefill backend delay |
 
 KV scenarios log hand-off transfer telemetry (bytes/wall p50/p99) — Phase 2 exit gate.
 
@@ -444,7 +445,7 @@ fast path** classifier (colocated branch only; warmth override waits for Phase 3
 **Exit gate**
 
 - [x] `ALG-ROUTE` and `DEMI-SHORT-FASTPATH` → `implemented` with named tests.
-- [ ] Under synthetic load, accept latency p99 does not track prefill duration.
+- [x] Under synthetic load, accept latency p99 does not track prefill duration.
 - [x] Decode placement runs only after prefill completion event (disaggregated path).
 - [x] Short prompts never allocate a cross-pool hand-off handle.
 - [x] `BENCH-CLASSIFY` and `BENCH-ROUTE-DISPATCH` gates pass.

@@ -130,6 +130,23 @@ requests_per_worker = 15
 max_p99_ms = 120.0
 
 [[scenario]]
+id = "LOAD-P1-ACCEPT-DECOUPLE"
+summary = "P1 exit: admit+dispatch p99 invariant to 50× prefill backend delay"
+measure = "admit_decouple"
+backends = 2
+decode_backends = 2
+base_cost_seconds = 0.01
+cost_step_seconds = 0.002
+request_style = "long_tokens"
+long_prompt_tokens = 2048
+backend_delay_us = 500
+prefill_delay_sweep_us = [500, 25000]
+max_accept_p99_ratio = 8.0
+concurrency = 16
+requests_per_worker = 50
+max_p99_ms = 50.0
+
+[[scenario]]
 id = "LOAD-HOT-SPOT"
 summary = "Skewed pool (1 cheap + 3 dear) under high concurrency (run last — heavy TCP churn)"
 backends = 4

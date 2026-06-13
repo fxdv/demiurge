@@ -57,7 +57,7 @@ phase = 1
 section = "8.2"
 summary = "Route admits, dispatches prefill asynchronously, and returns immediately."
 requires_test = true
-tests = ["route_returns_before_prefill_complete"]
+tests = ["route_returns_before_prefill_complete", "accept_latency_decoupled_from_prefill_duration_under_load"]
 
 [[requirement]]
 id = "DEMI-SHORT-FASTPATH"

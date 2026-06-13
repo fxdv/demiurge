@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use demiurge_cost::kv_breakdown;
-use demiurge_router::{serve, Backend, KvHandoffRegistry, KvReservationLedger, Router};
+use demiurge_router::{admit_disaggregated, serve, spawn_delay_backend, Backend, KvHandoffRegistry, KvReservationLedger, Router};
 use serde::{Deserialize, Serialize};
 
 const LOAD_BENCH: &str = "design/load-bench.toml";
@@ -74,6 +74,15 @@ struct Scenario {
     /// Cap concurrent in-flight TCP requests (0 = unlimited).
     #[serde(default)]
     max_inflight: u32,
+    /// `e2e` (default) or `admit_decouple` (P1 accept-path gate).
+    #[serde(default = "default_measure")]
+    measure: String,
+    /// Prefill backend delays (µs) for `admit_decouple`; compares p99 ratio across arms.
+    #[serde(default)]
+    prefill_delay_sweep_us: Vec<u64>,
+    /// Max p99_slow / p99_fast for `admit_decouple` (default 8.0).
+    #[serde(default)]
+    max_accept_p99_ratio: Option<f64>,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -90,6 +99,10 @@ fn default_bytes_per_token() -> u64 {
 
 fn default_long_tokens() -> u64 {
     2048
+}
+
+fn default_measure() -> String {
+    "e2e".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +144,12 @@ pub struct ScenarioResult {
     pub handoff_wall_us_p50: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff_wall_us_p99: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_p99_us_low: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_p99_us_high: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_p99_ratio: Option<f64>,
     #[serde(default)]
     pub latencies_us: Vec<u64>,
 }
@@ -375,6 +394,145 @@ impl PeakGuard {
 }
 
 fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
+    if sc.measure == "admit_decouple" {
+        return run_admit_decouple_scenario(sc, warmup);
+    }
+    run_e2e_scenario(sc, warmup)
+}
+
+fn run_admit_decouple_scenario(
+    sc: &Scenario,
+    warmup: u32,
+) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
+    let delays = if sc.prefill_delay_sweep_us.len() >= 2 {
+        sc.prefill_delay_sweep_us.clone()
+    } else {
+        let low = sc.backend_delay_us.max(1);
+        vec![low, low.saturating_mul(50).max(low + 1_000)]
+    };
+    let head = request_line(
+        &sc.request_style,
+        sc.long_prompt_tokens,
+        true,
+        0,
+    );
+
+    let mut p99_samples = Vec::with_capacity(delays.len());
+    for &delay_us in &delays {
+        let router = build_admit_router(sc, delay_us);
+        for i in 0..warmup {
+            let _ = admit_disaggregated(&router, &request_line(
+                &sc.request_style,
+                sc.long_prompt_tokens,
+                true,
+                u64::from(i),
+            ));
+        }
+        let mut samples = run_admit_workers(
+            Arc::clone(&router),
+            &head,
+            sc.concurrency,
+            sc.requests_per_worker,
+            None,
+        );
+        samples.sort_unstable();
+        p99_samples.push(percentile(&samples, 0.99));
+        let drain_ms = delay_us / 1000 + 500;
+        thread::sleep(Duration::from_millis(drain_ms));
+    }
+
+    let p99_low = *p99_samples.first().unwrap_or(&1);
+    let p99_high = *p99_samples.last().unwrap_or(&1);
+    let ratio = p99_high as f64 / p99_low.max(1) as f64;
+
+    let total = u64::from(sc.concurrency) * u64::from(sc.requests_per_worker) * delays.len() as u64;
+    Ok(ScenarioResult {
+        id: sc.id.clone(),
+        summary: sc.summary.clone(),
+        backends: sc.backends,
+        decode_backends: sc.decode_backends,
+        concurrency: sc.concurrency,
+        requests_per_worker: sc.requests_per_worker,
+        backend_delay_us: sc.backend_delay_us,
+        request_style: sc.request_style.clone(),
+        use_kv_pool: false,
+        total_requests: total,
+        ok: total,
+        errors: 0,
+        duration_secs: 0.0,
+        req_per_sec: 0.0,
+        min_us: p99_low,
+        p50_us: p99_low,
+        p90_us: p99_high,
+        p99_us: p99_high,
+        max_us: p99_high,
+        max_p99_ms: sc.max_p99_ms,
+        kv_bytes_reserved_peak: None,
+        kv_admit_rejects: None,
+        handoff_transfer_count: None,
+        handoff_bytes_p50: None,
+        handoff_bytes_p99: None,
+        handoff_wall_us_p50: None,
+        handoff_wall_us_p99: None,
+        accept_p99_us_low: Some(p99_low),
+        accept_p99_us_high: Some(p99_high),
+        accept_p99_ratio: Some(ratio),
+        latencies_us: p99_samples,
+    })
+}
+
+fn build_admit_router(sc: &Scenario, prefill_delay_us: u64) -> Arc<Router> {
+    let prefill: Vec<Arc<Backend>> = (0..sc.backends.max(1))
+        .map(|i| {
+            let addr = spawn_delay_backend(Duration::from_micros(prefill_delay_us));
+            let cost = sc.base_cost_seconds + sc.cost_step_seconds * f64::from(i);
+            Backend::new(format!("pf{i}"), addr, cost)
+        })
+        .collect();
+    let decode: Vec<Arc<Backend>> = (0..sc.decode_backends.max(1))
+        .map(|i| {
+            let addr = spawn_delay_backend(Duration::from_micros(1));
+            let cost = sc.base_cost_seconds + sc.cost_step_seconds * f64::from(i);
+            Backend::new(format!("dc{i}"), addr, cost)
+        })
+        .collect();
+    Arc::new(Router::new(prefill, decode))
+}
+
+fn run_admit_workers(
+    router: Arc<Router>,
+    head: &[u8],
+    concurrency: u32,
+    requests_per_worker: u32,
+    inflight: Option<Arc<InflightGate>>,
+) -> Vec<u64> {
+    let latencies = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::new();
+    for _ in 0..concurrency {
+        let latencies = Arc::clone(&latencies);
+        let inflight = inflight.clone();
+        let head = head.to_vec();
+        let router = Arc::clone(&router);
+        handles.push(thread::spawn(move || {
+            for _ in 0..requests_per_worker {
+                let _slot = inflight.as_ref().map(|g| g.enter());
+                if let Ok(d) = admit_disaggregated(router.as_ref(), &head) {
+                    latencies
+                        .lock()
+                        .expect("lat")
+                        .push(d.as_micros() as u64);
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.join().expect("worker");
+    }
+    let samples = latencies.lock().expect("lat").clone();
+    samples
+}
+
+fn run_e2e_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
     let kv_bytes = if sc.prefill_kv_headers {
         Some(kv_breakdown(sc.long_prompt_tokens, sc.bytes_per_token).kv_reserved)
     } else {
@@ -518,6 +676,9 @@ fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn st
         handoff_bytes_p99: transfer.map(|m| m.bytes_p99),
         handoff_wall_us_p50: transfer.map(|m| m.wall_us_p50),
         handoff_wall_us_p99: transfer.map(|m| m.wall_us_p99),
+        accept_p99_us_low: None,
+        accept_p99_us_high: None,
+        accept_p99_ratio: None,
         latencies_us: samples,
     })
 }
@@ -723,6 +884,24 @@ fn load_bench_inner(
                 result.handoff_wall_us_p50.unwrap_or(0),
                 result.handoff_wall_us_p99.unwrap_or(0),
             );
+        }
+        if let (Some(ratio), Some(limit)) = (result.accept_p99_ratio, sc.max_accept_p99_ratio) {
+            if ratio > limit {
+                eprintln!(
+                    "load-bench: {} FAIL — accept p99 ratio {ratio:.2} > {limit:.1} ({}µs / {}µs)",
+                    result.id,
+                    result.accept_p99_us_low.unwrap_or(0),
+                    result.accept_p99_us_high.unwrap_or(0),
+                );
+                gate_failures += 1;
+            } else {
+                eprintln!(
+                    "load-bench: {} accept decouple OK — p99 ratio {ratio:.2} ≤ {limit:.1} ({}µs / {}µs)",
+                    result.id,
+                    result.accept_p99_us_low.unwrap_or(0),
+                    result.accept_p99_us_high.unwrap_or(0),
+                );
+            }
         }
         if let Some(limit) = result.max_p99_ms {
             if result.ok == 0 {

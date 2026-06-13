@@ -402,6 +402,31 @@ pub fn on_prefill_complete(
     })
 }
 
+/// Classify and spawn async prefill; return before prefill I/O completes.
+/// [ALG-ROUTE]
+pub fn admit_disaggregated(router: &Router, head: &[u8]) -> Result<Duration, RouteError> {
+    let start = std::time::Instant::now();
+    match route(router, head)? {
+        RoutePath::Disaggregated {
+            prefill,
+            request_id,
+            prompt_tokens,
+        } => {
+            let _worker = dispatch_prefill(
+                prefill,
+                head.to_vec(),
+                request_id,
+                prompt_tokens,
+                |_, _| {},
+            );
+        }
+        RoutePath::Colocated(_) | RoutePath::DecodeOnly(_) => {
+            return Err(RouteError::NoBackend);
+        }
+    }
+    Ok(start.elapsed())
+}
+
 /// Dispatch prefill I/O on a worker thread; invoke `on_complete` when done.
 pub fn dispatch_prefill(
     prefill: Arc<Backend>,
