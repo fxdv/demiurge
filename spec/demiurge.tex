@@ -45,11 +45,16 @@ factors:
   \qquad B_m \ge 1,\; D_c \in (0,1],\; \delta \in [1-\alpha,\,1+\alpha].
 \]
 Because $T_{\text{core}}>0$ and every factor is strictly positive, $C(r,q)>0$ by
-construction \req{DEMI-COST-POS}. Rewards enter only as multiplicative discounts
-$D_c\in(0,1]$, never as subtractions, so no reward can drive cost negative and
-invert the corrector. The learned corrector $\delta$ is clamped to
-$[1-\alpha,1+\alpha]$ \req{DEMI-CORR-CLAMP}, so it can adjust the analytic cost by
-at most a bounded multiplicative envelope.
+construction \req{DEMI-COST-POS}. The implementation represents cost by its
+natural logarithm and composes by \emph{adding} logs, so the guarantee survives
+floating point: there is no linear product to underflow to $0$ or overflow to
+$\infty$, and comparisons use the exact log. Rewards enter only as multiplicative
+discounts $D_c\in(0,1]$, never as subtractions, so no reward can drive cost
+negative and invert the corrector. The learned corrector $\delta$ is clamped to
+$[1-\alpha,1+\alpha]$ \req{DEMI-CORR-CLAMP}, bounding its multiplicative effect.
+Invalid or non-finite signals on the hot path saturate \emph{toward expensive}
+\req{DEMI-FAIL-EXPENSIVE}, so a broken metric can never make a target look
+artificially cheap and attract traffic to a sick backend.
 
 The canonical parameters and the conformance matrix below are generated from the
 single source of truth by \texttt{cargo xtask gen}:
@@ -63,8 +68,18 @@ single source of truth by \texttt{cargo xtask gen}:
 \begin{table}[h]
   \centering
   \input{generated/conformance_matrix.tex}
-  \caption{Conformance matrix (generated from \texttt{design/requirements.toml}).}
+  \caption{Design-intent \& conformance matrix (generated). \emph{Implemented}
+  requirements are backed by code and named tests verified in CI; \emph{intended}
+  requirements describe design intent for which no code exists yet.}
 \end{table}
+
+\paragraph{Implementation status.} This document is the target design. Today the
+repository implements only the cost-factor algebra
+(\req{DEMI-COST-POS}, \req{DEMI-CORR-CLAMP}, \req{DEMI-FAIL-EXPENSIVE}) and a
+minimal phase-aware, cost-based forwarder that selects the minimum-cost backend
+in a pool \req{DEMI-ROUTE-MINCOST}. The remaining sections — cross-tenant cache
+sharing, asynchronous prefill dispatch, and live migration — are design intent,
+not yet built or tested.
 
 \section{Cross-Tenant Cache Sharing}\label{sec:sharing}
 Prefix-cache reuse across tenants is opt-in via a Shared-Prefix Group with a

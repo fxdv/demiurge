@@ -1,15 +1,27 @@
 //! Demiurge cost-function factor algebra.
 //!
-//! The router's cost function must be *strictly positive* so the learned
-//! corrector's multiplicative `±α` envelope is meaningful. We guarantee that
-//! structurally: a [`Cost`] is the product of a strictly-positive time core and
-//! a set of factors each constrained to a positive range. The public API
-//! exposes multiplication only — there is no `Sub`/`Neg`, and every field is
-//! private — so a future "just subtract a reward term" cannot be expressed.
+//! The router's cost must be **strictly positive** so the learned corrector's
+//! multiplicative `±α` envelope is meaningful. We get that *genuinely* by
+//! construction by representing a [`Cost`] as its **natural logarithm**: a
+//! [`Cost`] stores a finite `f64` `ln`, and any finite log is the logarithm of
+//! a strictly-positive real. Composition is addition of logs, which — unlike
+//! the naive product of factors in linear space — cannot underflow to `0.0`
+//! nor flip sign, and only the count of factors (not their magnitudes) could
+//! ever push the sum to non-finite, which is impossible for any realistic
+//! number of terms.
+//!
+//! Linear-space access via [`Cost::get`] is provided for display only and may
+//! saturate to `0.0`/`∞` at the extremes; **ordering and comparison must use
+//! [`Cost::ln`]**, which is exact and monotonic in the true cost.
+//!
+//! Invalid inputs follow a **fail-expensive** policy (see [`TimeCore::clamped`]
+//! et al.): a broken signal can only make a target look *more* expensive, never
+//! cheaper, so a NaN latency can never stampede traffic onto a sick backend.
 //!
 //! Spec references (kept in sync by `cargo xtask lint`):
-//! - [DEMI-COST-POS]   C(r,q) > 0 by construction (spec 4.3, 4.5).
-//! - [DEMI-CORR-CLAMP] corrector multiplier in [1-alpha, 1+alpha] (spec 4.5, 7).
+//! - [DEMI-COST-POS]       C(r,q) > 0 by construction (spec 4.3, 4.5).
+//! - [DEMI-CORR-CLAMP]     corrector multiplier in [1-alpha, 1+alpha] (spec 4.5, 7).
+//! - [DEMI-FAIL-EXPENSIVE] invalid factors saturate toward "expensive" (spec 4.5).
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,8 +32,9 @@ pub use generated_params::*;
 /// Corrector half-width α, sourced from the canonical params file.
 pub const ALPHA: f64 = generated_params::CORRECTOR_ALPHA;
 
-/// Number of times a factor had to be clamped at runtime. Exported so
-/// production can alarm on drift that compile-time and CI checks cannot see.
+/// Count of fail-expensive saturation events. A coarse, process-global health
+/// gauge: a nonzero, climbing value means upstream signals are arriving broken.
+/// Per-target attribution belongs in the forwarder's own metrics, not here.
 pub static FACTOR_CLAMP_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 fn bump_clamp() {
@@ -61,14 +74,16 @@ impl TimeCore {
         Ok(Self(seconds))
     }
 
-    /// Best-effort constructor for the hot path: clamps to the smallest
-    /// positive value instead of failing, and records the event.
+    /// Infallible hot-path constructor. **Fail-expensive:** a non-finite or
+    /// non-positive input (i.e. a broken latency signal) saturates to the
+    /// largest finite value, making the target maximally *unattractive*, and
+    /// records the event. It never maps garbage to a small (cheap) value.
     pub fn clamped(seconds: f64) -> Self {
         if seconds.is_finite() && seconds > 0.0 {
             Self(seconds)
         } else {
             bump_clamp();
-            Self(f64::MIN_POSITIVE)
+            Self(f64::MAX)
         }
     }
 
@@ -92,12 +107,14 @@ impl BarrierFactor {
         Ok(Self(x))
     }
 
+    /// Fail-expensive: an invalid penalty saturates to the largest finite value
+    /// (maximum penalty), never to the neutral `1.0`.
     pub fn clamped(x: f64) -> Self {
         if x.is_finite() && x >= 1.0 {
             Self(x)
         } else {
             bump_clamp();
-            Self(1.0)
+            Self(f64::MAX)
         }
     }
 
@@ -106,8 +123,8 @@ impl BarrierFactor {
     }
 }
 
-/// Multiplicative reward in `(0, 1]` — e.g. a cache-locality discount.
-/// A reward can only *scale cost down*, never below zero.
+/// Multiplicative reward in `(0, 1]` — e.g. a cache-locality discount. A reward
+/// can only ever *scale cost down*.
 #[derive(Debug, Clone, Copy)]
 pub struct Discount(f64);
 
@@ -122,16 +139,14 @@ impl Discount {
         Ok(Self(x))
     }
 
+    /// Fail-expensive: an invalid reward saturates to the neutral `1.0` (no
+    /// discount). It never grants an unearned (cheapening) reward.
     pub fn clamped(x: f64) -> Self {
         if x.is_finite() && x > 0.0 && x <= 1.0 {
             Self(x)
         } else {
             bump_clamp();
-            if x.is_finite() && x > 1.0 {
-                Self(1.0)
-            } else {
-                Self(f64::MIN_POSITIVE)
-            }
+            Self(1.0)
         }
     }
 
@@ -140,8 +155,8 @@ impl Discount {
     }
 }
 
-/// Learned-corrector multiplier, clamped to `[1-α, 1+α]`. Because `α < 1`, the
-/// multiplier is always strictly positive, so it can never flip cost's sign.
+/// Learned-corrector multiplier, clamped to `[1-α, 1+α]`. Because `α < 1` the
+/// multiplier is strictly positive, so it can never flip cost's sign.
 /// [DEMI-CORR-CLAMP]
 #[derive(Debug, Clone, Copy)]
 pub struct Corrector(f64);
@@ -174,44 +189,62 @@ impl Corrector {
     }
 }
 
-/// A strictly-positive cost. Constructible only via [`compose`].
+/// A strictly-positive cost, represented by its natural logarithm. The stored
+/// `ln` is always finite (class invariant), so the represented value is always
+/// a strictly-positive real. Constructible only via [`compose`].
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub struct Cost(f64);
+pub struct Cost {
+    ln: f64,
+}
 
 impl Cost {
-    pub fn get(self) -> f64 {
-        self.0
+    /// Natural log of the cost — exact, finite, and the *only* sound basis for
+    /// comparing two costs.
+    pub fn ln(self) -> f64 {
+        self.ln
     }
 
+    /// Linear-space value, for display/telemetry only. May saturate to `0.0`
+    /// or `∞` at the extremes; do not compare two costs with this.
+    pub fn get(self) -> f64 {
+        self.ln.exp()
+    }
+
+    /// True by construction: the stored log is always finite.
     pub fn is_positive(self) -> bool {
-        self.0.is_finite() && self.0 > 0.0
+        self.ln.is_finite()
     }
 }
 
 impl fmt::Display for Cost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "exp({})", self.ln)
     }
 }
 
-/// The sole constructor of [`Cost`]: a product of strictly-positive terms.
-/// Multiplication of a positive core by `≥1`, `(0,1]`, and `[1-α,1+α]` factors
-/// is positive, so the result is positive by construction. [DEMI-COST-POS]
+/// The sole constructor of [`Cost`]. Composition is **addition in log-space**:
+/// `ln C = ln(core) + Σ ln(barrier) − Σ |ln(discount)| + ln(corrector)`. Every
+/// term is finite by the factor constructors, so the sum is finite and the
+/// represented cost is strictly positive — with no underflow-to-zero or
+/// sign-flip possible, unlike a linear product. [DEMI-COST-POS]
 pub fn compose(
     core: TimeCore,
     barriers: &[BarrierFactor],
     discounts: &[Discount],
     corrector: Corrector,
 ) -> Cost {
-    let mut c = core.get();
+    let mut ln = core.get().ln();
     for b in barriers {
-        c *= b.get();
+        ln += b.get().ln();
     }
     for d in discounts {
-        c *= d.get();
+        ln += d.get().ln();
     }
-    c *= corrector.get();
-    Cost(c)
+    ln += corrector.get().ln();
+    // Finite for any realistic number of terms; only an astronomically long
+    // factor slice could overflow the sum, which is physically impossible.
+    debug_assert!(ln.is_finite(), "cost log overflowed: too many factors");
+    Cost { ln }
 }
 
 #[cfg(test)]

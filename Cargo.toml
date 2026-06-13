@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/demiurge-cost", "xtask"]
+members = ["crates/demiurge-cost", "crates/demiurge-router", "xtask"]
 
 [workspace.package]
 edition = "2021"

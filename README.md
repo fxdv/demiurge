@@ -18,6 +18,12 @@
 > formless chaos into an ordered cosmos — which is precisely this system's job:
 > imposing locality-aware order on chaotic inference traffic.
 
+> **Status: early scaffold.** What runs today is the cost-factor algebra and a
+> minimal phase-aware, cost-based TCP forwarder (least-cost backend selection
+> with live load). The three-plane architecture below — XDP admission, RDMA KV
+> hand-off, gossip, live migration, cross-tenant cache sharing — is **design
+> intent**, not yet built. See [Status](#status-what-exists).
+
 ---
 
 ## Table of contents
@@ -48,6 +54,20 @@ inference that's wrong on three counts, all at once:
 - occupancy is a **random variable**, not a constant.
 
 Demiurge is built to exploit exactly those three facts.
+
+## Status: what exists
+
+| Area | State |
+|------|-------|
+| Cost-factor algebra (`demiurge-cost`), log-space, positive by construction, fail-expensive | **implemented + property-tested** |
+| Minimal forwarder (`demiurge-router`): phase pools, least-cost selection, live in-flight load | **implemented + tested** |
+| Design-conformance tooling (`xtask gen`/`lint`), CI, spec PDF | **implemented** |
+| XDP/L4 admission, io_uring data plane, RCU snapshots | design intent |
+| KV warmth map, RDMA hand-off, live migration | design intent |
+| Cross-tenant cache sharing, async prefill dispatch, learned corrector | design intent |
+
+The `spec/` document is the *target* design; the generated conformance matrix
+marks each requirement `implemented` or `intended` so the two never blur.
 
 ## The bet
 
@@ -99,6 +119,7 @@ flowchart TB
 | [`spec/`](spec/) | The LaTeX design spec + the `\req{}` macro. |
 | `spec/generated/` | `@generated` parameter & conformance tables — never hand-edited. |
 | [`crates/demiurge-cost/`](crates/demiurge-cost/) | The cost-function factor algebra and its property tests. |
+| [`crates/demiurge-router/`](crates/demiurge-router/) | Minimal phase-aware, cost-based forwarder (lib + binary). |
 | [`xtask/`](xtask/) | `gen` (regenerate artifacts) and `lint` (traceability) commands. |
 | [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh` — local developer ergonomics. |
 
@@ -139,17 +160,18 @@ Change `α` once, regenerate, and the prose and the binary move together.
 
 ### Invariants that can't rot
 
-The cost function is a product of a strictly-positive time core and
-strictly-positive factors, expressed as a **type algebra with no subtraction in
-its API**:
+Cost is represented by its **natural logarithm** and composed by *adding* logs:
 
 ```
-Cost = TimeCore(>0) × BarrierFactor(≥1)* × Discount(0,1]* × Corrector[1−α, 1+α]
+ln C = ln(TimeCore>0) + Σ ln(Barrier≥1) + Σ ln(Discount∈(0,1]) + ln(Corrector∈[1−α,1+α])
 ```
 
-Nothing implements `Sub`/`Neg` and every field is private, so a future "just
-subtract a reward term" *cannot compile*. The same properties are asserted three
-ways:
+A finite log is the logarithm of a strictly-positive real, so positivity is
+genuinely by construction — there is no linear product to underflow to `0.0` or
+flip sign (the failure mode an earlier draft had), and comparison uses the exact
+log. Rewards enter only as discounts (never subtraction), and invalid hot-path
+signals saturate *toward expensive*, so a broken metric can't make a sick
+backend look cheap. The properties are asserted three ways:
 
 | Layer | Mechanism | Guards against |
 |-------|-----------|----------------|
