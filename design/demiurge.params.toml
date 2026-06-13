@@ -4,6 +4,9 @@
 #   - crates/demiurge-cost/src/generated_params.rs  (the binary's constants)
 #   - spec/generated/params_table.tex               (the spec's table)
 # CI fails if the generated files drift from this file.
+#
+# Groups for not-yet-built subsystems are design-intent placeholders until their
+# roadmap phase lands (see ROADMAP.md).
 
 [cache]
 block_tokens = 256
@@ -20,3 +23,22 @@ itl_budget_fraction_eps = 0.5
 gossip_interval_ms = 100
 frame_rate_hz = 50
 free_block_interrupt_pct = 20
+
+# Phase 1 — short-context fast path (design intent until implemented)
+[routing]
+short_context_tokens = 512
+short_context_warmth_override = 0.15
+
+# Phase 2 — KV overhead accounting (design intent)
+[kv]
+metadata_overhead_fraction = 0.08
+fragmentation_slack = 0.05
+abandoned_session_ttl_s = 300
+
+# Phase 4 — dynamic pool rebalancing (design intent)
+[pool]
+rebalance_hysteresis = 0.10
+rebalance_cooldown_s = 300
+weight_queue = 0.35
+weight_kv = 0.30
+weight_slo = 0.35

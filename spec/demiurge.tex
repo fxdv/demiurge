@@ -5,8 +5,11 @@
 \usepackage{booktabs}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
+\usepackage{enumitem}
 \usepackage[hidelinks]{hyperref}
 \input{preamble-req.tex}
+
+\newcommand{\intent}[1]{\textit{Design intent (not yet implemented):} #1}
 
 \title{Demiurge: A Phase-Aware, Cache-Locality-First Load Balancer\\for Inference Fleets\\[4pt]
   \large Technical Design Specification v1.4}
@@ -17,96 +20,165 @@
 \maketitle
 
 \begin{abstract}
-One assertion drives every decision below: \textbf{an inference request is not a
-packet, it is a lease on stateful accelerator memory whose duration is unknown at
-admission.} Demiurge exploits three facts that round-robin and least-connections
-ignore: the most valuable backend state (the KV cache) is request-correlated, the
-cost of a request depends on the target's live batch and KV footprint, and
-occupancy is a random variable. The balancer schedules prefill and decode as
-independent phases across two pools, treating the KV cache as the explicit
-hand-off artifact between them.
+An inference request is a \textbf{lease on stateful accelerator memory}, not a
+packet. Demiurge targets fleets that disaggregate \emph{prefill} (compute-bound,
+cache-producing) from \emph{decode} (bandwidth-bound, cache-consuming), with the
+KV cache as the explicit hand-off artifact. This document is the \textbf{target
+design}; shipped scope is enumerated in \S\ref{sec:status}. Unmarked
+\intent{...} paragraphs describe behavior planned in \texttt{ROADMAP.md}, not
+code that exists today.
 \end{abstract}
 
-\section{Architecture}
-Three planes with three consistency models and three blast radii: a microsecond
-data plane (eBPF/XDP admission plus a Rust \texttt{io\_uring} L7 forwarder serving
-an RCU snapshot), a millisecond control plane (cost evaluation, length
-prediction, pool-ratio autoscaling) under a CP consensus, and an
-eventually-consistent (AP) state plane carrying the KV warmth map and live
-occupancy. A wrong state-plane guess costs a cache miss, never a correctness
-violation. Authorization for cache sharing is the one fact kept strongly
-consistent.
-
-\section{Cost Function}\label{sec:cost}
-The routing cost is a product of a strictly-positive time core and dimensionless
-factors:
-\[
-  C(r,q) \;=\; T_{\text{core}}(r,q)\;\cdot\;\prod_m B_m\;\cdot\;\prod_c D_c\;\cdot\;\delta,
-  \qquad B_m \ge 1,\; D_c \in (0,1],\; \delta \in [1-\alpha,\,1+\alpha].
-\]
-Because $T_{\text{core}}>0$ and every factor is strictly positive, $C(r,q)>0$ by
-construction \req{DEMI-COST-POS}. The implementation represents cost by its
-natural logarithm and composes by \emph{adding} logs, so the guarantee survives
-floating point: there is no linear product to underflow to $0$ or overflow to
-$\infty$, and comparisons use the exact log. Rewards enter only as multiplicative
-discounts $D_c\in(0,1]$, never as subtractions, so no reward can drive cost
-negative and invert the corrector. The learned corrector $\delta$ is clamped to
-$[1-\alpha,1+\alpha]$ \req{DEMI-CORR-CLAMP}, bounding its multiplicative effect.
-Invalid or non-finite signals on the hot path saturate \emph{toward expensive}
-\req{DEMI-FAIL-EXPENSIVE}, so a broken metric can never make a target look
-artificially cheap and attract traffic to a sick backend.
-
-The canonical parameters and the conformance matrix below are generated from the
-single source of truth by \texttt{cargo xtask gen}:
-
-\begin{table}[h]
-  \centering
-  \input{generated/params_table.tex}
-  \caption{Canonical parameters (generated from \texttt{design/demiurge.params.toml}).}
-\end{table}
+\section{Implementation Status}\label{sec:status}
+\textbf{Shipped today (Phase~0).}
+\begin{itemize}[nosep]
+  \item Cost-factor algebra: log-space composition, fail-expensive clamping,
+        bounded corrector (\req{DEMI-COST-POS}, \req{DEMI-CORR-CLAMP},
+        \req{DEMI-FAIL-EXPENSIVE}).
+  \item Minimal forwarder: phase pools, minimum-cost backend selection
+        (\req{DEMI-ROUTE-MINCOST}).
+\end{itemize}
+\textbf{Not shipped.} Everything else in this spec---including architecture
+planes (\S\ref{sec:arch}), KV overhead (\S\ref{sec:kv}), state plane
+(\S\ref{sec:state}), async \texttt{Route} (\S\ref{sec:route}),
+cross-tenant sharing (\S\ref{sec:sharing}), migration (\S\ref{sec:migration}),
+pool rebalancing (\S\ref{sec:control}), data-plane hardening
+(\S\ref{sec:dataplane}), and production corrector graduation
+(\S\ref{sec:corrector})---is \textbf{design intent} tracked by requirement IDs
+and development phases in \texttt{design/requirements.toml} and
+\texttt{ROADMAP.md}.
 
 \begin{table}[h]
   \centering
   \input{generated/conformance_matrix.tex}
-  \caption{Design-intent \& conformance matrix (generated). \emph{Implemented}
-  requirements are backed by code and named tests verified in CI; \emph{intended}
-  requirements describe design intent for which no code exists yet.}
+  \caption{Conformance matrix (generated). \emph{Implemented} rows are backed by
+  named tests in CI; \emph{intended} rows are design targets.}
 \end{table}
 
-\paragraph{Implementation status.} This document is the target design. Today the
-repository implements only the cost-factor algebra
-(\req{DEMI-COST-POS}, \req{DEMI-CORR-CLAMP}, \req{DEMI-FAIL-EXPENSIVE}) and a
-minimal phase-aware, cost-based forwarder that selects the minimum-cost backend
-in a pool \req{DEMI-ROUTE-MINCOST}. The remaining sections — cross-tenant cache
-sharing, asynchronous prefill dispatch, and live migration — are design intent,
-not yet built or tested.
+\section{Architecture}\label{sec:arch}
+Three planes, three consistency models:
+\begin{itemize}[nosep]
+  \item \textbf{Data plane} (microsecond): eBPF/XDP admission, Rust
+        \texttt{io\_uring} L7 forwarder, RCU routing snapshot
+        (\S\ref{sec:dataplane}).
+  \item \textbf{Control plane} (millisecond): cost evaluation, length
+        prediction, pool-ratio autoscaling, CP consensus (\S\ref{sec:control}).
+  \item \textbf{State plane} (AP): KV warmth map, live occupancy gossip
+        (\S\ref{sec:state}). A wrong warmth guess costs a cache miss, never a
+        correctness violation.
+\end{itemize}
+\intent{Authorization for cache sharing stays strongly consistent on the control
+plane (\S\ref{sec:sharing}); cache \emph{warmth} stays AP.}
+
+\section{Cost Function}\label{sec:cost}
+The analytic routing cost is a product of a strictly-positive time core and
+dimensionless factors:
+\[
+  C(r,q) \;=\; T_{\text{core}}(r,q)\;\cdot\;\prod_m B_m\;\cdot\;\prod_c D_c\;\cdot\;\delta,
+  \qquad B_m \ge 1,\; D_c \in (0,1],\; \delta \in [1-\alpha,\,1+\alpha].
+\]
+
+\subsection{Positivity}\label{sec:cost-pos}
+Because $T_{\text{core}}>0$ and every factor is strictly positive, $C(r,q)>0$ by
+construction \req{DEMI-COST-POS}. The implementation stores $\ln C$ and composes
+by adding logs, so the guarantee survives floating point: comparisons use the
+exact log; there is no linear product to underflow to zero or flip sign.
+
+\subsection{Composition and Hot-Path Signals}\label{sec:cost-compose}
+Rewards enter only as multiplicative discounts $D_c\in(0,1]$, never as
+subtractions. Invalid or non-finite hot-path signals saturate \emph{toward
+expensive} \req{DEMI-FAIL-EXPENSIVE}, so a broken metric cannot cheapen a
+target. Canonical $\alpha$ and related constants are generated from
+\texttt{design/demiurge.params.toml} (Table below).
+
+\begin{table}[h]
+  \centering
+  \input{generated/params_table.tex}
+  \caption{Canonical parameters (generated). Groups for future phases are
+  placeholders until their roadmap phase lands.}
+\end{table}
+
+\section{KV Cache Overhead Accounting}\label{sec:kv}
+\intent{Per-request reservation uses block-aligned token counts plus metadata and
+fragmentation slack (parameters \texttt{kv.*}). The $\Phi$ memory-pressure
+barrier uses \textbf{fleet-aggregate} occupancy, not a sum of per-request p90
+headroom \req{DEMI-BARRIER-PHI}. Reservations are released on session end, abort,
+or TTL expiry \req{DEMI-KV-RELEASE}. Overhead terms are mandatory in the
+reservation formula \req{DEMI-KV-OVERHEAD}.}
 
 \section{Cross-Tenant Cache Sharing}\label{sec:sharing}
-Prefix-cache reuse across tenants is opt-in via a Shared-Prefix Group with a
-content-verified template. The data plane derives cache-domain keys from a
-tenant-salted fingerprint, and a non-member can never resolve to a shared
-cache-domain key \req{DEMI-S1-DOMAIN}; membership is checked on the strongly
-consistent authorization path.
+\intent{Prefix-cache reuse across tenants is opt-in via a Shared-Prefix Group
+with a content-verified template. Cache-domain keys are tenant-salted; a
+non-member never resolves to a shared cache-domain key \req{DEMI-S1-DOMAIN}.}
+
+\subsection{Shared-Domain Isolation}\label{sec:sharing-s1}
+\intent{Membership is checked on the strongly consistent authorization path before
+any warmth discount is applied.}
+
+\section{State Plane}\label{sec:state}
+\intent{Each backend publishes a Cuckoo-filter warmth map and live occupancy via
+gossip (\texttt{telemetry.*}). A warmth hit applies a bounded routing discount
+\req{DEMI-WARM-DISCOUNT}; a miss applies none. The plane is AP: stale warmth
+causes miss only \req{DEMI-STATE-AP}.}
+
+\section{Learned Corrector}\label{sec:corrector}
+The analytic corrector multiplier $\delta$ is clamped to $[1-\alpha,1+\alpha]$
+\req{DEMI-CORR-CLAMP}. \intent{Production use of a learned $\delta$ follows a
+shadow $\to$ canary $\to$ prod graduation path; promotion requires no clamp
+saturation and no violation of \req{DEMI-COST-POS} \req{DEMI-CORR-GRAD}. Until
+Phase~8, the router uses $\delta=1$.}
 
 \section{Routing and Migration}\label{sec:routing}
-\texttt{Route} admits the request, dispatches prefill asynchronously, and returns
-immediately without blocking the forwarder \req{ALG-ROUTE}; decode placement is a
-continuation evaluated on fresh telemetry once prefill completes.
+
+\subsection{Minimum-Cost Selection}\label{sec:route-mincost}
+Within a phase pool, the forwarder selects the backend with minimum $\ln C$
+\req{DEMI-ROUTE-MINCOST}. Live in-flight load enters via a queueing barrier on
+\texttt{Backend::cost()}.
+
+\subsection{Non-Blocking Route and Fast Path}\label{sec:route}
+\intent{\texttt{Route} admits a request, dispatches prefill asynchronously, and
+returns immediately \req{ALG-ROUTE}; decode placement runs in
+\textsc{OnPrefillComplete} on fresh telemetry. Prompts at or below
+\texttt{routing.short\_context\_tokens} use a \textbf{colocated} fast path
+(single backend, no cross-pool hand-off) unless a warmth override forces
+disaggregation \req{DEMI-SHORT-FASTPATH}.}
 
 \begin{algorithm}[h]
-\caption{Route (non-blocking dispatch)}
+\caption{Route (target behavior; Phase~1)}
 \begin{algorithmic}[1]
 \State \textbf{on} request $r$:
-\State admit $r$ under tenant token bucket \textbf{or} shed at XDP
+\State classify: fast path \textbf{or} disaggregated
+\State \intent{admit under tenant bucket or shed at XDP (\S\ref{sec:dataplane})}
 \State $p \gets \textsc{SelectPrefillTarget}(r)$
 \State \textbf{dispatch} prefill of $r$ to $p$ \textbf{asynchronously}
-\State \textbf{return} \Comment{decode placed later in \textsc{OnPrefillComplete}}
+\State \textbf{return} \Comment{decode in \textsc{OnPrefillComplete}}
 \end{algorithmic}
 \end{algorithm}
 
-Live migration of a decode is chunked and abortable: the cutover commits only if
-the estimated stall stays within a fraction $\varepsilon$ of the inter-token
-latency budget \req{DEMI-MIG-SUBITL}; otherwise it aborts and leaves the original
-placement untouched.
+\subsection{KV Hand-Off}\label{sec:handoff}
+\intent{Prefill completion publishes a KV hand-off handle; decode placement never
+proceeds without it \req{DEMI-KV-HANDOFF}. Transport is pluggable (TCP proof,
+then RDMA).}
+
+\subsection{Greedy Pairing}\label{sec:pairing}
+\intent{Joint pf$\to$dc placement is approximated greedily: fix prefill target,
+then optimize decode conditional on it \req{DEMI-PAIR-GREEDY}. Pairing regret is
+measured in shadow.}
+
+\subsection{Live Migration}\label{sec:migration}
+\intent{Decode migration is chunked and abortable. Cutover commits only if
+estimated stall $\le \varepsilon\cdot\mathrm{ITL}$ \req{DEMI-MIG-SUBITL};
+otherwise the original placement is restored.}
+
+\section{Control Plane}\label{sec:control}
+\intent{The pool-ratio controller adjusts prefill vs decode capacity share
+$\pi$ using queue, KV, and SLO pressure with hysteresis and cooldown
+(\texttt{pool.*}) \req{DEMI-POOL-RATIO}. Shadow mode is default until Phase~5
+actuation.}
+
+\section{Data Plane}\label{sec:dataplane}
+\intent{The L7 forwarder serves the last published RCU snapshot and never blocks
+on control-plane consensus \req{DEMI-DP-RCU}. Tenant token buckets and DDoS shed
+run at XDP before L7 \req{DEMI-XDP-SHED} (\texttt{free\_block\_interrupt\_pct}).}
 
 \end{document}

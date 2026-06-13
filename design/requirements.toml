@@ -2,13 +2,8 @@
 #
 # Each `id` must be referenced verbatim from the spec (\req{ID}) and/or code
 # ([ID]). `status` is "implemented" (backed by code + named tests) or "intended"
-# (design intent, no code yet). `phase` ties the requirement to a ROADMAP.md
-# phase; the conformance matrix + `cargo xtask lint` burndown track progress.
-# `cargo xtask lint` enforces:
-#   - implemented  => requires_test = true, and every name in `tests` exists as
-#                     a real #[test]/proptest function;
-#   - intended     => requires_test = false;
-#   - every id is referenced somewhere; no reference is undeclared.
+# (design intent, no code yet). `phase` ties the requirement to ROADMAP.md.
+# `section` must match numbered headings in spec/demiurge.tex.
 
 # --- Phase 0: foundations (shipped) ---------------------------------------
 
@@ -47,34 +42,141 @@ id = "DEMI-ROUTE-MINCOST"
 kind = "normative"
 status = "implemented"
 phase = 0
-section = "8"
+section = "8.1"
 summary = "The router forwards to the minimum-cost backend in the chosen pool."
 requires_test = true
-tests = ["selects_min_cost_backend"]
+tests = ["selects_min_cost_backend", "forwards_to_cheapest_backend"]
 
-# --- Phase 1: production routing loop -------------------------------------
+# --- Phase 1: non-blocking routing loop -----------------------------------
 
 [[requirement]]
 id = "ALG-ROUTE"
 kind = "structural"
 status = "intended"
 phase = 1
-section = "8"
+section = "8.2"
 summary = "Route admits, dispatches prefill asynchronously, and returns immediately."
 requires_test = false
 
-# --- Phase 6: live migration ----------------------------------------------
+[[requirement]]
+id = "DEMI-SHORT-FASTPATH"
+kind = "normative"
+status = "intended"
+phase = 1
+section = "8.2"
+summary = "Short contexts use colocated routing unless warmth override applies."
+requires_test = false
+
+# --- Phase 2: KV hand-off & memory barriers -------------------------------
+
+[[requirement]]
+id = "DEMI-KV-HANDOFF"
+kind = "normative"
+status = "intended"
+phase = 2
+section = "8.3"
+summary = "Decode placement never proceeds without a valid KV hand-off handle."
+requires_test = false
+
+[[requirement]]
+id = "DEMI-KV-OVERHEAD"
+kind = "normative"
+status = "intended"
+phase = 2
+section = "5"
+summary = "KV reservation includes metadata and fragmentation, not raw token bytes."
+requires_test = false
+
+[[requirement]]
+id = "DEMI-BARRIER-PHI"
+kind = "normative"
+status = "intended"
+phase = 2
+section = "5"
+summary = "Fleet aggregate KV reservation; not per-request p90 sum."
+requires_test = false
+
+[[requirement]]
+id = "DEMI-KV-RELEASE"
+kind = "normative"
+status = "intended"
+phase = 2
+section = "5"
+summary = "Session end, abort, or TTL always releases KV reservation."
+requires_test = false
+
+# --- Phase 3: state plane -------------------------------------------------
+
+[[requirement]]
+id = "DEMI-WARM-DISCOUNT"
+kind = "normative"
+status = "intended"
+phase = 3
+section = "9"
+summary = "Warmth hit applies a bounded discount; miss applies none."
+requires_test = false
+
+[[requirement]]
+id = "DEMI-STATE-AP"
+kind = "normative"
+status = "intended"
+phase = 3
+section = "9"
+summary = "State plane is AP; stale warmth causes miss only, never crash."
+requires_test = false
+
+# --- Phase 4: control plane & pairing -------------------------------------
+
+[[requirement]]
+id = "DEMI-PAIR-GREEDY"
+kind = "normative"
+status = "intended"
+phase = 4
+section = "8.4"
+summary = "Greedy pf-then-dc pairing; documented approximation to joint objective."
+requires_test = false
+
+[[requirement]]
+id = "DEMI-POOL-RATIO"
+kind = "normative"
+status = "intended"
+phase = 4
+section = "10"
+summary = "Pool rebalancer adjusts capacity share with hysteresis; shadow by default."
+requires_test = false
+
+# --- Phase 5: data plane hardening ----------------------------------------
+
+[[requirement]]
+id = "DEMI-DP-RCU"
+kind = "normative"
+status = "intended"
+phase = 5
+section = "11.1"
+summary = "Data plane serves last RCU snapshot; never blocks on control plane."
+requires_test = false
+
+[[requirement]]
+id = "DEMI-XDP-SHED"
+kind = "normative"
+status = "intended"
+phase = 5
+section = "11.2"
+summary = "XDP sheds overload before L7 on bucket exhaustion."
+requires_test = false
+
+# --- Phase 6: live migration --------------------------------------------
 
 [[requirement]]
 id = "DEMI-MIG-SUBITL"
 kind = "normative"
 status = "intended"
 phase = 6
-section = "8"
+section = "8.5"
 summary = "Migration cutover never commits unless est <= eps * ITL budget."
 requires_test = false
 
-# --- Phase 7: multi-tenancy & cache security ------------------------------
+# --- Phase 7: multi-tenancy & cache security ----------------------------
 
 [[requirement]]
 id = "DEMI-S1-DOMAIN"
@@ -83,4 +185,15 @@ status = "intended"
 phase = 7
 section = "6.1"
 summary = "A non-member never obtains a shared cache-domain key."
+requires_test = false
+
+# --- Phase 8: learned corrector graduation --------------------------------
+
+[[requirement]]
+id = "DEMI-CORR-GRAD"
+kind = "normative"
+status = "intended"
+phase = 8
+section = "7"
+summary = "Corrector graduates shadow to prod only without clamp or C>0 violations."
 requires_test = false

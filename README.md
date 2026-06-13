@@ -2,9 +2,9 @@
 
 # Demiurge
 
-**A phase-aware, cache-locality-first load balancer for inference fleets.**
+**A phase-aware, cache-locality-first load balancer for inference fleets** *(target design; Phase~0 scaffold shipped).*
 
-*Routes prefill and decode as independent phases across two pools, with the KV cache as the explicit hand-off artifact — because an inference request is a lease on stateful accelerator memory, not a packet.*
+*Target: route prefill and decode as independent phases across two pools, with the KV cache as the explicit hand-off artifact — because an inference request is a lease on stateful accelerator memory, not a packet.*
 
 [![design-conformance](https://github.com/fxdv/demiurge/actions/workflows/design-conformance.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/design-conformance.yml)
 [![ci](https://github.com/fxdv/demiurge/actions/workflows/ci.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/ci.yml)
@@ -121,7 +121,7 @@ flowchart TB
 | [`design/load-bench.toml`](design/load-bench.toml) | Local TCP load scenarios + optional p99 soft gates. |
 | [`design/requirements.toml`](design/requirements.toml) | Registry of normative/structural requirement IDs + phase tags. |
 | [`ROADMAP.md`](ROADMAP.md) | **Concrete build plan** — phased deliverables, gates, burndown. |
-| [`spec/`](spec/) | The LaTeX design spec + the `\req{}` macro. |
+| [`spec/demiurge.tex`](spec/) | Full target design; §1 lists shipped vs intended scope |
 | `spec/generated/` | `@generated` parameter & conformance tables — never hand-edited. |
 | [`crates/demiurge-cost/`](crates/demiurge-cost/) | The cost-function factor algebra and its property tests. |
 | [`crates/demiurge-router/`](crates/demiurge-router/) | Minimal phase-aware, cost-based forwarder (lib + binary). |
@@ -178,13 +178,13 @@ genuinely by construction — there is no linear product to underflow to `0.0` o
 flip sign (the failure mode an earlier draft had), and comparison uses the exact
 log. Rewards enter only as discounts (never subtraction), and invalid hot-path
 signals saturate *toward expensive*, so a broken metric can't make a sick
-backend look cheap. The properties are asserted three ways:
+backend look cheap. The properties are enforced in four layers:
 
 | Layer | Mechanism | Guards against |
 |-------|-----------|----------------|
-| Compile | positive-factor newtypes | structurally illegal cost terms |
-| CI | `proptest` (`[DEMI-COST-POS]`, `[DEMI-CORR-CLAMP]`) | regressions in composition |
-| CI | `cargo xtask bench-gate` | hot-path CPU regressions (median ns/op) |
+| Types | log-space `Cost`, positive factor newtypes | structurally invalid composition |
+| CI tests | `proptest` + named traceability tests | regressions in algebra and routing |
+| CI bench | `cargo xtask bench-gate` | hot-path CPU regressions |
 | Prod | `FACTOR_CLAMP_EVENTS` metric / alarms | drift the first two miss |
 
 ### Traceability: spec ⇄ code ⇄ test
@@ -193,14 +193,15 @@ Every normative claim has a stable ID — `DEMI-COST-POS`, `DEMI-CORR-CLAMP`,
 `DEMI-S1-DOMAIN`, … — appearing verbatim in all three places:
 
 ```text
-spec:  \req{DEMI-COST-POS}            (prose, §4.5)
+spec:  \req{DEMI-COST-POS}            (prose, §4.3)
 code:  /// [DEMI-COST-POS] ...        (doc-comment on the function)
-test:  #[test] // [DEMI-COST-POS]     (the proof)
+test:  tests = ["cost_strictly_positive", ...]  (named in requirements.toml)
 ```
 
 `cargo xtask lint` enforces: (1) every reference resolves to a declared
 requirement; (2) every declared requirement is referenced in the spec or code;
-(3) every `requires_test` requirement is referenced from a test.
+(3) every `implemented` requirement lists named `#[test]` / proptest functions
+that exist.
 
 ## Everyday workflows
 
@@ -228,7 +229,7 @@ plans (short-context fast path, KV overhead accounting, dynamic pool
 rebalancing), and the live burndown — lives in **[`ROADMAP.md`](ROADMAP.md)**.
 
 Track progress: `cargo xtask lint` prints per-phase burndown
-(`phase 0: 4/4`, `phase 1: 0/1`, …).
+(`P0: 4/4`, `P1: 0/2`, …). The spec conformance matrix includes a Phase column.
 
 ## Contributing
 

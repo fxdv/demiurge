@@ -7,7 +7,17 @@ cache & block\_tokens & 256 \\
 cache & chbl\_load\_factor\_c & 1.25 \\
 cache & cuckoo\_max\_loadfactor & 0.9 \\
 corrector & alpha & 0.2 \\
+kv & abandoned\_session\_ttl\_s & 300 \\
+kv & fragmentation\_slack & 0.05 \\
+kv & metadata\_overhead\_fraction & 0.08 \\
 migration & itl\_budget\_fraction\_eps & 0.5 \\
+pool & rebalance\_cooldown\_s & 300 \\
+pool & rebalance\_hysteresis & 0.1 \\
+pool & weight\_kv & 0.3 \\
+pool & weight\_queue & 0.35 \\
+pool & weight\_slo & 0.35 \\
+routing & short\_context\_tokens & 512 \\
+routing & short\_context\_warmth\_override & 0.15 \\
 telemetry & frame\_rate\_hz & 50 \\
 telemetry & free\_block\_interrupt\_pct & 20 \\
 telemetry & gossip\_interval\_ms & 100 \\

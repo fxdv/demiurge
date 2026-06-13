@@ -33,14 +33,14 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 | Phase | Name | Requirements | Status |
 |------:|------|--------------|--------|
 | **0** | Foundations | 4 / 4 | **done** |
-| **1** | Non-blocking routing loop | 0 / 1 | next |
-| **2** | KV hand-off & memory barriers | — | planned |
-| **3** | State plane | — | planned |
-| **4** | Control plane & pairing | — | planned |
-| **5** | Data plane hardening | — | planned |
+| **1** | Non-blocking routing loop | 0 / 2 | next |
+| **2** | KV hand-off & memory barriers | 0 / 4 | planned |
+| **3** | State plane | 0 / 2 | planned |
+| **4** | Control plane & pairing | 0 / 2 | planned |
+| **5** | Data plane hardening | 0 / 2 | planned |
 | **6** | Live migration | 0 / 1 | planned |
 | **7** | Multi-tenancy & cache security | 0 / 1 | planned |
-| **8** | Learned corrector graduation | — | planned |
+| **8** | Learned corrector graduation | 0 / 1 (`DEMI-CORR-GRAD`) | planned |
 
 Run `cargo xtask lint` for the live burndown line.
 
@@ -153,7 +153,7 @@ disaggregated path.
 | **3** | Warmth override: short prompt + hot prefix on backend B → disaggregated to B's prefill pool anyway. |
 | **4** | Predictor-driven classification; fast-path share telemetry (`fast_path_ratio`, mis-route regret). |
 
-**Proposed requirement**
+**Proposed requirement** — registered as `intended` in `requirements.toml`:
 
 | ID | Summary | Proposed test |
 |----|---------|---------------|
@@ -165,13 +165,7 @@ disaggregated path.
 - [ ] At equal load, fast-path p50 latency below disaggregated baseline for ≤ threshold prompts.
 - [ ] Warmth override correctly forces disaggregated routing when colocation would miss.
 
-**Parameters** (to add to `design/demiurge.params.toml` when Phase 1 starts):
-
-```toml
-[routing]
-short_context_tokens = 512
-short_context_warmth_override = 0.15   # min warmth discount to force disagg
-```
+**Parameters** — canonical in `design/demiurge.params.toml` (`[routing].*`); consumed when Phase 1 lands.
 
 ---
 
@@ -240,10 +234,11 @@ flowchart LR
 | **4** | Predictor feeds `kv_tokens`; model `bytes_per_token` in RCU snapshot. |
 | **6** | Migration moves `kv_reserved` atomically; abort releases reservation on source. |
 
-**Proposed requirements**
+**Requirements (registered `intended` in `requirements.toml`)**
 
 | ID | Summary |
 |----|---------|
+| `DEMI-KV-HANDOFF` | Decode placement never proceeds without a valid KV hand-off handle. |
 | `DEMI-KV-OVERHEAD` | Reservation includes metadata + fragmentation terms, not raw token bytes alone. |
 | `DEMI-BARRIER-PHI` | Fleet aggregate reservation; never sum per-request p90 headroom. |
 | `DEMI-KV-RELEASE` | Session end, abort, or TTL always releases reservation. |
@@ -651,8 +646,9 @@ OFF.**
 - [ ] All Phase 0–7 gates met with **corrector identity** in production.
 - [ ] Shadow corrector shows net positive goodput on held-out trace.
 - [ ] Canary: clamp event rate below threshold; no `DEMI-CORR-CLAMP` test failures.
+- [ ] `DEMI-CORR-GRAD` → `implemented` after shadow/canary gates met.
 - [ ] Tripwire: any future cost term reintroducing subtraction fails code review +
-      `DEMI-COST-POS` proptest (documented in spec §4).
+      `DEMI-COST-POS` proptest (spec §4.3).
 
 ---
 

@@ -67,8 +67,8 @@ impl Backend {
     }
 }
 
-/// Select the minimum-cost backend from a candidate set, comparing on the exact
-/// log-cost. Returns `None` only for an empty set. [DEMI-ROUTE-MINCOST]
+/// Select the minimum-cost backend from a candidate set (spec §8.1).
+/// [DEMI-ROUTE-MINCOST]
 pub fn select(candidates: &[Arc<Backend>]) -> Option<Arc<Backend>> {
     candidates
         .iter()

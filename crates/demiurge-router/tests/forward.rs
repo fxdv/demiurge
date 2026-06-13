@@ -46,8 +46,7 @@ fn selects_min_cost_backend() {
     assert!(select(&[]).is_none());
 }
 
-// End-to-end: the forwarder proxies a real request to the cheapest backend and
-// streams its response back.
+// End-to-end: forwarder proxies to the cheaper backend. [DEMI-ROUTE-MINCOST]
 #[test]
 fn forwards_to_cheapest_backend() {
     let cheap_addr = spawn_marker_backend(b'A');

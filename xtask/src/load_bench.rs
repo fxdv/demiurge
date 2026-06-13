@@ -41,6 +41,9 @@ struct Scenario {
     cost_step_seconds: f64,
     #[serde(default)]
     backend_delay_us: u64,
+    /// Decode pool size (0 = prefill-only router).
+    #[serde(default)]
+    decode_backends: u32,
     concurrency: u32,
     requests_per_worker: u32,
     #[serde(default = "default_prefill_fraction")]
@@ -101,22 +104,22 @@ fn spawn_mock_backend(delay_us: u64) -> SocketAddr {
     addr
 }
 
-fn spawn_router(backends: &[Arc<Backend>]) -> SocketAddr {
+fn spawn_router(prefill: &[Arc<Backend>], decode: &[Arc<Backend>]) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind router");
     let addr = listener.local_addr().expect("router addr");
-    let router = Arc::new(Router::new(backends.to_vec(), vec![]));
+    let router = Arc::new(Router::new(prefill.to_vec(), decode.to_vec()));
     thread::spawn(move || {
         let _ = serve(listener, router);
     });
     addr
 }
 
-fn build_backends(sc: &Scenario) -> Vec<Arc<Backend>> {
-    (0..sc.backends)
+fn build_pool(count: u32, prefix: &str, sc: &Scenario) -> Vec<Arc<Backend>> {
+    (0..count)
         .map(|i| {
             let addr = spawn_mock_backend(sc.backend_delay_us);
             let cost = sc.base_cost_seconds + sc.cost_step_seconds * f64::from(i);
-            Backend::new(format!("b{i}"), addr, cost)
+            Backend::new(format!("{prefix}{i}"), addr, cost)
         })
         .collect()
 }
@@ -153,8 +156,9 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
 }
 
 fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
-    let backends = build_backends(sc);
-    let router_addr = spawn_router(&backends);
+    let prefill = build_pool(sc.backends, "pf", sc);
+    let decode = build_pool(sc.decode_backends, "dc", sc);
+    let router_addr = spawn_router(&prefill, &decode);
     thread::sleep(Duration::from_millis(50));
 
     for i in 0..warmup {
