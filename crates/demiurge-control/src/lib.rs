@@ -8,7 +8,11 @@ mod pressure;
 mod rebalancer;
 mod scored;
 
-pub use pairing::{greedy_pair, oracle_pair, pairing_regret, select_decode, select_prefill};
+pub use pairing::{
+    greedy_pair, oracle_pair, pairing_regret, pairing_regret_targets, select_decode,
+    select_decode_target, select_prefill, select_prefill_target, PairingTarget,
+    DEFAULT_TRANSFER_PENALTY,
+};
 pub use predictor::LengthPredictor;
 pub use pressure::{export_pool_pressure, PoolPressure};
 pub use rebalancer::{PoolRebalancer, RebalancerMode};

@@ -2,6 +2,7 @@
 //!
 //! **Phase 0:** min-cost selection over phase pools (`select`, `Router::pick`).
 //! **Phase 3:** RCU state snapshot, warmth discounts, fast-path override ([DEMI-WARM-DISCOUNT], [DEMI-STATE-AP]).
+//! **Phase 4:** Greedy pf→dc pairing on the disaggregated path ([DEMI-PAIR-GREEDY]).
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -10,7 +11,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use demiurge_control::{AdmitError, ReservationGuard, ReservationLedger};
+use demiurge_control::{
+    export_pool_pressure, pairing_regret_targets, select_decode_target, select_prefill_target,
+    AdmitError, LengthPredictor, PairingTarget, PoolPressure, PoolRebalancer, RebalancerMode,
+    ReservationGuard, ReservationLedger, DEFAULT_TRANSFER_PENALTY,
+};
 use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
 use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
 use demiurge_cost::{
@@ -177,6 +182,32 @@ impl Backend {
     }
 }
 
+impl PairingTarget for Backend {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn prefill_ln(&self, snapshot: Option<&StateSnapshot>, blocks: &[u64]) -> f64 {
+        self.cost_with_warmth(&[], snapshot, blocks, false).ln()
+    }
+
+    fn decode_ln(
+        &self,
+        snapshot: Option<&StateSnapshot>,
+        blocks: &[u64],
+        prefill_label: &str,
+        transfer_penalty: f64,
+        extra_barriers: &[BarrierFactor],
+    ) -> f64 {
+        let mut barriers = extra_barriers.to_vec();
+        if prefill_label != self.label {
+            barriers.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+        }
+        self.cost_with_warmth(&barriers, snapshot, blocks, true)
+            .ln()
+    }
+}
+
 pub fn select_with_warmth(
     candidates: &[Arc<Backend>],
     extra: &[BarrierFactor],
@@ -224,9 +255,49 @@ pub struct Router {
     handoffs: Option<Arc<HandoffRegistry>>,
     bytes_per_token: u64,
     state: Option<StateSnapshot>,
+    control: Arc<Mutex<ControlPlane>>,
+}
+
+/// Shadow control-plane telemetry (rebalancer π*, pairing regret, length predictor).
+#[derive(Debug, Clone, Copy)]
+pub struct ControlMetrics {
+    pub pi: f64,
+    pub pi_star: f64,
+    pub pairing_regret_mean: f64,
+    pub pairing_regret_samples: u64,
+    pub predictor_p90_tokens: u64,
+}
+
+#[derive(Debug)]
+struct ControlPlane {
+    rebalancer: PoolRebalancer,
+    predictor: LengthPredictor,
+    regret_sum: f64,
+    regret_samples: u64,
+    colocated_routes: u64,
+    disagg_routes: u64,
+    last_pi_star: f64,
+}
+
+impl Default for ControlPlane {
+    fn default() -> Self {
+        Self {
+            rebalancer: PoolRebalancer::new(RebalancerMode::Shadow),
+            predictor: LengthPredictor::default(),
+            regret_sum: 0.0,
+            regret_samples: 0,
+            colocated_routes: 0,
+            disagg_routes: 0,
+            last_pi_star: 0.5,
+        }
+    }
 }
 
 impl Router {
+    fn fresh_control() -> Arc<Mutex<ControlPlane>> {
+        Arc::new(Mutex::new(ControlPlane::default()))
+    }
+
     pub fn new(prefill: Vec<Arc<Backend>>, decode: Vec<Arc<Backend>>) -> Self {
         Self {
             prefill,
@@ -235,6 +306,7 @@ impl Router {
             handoffs: None,
             bytes_per_token: 128,
             state: None,
+            control: Self::fresh_control(),
         }
     }
 
@@ -254,6 +326,7 @@ impl Router {
             handoffs: Some(Arc::clone(&handoffs)),
             bytes_per_token,
             state: None,
+            control: Self::fresh_control(),
         };
         (router, ledger, handoffs)
     }
@@ -277,6 +350,64 @@ impl Router {
 
     pub fn bytes_per_token(&self) -> u64 {
         self.bytes_per_token
+    }
+
+    pub fn control_metrics(&self) -> ControlMetrics {
+        let cp = self.control.lock().expect("control plane");
+        let regret_mean = if cp.regret_samples > 0 {
+            cp.regret_sum / cp.regret_samples as f64
+        } else {
+            0.0
+        };
+        ControlMetrics {
+            pi: cp.rebalancer.pi(),
+            pi_star: cp.last_pi_star,
+            pairing_regret_mean: regret_mean,
+            pairing_regret_samples: cp.regret_samples,
+            predictor_p90_tokens: cp.predictor.p90(),
+        }
+    }
+
+    fn note_route_mix(&self, colocated: bool) {
+        let mut cp = self.control.lock().expect("control plane");
+        if colocated {
+            cp.colocated_routes = cp.colocated_routes.saturating_add(1);
+        } else {
+            cp.disagg_routes = cp.disagg_routes.saturating_add(1);
+        }
+    }
+
+    fn tick_control(&self, prompt_tokens: Option<u64>, sample_regret: bool) {
+        let mut cp = self.control.lock().expect("control plane");
+        if let Some(tokens) = prompt_tokens {
+            cp.predictor.record(tokens);
+        }
+
+        let routed = cp.colocated_routes.saturating_add(cp.disagg_routes);
+        let fp_share = if routed > 0 {
+            cp.colocated_routes as f64 / routed as f64
+        } else {
+            0.5
+        };
+        let signals = pool_pressure(self, fp_share);
+        cp.last_pi_star = cp.rebalancer.shadow_pi_star(&signals);
+        let _ = cp.rebalancer.maybe_update(&signals);
+
+        if sample_regret {
+            if let Some(tokens) = prompt_tokens {
+                if !self.prefill.is_empty() && !self.decode.is_empty() {
+                    let regret = pairing_regret_targets(
+                        &self.prefill,
+                        &self.decode,
+                        self.state.as_ref(),
+                        tokens,
+                        DEFAULT_TRANSFER_PENALTY,
+                    );
+                    cp.regret_sum += regret;
+                    cp.regret_samples += 1;
+                }
+            }
+        }
     }
 
     pub fn pool(&self, phase: Phase) -> &[Arc<Backend>] {
@@ -372,39 +503,74 @@ pub fn is_decode_only(head: &[u8]) -> bool {
         || text.lines().next().is_some_and(|l| l.contains(" /decode"))
 }
 
+fn live_queue_pressure(backends: &[Arc<Backend>]) -> f64 {
+    let max = backends.iter().map(|b| b.inflight()).max().unwrap_or(0);
+    (max as f64 / (max as f64 + 16.0)).clamp(0.0, 1.0)
+}
+
+fn pool_pressure(router: &Router, fp_share: f64) -> PoolPressure {
+    let mut signals = router
+        .state
+        .as_ref()
+        .map(|s| export_pool_pressure(s, fp_share))
+        .unwrap_or(PoolPressure {
+            fp_share,
+            ..Default::default()
+        });
+    signals.q_prefill = signals
+        .q_prefill
+        .max(live_queue_pressure(router.pool(Phase::Prefill)));
+    signals.q_decode = signals
+        .q_decode
+        .max(live_queue_pressure(router.pool(Phase::Decode)));
+    if let Some(ledger) = router.ledger.as_ref() {
+        let kv = ledger.fleet_reserved() as f64 / ledger.capacity_bytes().max(1) as f64;
+        signals.kv_decode = signals.kv_decode.max(kv.clamp(0.0, 1.0));
+    }
+    signals.fp_share = fp_share.clamp(0.0, 1.0);
+    signals
+}
+
 /// Classify admission path from the HTTP head. [ALG-ROUTE] [DEMI-SHORT-FASTPATH] [DEMI-WARM-DISCOUNT]
 pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
     if is_decode_only(head) {
-        return router
+        let path = router
             .pick(Phase::Decode)
             .map(RoutePath::DecodeOnly)
-            .ok_or(RouteError::NoBackend);
+            .ok_or(RouteError::NoBackend)?;
+        router.note_route_mix(false);
+        router.tick_control(None, false);
+        return Ok(path);
     }
 
     let prompt_tokens = estimate_prompt_tokens(head);
     if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
         if let Some((prefill, _strength)) = warmth_override_target(router, prompt_tokens) {
+            router.note_route_mix(false);
+            router.tick_control(Some(prompt_tokens), false);
             return Ok(RoutePath::Disaggregated {
                 prefill,
                 request_id: RequestId::new(),
                 prompt_tokens,
             });
         }
-        return router
+        let path = router
             .pick_colocated()
             .map(RoutePath::Colocated)
-            .ok_or(RouteError::NoBackend);
+            .ok_or(RouteError::NoBackend)?;
+        router.note_route_mix(true);
+        router.tick_control(None, false);
+        return Ok(path);
     }
 
-    let blocks = default_routing_blocks(prompt_tokens);
-    let prefill = select_with_warmth(
+    let prefill = select_prefill_target(
         router.pool(Phase::Prefill),
-        &[],
         router.state.as_ref(),
-        &blocks,
-        false,
+        prompt_tokens,
     )
     .ok_or(RouteError::NoBackend)?;
+    router.note_route_mix(false);
+    router.tick_control(Some(prompt_tokens), false);
     Ok(RoutePath::Disaggregated {
         prefill,
         request_id: RequestId::new(),
@@ -479,14 +645,14 @@ pub fn on_prefill_complete(
         .map(|l| l.phi_barrier())
         .filter(|b| b.get() > 1.0);
     let extra: Vec<BarrierFactor> = phi.into_iter().collect();
-    let blocks = default_routing_blocks(signals.prompt_tokens);
 
-    let backend = select_with_warmth(
+    let backend = select_decode_target(
+        prefill_label,
         router.pool(Phase::Decode),
-        &extra,
         router.state.as_ref(),
-        &blocks,
-        true,
+        signals.prompt_tokens,
+        DEFAULT_TRANSFER_PENALTY,
+        &extra,
     )
     .or_else(|| router.pick_with_phi(Phase::Decode, phi))
     .or_else(|| router.pick_colocated())
@@ -498,6 +664,8 @@ pub fn on_prefill_complete(
             reg.record_transfer(h.byte_len, signals.prefill_wall);
         }
     }
+
+    router.tick_control(Some(signals.prompt_tokens), true);
 
     Ok(DecodePlacement {
         backend,

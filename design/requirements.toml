@@ -153,7 +153,11 @@ phase = 4
 section = "pairing"
 summary = "Greedy pf-then-dc pairing; documented approximation to joint objective."
 requires_test = true
-tests = ["greedy_pairing_prefill_first", "pairing_regret_within_budget"]
+tests = [
+    "greedy_pairing_prefill_first",
+    "pairing_regret_within_budget",
+    "greedy_decode_prefers_colocated_label_over_cheaper_remote",
+]
 
 [[requirement]]
 id = "DEMI-POOL-RATIO"

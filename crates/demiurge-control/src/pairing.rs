@@ -7,21 +7,106 @@ use demiurge_state::{default_routing_blocks, StateSnapshot};
 
 use crate::scored::ScoredBackend;
 
+/// Default cross-node KV transfer barrier when pf and dc labels differ.
+pub const DEFAULT_TRANSFER_PENALTY: f64 = 1.05;
+
+/// Live routing and shadow pairing share this cost surface.
+pub trait PairingTarget {
+    fn label(&self) -> &str;
+
+    fn prefill_ln(&self, snapshot: Option<&StateSnapshot>, blocks: &[u64]) -> f64;
+
+    fn decode_ln(
+        &self,
+        snapshot: Option<&StateSnapshot>,
+        blocks: &[u64],
+        prefill_label: &str,
+        transfer_penalty: f64,
+        extra_barriers: &[BarrierFactor],
+    ) -> f64;
+}
+
+impl PairingTarget for ScoredBackend {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn prefill_ln(&self, snapshot: Option<&StateSnapshot>, blocks: &[u64]) -> f64 {
+        prefill_cost(self, snapshot, blocks).ln()
+    }
+
+    fn decode_ln(
+        &self,
+        snapshot: Option<&StateSnapshot>,
+        blocks: &[u64],
+        prefill_label: &str,
+        transfer_penalty: f64,
+        extra_barriers: &[BarrierFactor],
+    ) -> f64 {
+        decode_cost(
+            self,
+            snapshot,
+            blocks,
+            prefill_label,
+            transfer_penalty,
+            extra_barriers,
+        )
+        .ln()
+    }
+}
+
 /// Prefill target fixed first; decode optimized conditional on pf.
+pub fn select_prefill_target<T: PairingTarget + ?Sized>(
+    candidates: &[Arc<T>],
+    snapshot: Option<&StateSnapshot>,
+    prompt_tokens: u64,
+) -> Option<Arc<T>> {
+    let blocks = default_routing_blocks(prompt_tokens);
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            a.prefill_ln(snapshot, &blocks)
+                .total_cmp(&b.prefill_ln(snapshot, &blocks))
+        })
+        .cloned()
+}
+
+pub fn select_decode_target<T: PairingTarget + ?Sized>(
+    prefill_label: &str,
+    candidates: &[Arc<T>],
+    snapshot: Option<&StateSnapshot>,
+    prompt_tokens: u64,
+    transfer_penalty: f64,
+    extra_barriers: &[BarrierFactor],
+) -> Option<Arc<T>> {
+    let blocks = default_routing_blocks(prompt_tokens);
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            a.decode_ln(
+                snapshot,
+                &blocks,
+                prefill_label,
+                transfer_penalty,
+                extra_barriers,
+            )
+            .total_cmp(&b.decode_ln(
+                snapshot,
+                &blocks,
+                prefill_label,
+                transfer_penalty,
+                extra_barriers,
+            ))
+        })
+        .cloned()
+}
+
 pub fn select_prefill(
     candidates: &[Arc<ScoredBackend>],
     snapshot: Option<&StateSnapshot>,
     prompt_tokens: u64,
 ) -> Option<Arc<ScoredBackend>> {
-    let blocks = default_routing_blocks(prompt_tokens);
-    candidates
-        .iter()
-        .min_by(|a, b| {
-            prefill_cost(a, snapshot, &blocks)
-                .ln()
-                .total_cmp(&prefill_cost(b, snapshot, &blocks).ln())
-        })
-        .cloned()
+    select_prefill_target(candidates, snapshot, prompt_tokens)
 }
 
 pub fn select_decode(
@@ -31,15 +116,14 @@ pub fn select_decode(
     prompt_tokens: u64,
     transfer_penalty: f64,
 ) -> Option<Arc<ScoredBackend>> {
-    let blocks = default_routing_blocks(prompt_tokens);
-    candidates
-        .iter()
-        .min_by(|a, b| {
-            decode_cost(a, snapshot, &blocks, prefill, transfer_penalty)
-                .ln()
-                .total_cmp(&decode_cost(b, snapshot, &blocks, prefill, transfer_penalty).ln())
-        })
-        .cloned()
+    select_decode_target(
+        prefill.label(),
+        candidates,
+        snapshot,
+        prompt_tokens,
+        transfer_penalty,
+        &[],
+    )
 }
 
 fn prefill_cost(backend: &ScoredBackend, snapshot: Option<&StateSnapshot>, blocks: &[u64]) -> Cost {
@@ -58,8 +142,9 @@ fn decode_cost(
     backend: &ScoredBackend,
     snapshot: Option<&StateSnapshot>,
     blocks: &[u64],
-    prefill: &ScoredBackend,
+    prefill_label: &str,
     transfer_penalty: f64,
+    extra_barriers: &[BarrierFactor],
 ) -> Cost {
     let mut discounts = Vec::new();
     if let Some(snap) = snapshot {
@@ -69,12 +154,22 @@ fn decode_cost(
             }
         }
     }
-    let transfer = if prefill.label == backend.label {
-        BarrierFactor::clamped(1.0)
-    } else {
-        BarrierFactor::clamped(transfer_penalty.max(1.0))
-    };
-    backend.base_cost(&[transfer], &discounts)
+    let mut barriers = extra_barriers.to_vec();
+    if prefill_label != backend.label {
+        barriers.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+    }
+    backend.base_cost(&barriers, &discounts)
+}
+
+fn joint_ln_scored(
+    pf: &ScoredBackend,
+    dc: &ScoredBackend,
+    snapshot: Option<&StateSnapshot>,
+    blocks: &[u64],
+    transfer_penalty: f64,
+    extra_barriers: &[BarrierFactor],
+) -> f64 {
+    joint_ln_targets(pf, dc, snapshot, blocks, transfer_penalty, extra_barriers)
 }
 
 /// Oracle joint pick for pairing-regret shadow measurement.
@@ -89,7 +184,7 @@ pub fn oracle_pair(
     let mut best: Option<(f64, Arc<ScoredBackend>, Arc<ScoredBackend>)> = None;
     for pf in prefill_pool {
         for dc in decode_pool {
-            let ln = joint_ln(pf, dc, snapshot, &blocks, transfer_penalty);
+            let ln = joint_ln_scored(pf, dc, snapshot, &blocks, transfer_penalty, &[]);
             if best.as_ref().is_none_or(|(b, _, _)| ln < *b) {
                 best = Some((ln, Arc::clone(pf), Arc::clone(dc)));
             }
@@ -119,35 +214,77 @@ pub fn pairing_regret(
     prompt_tokens: u64,
     transfer_penalty: f64,
 ) -> f64 {
-    let (g_pf, g_dc) = greedy_pair(
+    pairing_regret_targets(
         prefill_pool,
         decode_pool,
         snapshot,
         prompt_tokens,
         transfer_penalty,
-    );
-    let (o_pf, o_dc) = oracle_pair(
-        prefill_pool,
+    )
+}
+
+/// Shadow pairing-regret monitor for any pairing target (router backends or scored pool).
+pub fn pairing_regret_targets<T: PairingTarget + ?Sized>(
+    prefill_pool: &[Arc<T>],
+    decode_pool: &[Arc<T>],
+    snapshot: Option<&StateSnapshot>,
+    prompt_tokens: u64,
+    transfer_penalty: f64,
+) -> f64 {
+    if prefill_pool.is_empty() || decode_pool.is_empty() {
+        return 0.0;
+    }
+    let pf = select_prefill_target(prefill_pool, snapshot, prompt_tokens).expect("prefill");
+    let dc = select_decode_target(
+        pf.label(),
         decode_pool,
         snapshot,
         prompt_tokens,
         transfer_penalty,
-    );
+        &[],
+    )
+    .expect("decode");
     let blocks = default_routing_blocks(prompt_tokens);
-    let greedy_c = joint_ln(&g_pf, &g_dc, snapshot, &blocks, transfer_penalty);
-    let oracle_c = joint_ln(&o_pf, &o_dc, snapshot, &blocks, transfer_penalty);
+    let greedy_c = joint_ln_targets(
+        pf.as_ref(),
+        dc.as_ref(),
+        snapshot,
+        &blocks,
+        transfer_penalty,
+        &[],
+    );
+    let mut oracle_c = f64::INFINITY;
+    for p in prefill_pool {
+        for d in decode_pool {
+            oracle_c = oracle_c.min(joint_ln_targets(
+                p.as_ref(),
+                d.as_ref(),
+                snapshot,
+                &blocks,
+                transfer_penalty,
+                &[],
+            ));
+        }
+    }
     (greedy_c - oracle_c).exp() - 1.0
 }
 
-fn joint_ln(
-    pf: &ScoredBackend,
-    dc: &ScoredBackend,
+fn joint_ln_targets<T: PairingTarget + ?Sized>(
+    pf: &T,
+    dc: &T,
     snapshot: Option<&StateSnapshot>,
     blocks: &[u64],
     transfer_penalty: f64,
+    extra_barriers: &[BarrierFactor],
 ) -> f64 {
-    prefill_cost(pf, snapshot, blocks).ln()
-        + decode_cost(dc, snapshot, blocks, pf, transfer_penalty).ln()
+    pf.prefill_ln(snapshot, blocks)
+        + dc.decode_ln(
+            snapshot,
+            blocks,
+            pf.label(),
+            transfer_penalty,
+            extra_barriers,
+        )
 }
 
 #[cfg(test)]
@@ -162,7 +299,7 @@ mod tests {
     fn greedy_pairing_prefill_first() {
         let pf = [scored("pf0", 0.01), scored("pf1", 0.05)];
         let dc = [scored("dc0", 0.02), scored("dc1", 0.03)];
-        let (g_pf, _) = greedy_pair(&pf, &dc, None, 2048, 1.05);
+        let (g_pf, _) = greedy_pair(&pf, &dc, None, 2048, DEFAULT_TRANSFER_PENALTY);
         assert_eq!(g_pf.label, "pf0");
     }
 
