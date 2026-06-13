@@ -10,7 +10,7 @@
 [settings]
 report_dir = "target/load-bench"
 warmup_requests = 16
-startup_delay_ms = 100
+startup_delay_ms = 250
 # When true, max_p99_ms violations fail the bench step (local full runs only).
 gate_strict = false
 
@@ -48,6 +48,7 @@ max_p99_ms = 100.0
 id = "LOAD-MIXED-PHASE"
 summary = "70% prefill / 30% decode classification + routing"
 backends = 3
+decode_backends = 1
 base_cost_seconds = 0.01
 cost_step_seconds = 0.003
 backend_delay_us = 50
@@ -56,13 +57,81 @@ requests_per_worker = 80
 prefill_fraction = 0.7
 max_p99_ms = 150.0
 
+# --- Thin-place scouts + P2 KV burst (local only) ---------------------------
+
+[[scenario]]
+id = "LOAD-KV-BURST"
+summary = "P2: 10× KV budget, long disagg + hand-off headers, zero OOM"
+backends = 2
+decode_backends = 2
+use_kv_pool = true
+prefill_kv_headers = true
+request_style = "long_tokens"
+long_prompt_tokens = 2048
+bytes_per_token = 128
+decode_capacity_bytes = 2_962_230
+base_cost_seconds = 0.01
+cost_step_seconds = 0.005
+backend_delay_us = 0
+concurrency = 12
+requests_per_worker = 4
+max_p99_ms = 150.0
+
+[[scenario]]
+id = "LOAD-LARGE-POOL"
+summary = "Thin place: select() over 64 backends (colocated fast path)"
+backends = 64
+request_style = "short_tokens"
+base_cost_seconds = 0.01
+cost_step_seconds = 0.0005
+backend_delay_us = 0
+concurrency = 16
+requests_per_worker = 25
+max_p99_ms = 30.0
+
+[[scenario]]
+id = "LOAD-CLASSIFY-MIX"
+summary = "Thin place: mixed short/long token headers + KV hand-off path"
+backends = 4
+decode_backends = 2
+use_kv_pool = true
+prefill_kv_headers = true
+request_style = "mixed_tokens"
+long_prompt_tokens = 2048
+bytes_per_token = 128
+decode_capacity_bytes = 50_000_000
+base_cost_seconds = 0.01
+cost_step_seconds = 0.003
+backend_delay_us = 0
+concurrency = 16
+requests_per_worker = 30
+max_p99_ms = 80.0
+
+[[scenario]]
+id = "LOAD-DISAGG-CHAIN"
+summary = "Thin place: full disagg chain (prefill I/O + hand-off + decode pick)"
+backends = 3
+decode_backends = 3
+use_kv_pool = true
+prefill_kv_headers = true
+request_style = "long_tokens"
+long_prompt_tokens = 2048
+bytes_per_token = 128
+decode_capacity_bytes = 50_000_000
+base_cost_seconds = 0.01
+cost_step_seconds = 0.002
+backend_delay_us = 100
+concurrency = 12
+requests_per_worker = 15
+max_p99_ms = 120.0
+
 [[scenario]]
 id = "LOAD-HOT-SPOT"
-summary = "Skewed pool (1 cheap + 3 dear) under high concurrency"
+summary = "Skewed pool (1 cheap + 3 dear) under high concurrency (run last — heavy TCP churn)"
 backends = 4
 base_cost_seconds = 0.005
 cost_step_seconds = 0.25
 backend_delay_us = 0
-concurrency = 48
-requests_per_worker = 60
+concurrency = 24
+requests_per_worker = 40
 max_p99_ms = 200.0

@@ -110,6 +110,18 @@ declare an optional `max_p99_ms` soft gate (shown in the pseudo report; enforced
 when running with `--ci` or `gate_strict = true`). The post-step report includes
 throughput, latency percentiles, ASCII histograms, and gate pass/fail.
 
+The full suite runs each scenario in an isolated subprocess (`--scenario`) so mock
+backend threads do not accumulate across scenarios. Thin-place scouts (local only):
+
+| ID | What it stresses |
+|----|------------------|
+| `LOAD-KV-BURST` | P2 KV ledger at ~10× fleet budget; long disagg + hand-off headers |
+| `LOAD-LARGE-POOL` | `select()` over 64 backends (colocated short-context path) |
+| `LOAD-CLASSIFY-MIX` | Mixed short/long token headers + KV hand-off on long requests |
+| `LOAD-DISAGG-CHAIN` | Full disagg chain with backend I/O delay |
+
+Debug one scenario: `cargo run --release -q --package xtask -- load-bench --scenario LOAD-KV-BURST`.
+
 ---
 
 ## Cross-cutting plans

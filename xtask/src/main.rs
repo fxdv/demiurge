@@ -75,8 +75,12 @@ fn main() {
         "bench-gate" => bench_gate::bench_gate(),
         "bench-probe" => bench_gate::bench_probe(),
         "load-bench" => {
-            let ci_only = std::env::args().skip(2).any(|a| a == "--ci");
-            load_bench::load_bench(ci_only)
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let ci_only = args.iter().any(|a| a == "--ci");
+            let scenario = args
+                .windows(2)
+                .find_map(|w| (w[0] == "--scenario").then_some(w[1].as_str()));
+            load_bench::load_bench(ci_only, scenario)
         }
         "load-report" => load_bench::load_report(),
         other => {

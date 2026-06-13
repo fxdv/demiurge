@@ -91,8 +91,13 @@ pub fn render(report: &LoadBenchReport) -> String {
             out,
             "{}",
             pad_line(&format!(
-                "topology:  {} backends · {} workers × {} reqs · delay {}µs",
-                s.backends, s.concurrency, s.requests_per_worker, s.backend_delay_us
+                "topology:  {} pf · {} dc · {}×{} reqs · style {} · delay {}µs",
+                s.backends,
+                s.decode_backends,
+                s.concurrency,
+                s.requests_per_worker,
+                s.request_style,
+                s.backend_delay_us
             ))
         );
         let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
@@ -144,6 +149,22 @@ pub fn render(report: &LoadBenchReport) -> String {
                 continue;
             }
             let _ = writeln!(out, "{}", pad_line(line));
+        }
+        if let Some(peak) = s.kv_bytes_reserved_peak {
+            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+            let _ = writeln!(out, "{}", pad_line("KV POOL (Phase 2)"));
+            let _ = writeln!(
+                out,
+                "{}",
+                pad_line(&format!("  peak reserved ....... {:>12} bytes", peak))
+            );
+            if let Some(rejects) = s.kv_admit_rejects {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    pad_line(&format!("  admit rejects ....... {:>12}", rejects))
+                );
+            }
         }
         if let Some(limit) = s.max_p99_ms {
             let gate = if s.ok == 0 {
