@@ -43,6 +43,10 @@ code that exists today.
         (\req{DEMI-KV-HANDOFF}); overhead-aware reservation and fleet $\Phi$ barrier
         (\req{DEMI-KV-OVERHEAD}, \req{DEMI-BARRIER-PHI}, \req{DEMI-KV-RELEASE});
         hand-off transfer telemetry (\req{DEMI-KV-TRANSFER-TELEM}).
+  \item \textbf{Phase~3} --- AP state plane with warmth maps and gossip merge
+        (\req{DEMI-WARM-DISCOUNT}, \req{DEMI-STATE-AP}); fast-path warmth override.
+  \item \textbf{Phase~4 (control)} --- Greedy pf$\to$dc pairing
+        (\req{DEMI-PAIR-GREEDY}) and shadow pool rebalancer (\req{DEMI-POOL-RATIO}).
 \end{itemize}
 \textbf{Not shipped.} Everything else in this spec---including data-plane hardening
 (\S\ref{sec:dataplane}), KV warmth map and gossip (\S\ref{sec:state}),
@@ -120,10 +124,10 @@ non-member never resolves to a shared cache-domain key \req{DEMI-S1-DOMAIN}.}
 any warmth discount is applied.}
 
 \section{State Plane}\label{sec:state}
-\intent{Each backend publishes a Cuckoo-filter warmth map and live occupancy via
+Each backend publishes a block-granularity warmth map and live occupancy via
 gossip (\texttt{telemetry.*}). A warmth hit applies a bounded routing discount
 \req{DEMI-WARM-DISCOUNT}; a miss applies none. The plane is AP: stale warmth
-causes miss only \req{DEMI-STATE-AP}.}
+causes miss only \req{DEMI-STATE-AP}.
 
 \section{Learned Corrector}\label{sec:corrector}
 The analytic corrector multiplier $\delta$ is clamped to $[1-\alpha,1+\alpha]$
@@ -166,9 +170,9 @@ length and prefill I/O wall time; operators report p50/p99 aggregates
 \req{DEMI-KV-TRANSFER-TELEM}. Transport is pluggable (TCP proof, then RDMA).
 
 \subsection{Greedy Pairing}\label{sec:pairing}
-\intent{Joint pf$\to$dc placement is approximated greedily: fix prefill target,
+Joint pf$\to$dc placement is approximated greedily: fix prefill target,
 then optimize decode conditional on it \req{DEMI-PAIR-GREEDY}. Pairing regret is
-measured in shadow.}
+measured in shadow.
 
 \subsection{Live Migration}\label{sec:migration}
 \intent{Decode migration is chunked and abortable. Cutover commits only if
@@ -176,10 +180,10 @@ estimated stall $\le \varepsilon\cdot\mathrm{ITL}$ \req{DEMI-MIG-SUBITL};
 otherwise the original placement is restored.}
 
 \section{Control Plane}\label{sec:control}
-\intent{The pool-ratio controller adjusts prefill vs decode capacity share
+The pool-ratio controller adjusts prefill vs decode capacity share
 $\pi$ using queue, KV, and SLO pressure with hysteresis and cooldown
 (\texttt{pool.*}) \req{DEMI-POOL-RATIO}. Shadow mode is default until Phase~5
-actuation.}
+actuation.
 
 \section{Data Plane}\label{sec:dataplane}
 \intent{The L7 forwarder serves the last published RCU snapshot and never blocks

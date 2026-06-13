@@ -5,6 +5,7 @@ members = [
     "crates/demiurge-control",
     "crates/demiurge-handoff",
     "crates/demiurge-router",
+    "crates/demiurge-state",
     "xtask",
 ]
 

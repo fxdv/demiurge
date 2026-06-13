@@ -68,3 +68,31 @@ summary = "kv_breakdown() + phi_barrier_marginal() hot path"
 warmup_iters = 5_000
 bench_iters = 50_000
 max_median_ns = 200
+
+# --- Phase 3: warmth lookup ---------------------------------------------------
+
+[[gate]]
+id = "BENCH-WARM-LOOKUP"
+phase = 3
+summary = "WarmthMap hit_strength probe over 16 block keys"
+warmup_iters = 5_000
+bench_iters = 50_000
+max_median_ns = 500
+
+# --- Phase 4: greedy pairing + pool rebalancer --------------------------------
+
+[[gate]]
+id = "BENCH-PAIR-GREEDY"
+phase = 4
+summary = "Greedy pf-then-dc pair selection (8×8 pools)"
+warmup_iters = 2_000
+bench_iters = 20_000
+max_median_ns = 5_000
+
+[[gate]]
+id = "BENCH-REBALANCE"
+phase = 4
+summary = "Pool rebalancer π* computation + hysteresis check"
+warmup_iters = 5_000
+bench_iters = 50_000
+max_median_ns = 800

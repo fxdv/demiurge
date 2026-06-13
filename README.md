@@ -2,7 +2,7 @@
 
 # Demiurge
 
-**A phase-aware, cache-locality-first load balancer for inference fleets** *(Phases 0–2 shipped; full three-plane design is target scope).*
+**A phase-aware, cache-locality-first load balancer for inference fleets** *(Phases 0–4 shipped; data-plane hardening is next).*
 
 *Target: route prefill and decode as independent phases across two pools, with the KV cache as the explicit hand-off artifact — because an inference request is a lease on stateful accelerator memory, not a packet.*
 
@@ -18,11 +18,12 @@
 > formless chaos into an ordered cosmos — which is precisely this system's job:
 > imposing locality-aware order on chaotic inference traffic.
 
-> **Status.** Phases **0–2** are implemented and gated in CI: cost algebra, async
+> **Status.** Phases **0–4** are implemented and gated in CI: cost algebra, async
 > routing with short-context fast path, KV hand-off (TCP proof transport),
-> overhead-aware reservation, and the Φ memory-pressure barrier. The three-plane
-> architecture below — XDP admission, RDMA KV hand-off, gossip, live migration,
-> cross-tenant cache sharing — remains **design intent** for later phases. See
+> overhead-aware reservation, the Φ memory-pressure barrier, warmth-aware state
+> plane (AP gossip + RCU snapshots), and shadow control-plane pairing/rebalancing.
+> XDP admission, io_uring data plane, live migration, and cross-tenant cache
+> sharing remain **design intent** for later phases. See
 > [Status](#status-what-exists).
 
 ---
@@ -64,12 +65,14 @@ Demiurge is built to exploit exactly those three facts.
 | Minimal forwarder (`demiurge-router`): phase pools, least-cost selection, live in-flight load | **implemented + tested** (P0) |
 | Async `Route` / non-blocking prefill + short-context fast path | **implemented + tested** (P1) |
 | KV hand-off (`demiurge-handoff`), reservation ledger (`demiurge-control`), Φ barrier | **implemented + tested** (P2) |
+| State plane (`demiurge-state`): warmth map, occupancy gossip, RCU snapshots | **implemented + tested** (P3) |
+| Control plane: greedy pf→dc pairing, length predictor, shadow rebalancer | **implemented + tested** (P4) |
 | Design-conformance tooling (`xtask gen`/`lint`), CI, spec PDF | **implemented** |
 | CPU bench gates (`bench-gates.toml`, `cargo xtask bench-gate`) | **implemented** — in CI |
 | Local load bench (`load-bench.sh`, pseudo report) | **implemented** — CI runs `load-bench --ci` smoke |
 | Real stress suite (`load-stress.sh`, strict zero-error gates) | **implemented** — local only, not in CI |
-| XDP/L4 admission, io_uring data plane, RCU snapshots | design intent (P5) |
-| KV warmth map, RDMA hand-off production path, live migration | design intent (P3–P6) |
+| XDP/L4 admission, io_uring data plane, RCU data-plane serving | design intent (P5) |
+| RDMA hand-off production path, live migration | design intent (P6) |
 | Cross-tenant cache sharing, learned corrector graduation | design intent (P7–P8) |
 
 The `spec/` document is the *target* design; the generated conformance matrix
@@ -237,7 +240,7 @@ plans (short-context fast path, KV overhead accounting, dynamic pool
 rebalancing), and the live burndown — lives in **[`ROADMAP.md`](ROADMAP.md)**.
 
 Track progress: `cargo xtask lint` prints per-phase burndown
-(`P0: 4/4`, `P1: 2/2`, `P2: 5/5`, …). The spec conformance matrix includes a Phase column.
+(`P0: 4/4`, `P1: 2/2`, `P2: 5/5`, `P3: 2/2`, `P4: 2/2`, …). The spec conformance matrix includes a Phase column.
 
 ## Contributing
 

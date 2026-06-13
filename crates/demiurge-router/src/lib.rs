@@ -1,9 +1,7 @@
 //! Phase-aware, cost-based TCP forwarder.
 //!
 //! **Phase 0:** min-cost selection over phase pools (`select`, `Router::pick`).
-//! **Phase 2:** KV hand-off registry + reservation ledger ([DEMI-KV-HANDOFF],
-//! [DEMI-KV-OVERHEAD], [DEMI-BARRIER-PHI], [DEMI-KV-RELEASE]). Warmth override,
-//! XDP, and gossip remain design intent (see `spec/`).
+//! **Phase 3:** RCU state snapshot, warmth discounts, fast-path override ([DEMI-WARM-DISCOUNT], [DEMI-STATE-AP]).
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -14,13 +12,18 @@ use std::time::Duration;
 
 use demiurge_control::{AdmitError, ReservationGuard, ReservationLedger};
 use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
-use demiurge_cost::{compose, kv_breakdown, BarrierFactor, Corrector, Cost, TimeCore};
+use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
+use demiurge_cost::{
+    compose, kv_breakdown, warmth_discount, BarrierFactor, Corrector, Cost, TimeCore,
+};
 use demiurge_handoff::{parse_prefill_handoff, HandoffRegistry};
+use demiurge_state::default_routing_blocks;
 
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
 pub use demiurge_handoff::{
     HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
 };
+pub use demiurge_state::{BackendSnapshot, StatePlane, StateSnapshot, WarmthMap};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -133,6 +136,34 @@ impl Backend {
         compose(core, &[queue], &[], Corrector::identity())
     }
 
+    pub fn cost_with_warmth(
+        &self,
+        extra: &[BarrierFactor],
+        snapshot: Option<&StateSnapshot>,
+        blocks: &[u64],
+        decode_pool: bool,
+    ) -> Cost {
+        let mut discounts = Vec::new();
+        if let Some(snap) = snapshot {
+            let pool = if decode_pool {
+                &snap.decode
+            } else {
+                &snap.prefill
+            };
+            if let Some(bs) = pool.get(&self.label) {
+                if let Some(d) = warmth_discount(bs.warmth.hit_strength(blocks)) {
+                    discounts.push(d);
+                }
+            }
+        }
+        let core = TimeCore::clamped(self.base_service_seconds);
+        let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
+        let mut barriers = Vec::with_capacity(1 + extra.len());
+        barriers.push(queue);
+        barriers.extend_from_slice(extra);
+        compose(core, &barriers, &discounts, Corrector::identity())
+    }
+
     pub fn cost_with_barriers(&self, extra: &[BarrierFactor]) -> Cost {
         let core = TimeCore::clamped(self.base_service_seconds);
         let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
@@ -144,6 +175,26 @@ impl Backend {
         barriers.extend_from_slice(extra);
         compose(core, &barriers, &[], Corrector::identity())
     }
+}
+
+pub fn select_with_warmth(
+    candidates: &[Arc<Backend>],
+    extra: &[BarrierFactor],
+    snapshot: Option<&StateSnapshot>,
+    blocks: &[u64],
+    decode_pool: bool,
+) -> Option<Arc<Backend>> {
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            a.cost_with_warmth(extra, snapshot, blocks, decode_pool)
+                .ln()
+                .total_cmp(
+                    &b.cost_with_warmth(extra, snapshot, blocks, decode_pool)
+                        .ln(),
+                )
+        })
+        .cloned()
 }
 
 /// Select minimum-cost backend, optionally with extra barriers (e.g. Φ). [DEMI-ROUTE-MINCOST]
@@ -172,6 +223,7 @@ pub struct Router {
     ledger: Option<Arc<ReservationLedger>>,
     handoffs: Option<Arc<HandoffRegistry>>,
     bytes_per_token: u64,
+    state: Option<StateSnapshot>,
 }
 
 impl Router {
@@ -182,6 +234,7 @@ impl Router {
             ledger: None,
             handoffs: None,
             bytes_per_token: 128,
+            state: None,
         }
     }
 
@@ -200,8 +253,18 @@ impl Router {
             ledger: Some(Arc::clone(&ledger)),
             handoffs: Some(Arc::clone(&handoffs)),
             bytes_per_token,
+            state: None,
         };
         (router, ledger, handoffs)
+    }
+
+    pub fn with_state(mut self, state: StateSnapshot) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    pub fn state(&self) -> Option<&StateSnapshot> {
+        self.state.as_ref()
     }
 
     pub fn ledger(&self) -> Option<&Arc<ReservationLedger>> {
@@ -309,7 +372,7 @@ pub fn is_decode_only(head: &[u8]) -> bool {
         || text.lines().next().is_some_and(|l| l.contains(" /decode"))
 }
 
-/// Classify admission path from the HTTP head. [ALG-ROUTE] [DEMI-SHORT-FASTPATH]
+/// Classify admission path from the HTTP head. [ALG-ROUTE] [DEMI-SHORT-FASTPATH] [DEMI-WARM-DISCOUNT]
 pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
     if is_decode_only(head) {
         return router
@@ -320,18 +383,50 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
 
     let prompt_tokens = estimate_prompt_tokens(head);
     if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
+        if let Some((prefill, _strength)) = warmth_override_target(router, prompt_tokens) {
+            return Ok(RoutePath::Disaggregated {
+                prefill,
+                request_id: RequestId::new(),
+                prompt_tokens,
+            });
+        }
         return router
             .pick_colocated()
             .map(RoutePath::Colocated)
             .ok_or(RouteError::NoBackend);
     }
 
-    let prefill = router.pick(Phase::Prefill).ok_or(RouteError::NoBackend)?;
+    let blocks = default_routing_blocks(prompt_tokens);
+    let prefill = select_with_warmth(
+        router.pool(Phase::Prefill),
+        &[],
+        router.state.as_ref(),
+        &blocks,
+        false,
+    )
+    .ok_or(RouteError::NoBackend)?;
     Ok(RoutePath::Disaggregated {
         prefill,
         request_id: RequestId::new(),
         prompt_tokens,
     })
+}
+
+fn warmth_override_target(router: &Router, prompt_tokens: u64) -> Option<(Arc<Backend>, f64)> {
+    let snap = router.state.as_ref()?;
+    let blocks = default_routing_blocks(prompt_tokens);
+    let mut best: Option<(Arc<Backend>, f64)> = None;
+    for backend in router.pool(Phase::Prefill) {
+        let warmth = snap.prefill.get(&backend.label)?;
+        let strength = warmth.warmth.hit_strength(&blocks);
+        if strength < ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, s)| strength > *s) {
+            best = Some((Arc::clone(backend), strength));
+        }
+    }
+    best
 }
 
 /// Decode placement after prefill; requires valid hand-off when KV pool is wired.
@@ -383,11 +478,19 @@ pub fn on_prefill_complete(
         .as_ref()
         .map(|l| l.phi_barrier())
         .filter(|b| b.get() > 1.0);
+    let extra: Vec<BarrierFactor> = phi.into_iter().collect();
+    let blocks = default_routing_blocks(signals.prompt_tokens);
 
-    let backend = router
-        .pick_with_phi(Phase::Decode, phi)
-        .or_else(|| router.pick_colocated())
-        .ok_or(RouteError::NoBackend)?;
+    let backend = select_with_warmth(
+        router.pool(Phase::Decode),
+        &extra,
+        router.state.as_ref(),
+        &blocks,
+        true,
+    )
+    .or_else(|| router.pick_with_phi(Phase::Decode, phi))
+    .or_else(|| router.pick_colocated())
+    .ok_or(RouteError::NoBackend)?;
 
     if let Some(h) = handoff {
         if let Some(reg) = &router.handoffs {

@@ -1,4 +1,18 @@
 //! Decode-pool KV reservation ledger. [DEMI-KV-RELEASE] [DEMI-BARRIER-PHI]
+//!
+//! Phase 4: greedy pairing, length predictor, shadow pool rebalancer.
+
+mod pairing;
+mod predictor;
+mod pressure;
+mod rebalancer;
+mod scored;
+
+pub use pairing::{greedy_pair, oracle_pair, pairing_regret, select_decode, select_prefill};
+pub use predictor::LengthPredictor;
+pub use pressure::{export_pool_pressure, PoolPressure};
+pub use rebalancer::{PoolRebalancer, RebalancerMode};
+pub use scored::ScoredBackend;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};

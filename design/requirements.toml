@@ -126,40 +126,44 @@ tests = ["handoff_transfer_telemetry_p50_p99", "disaggregated_decode_requires_ha
 [[requirement]]
 id = "DEMI-WARM-DISCOUNT"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 3
-section = "9"
+section = "state"
 summary = "Warmth hit applies a bounded discount; miss applies none."
-requires_test = false
+requires_test = true
+tests = ["warmth_discount_bounded", "warmth_aware_routing_improves_hit_ratio", "warmth_override_forces_disaggregated_path"]
 
 [[requirement]]
 id = "DEMI-STATE-AP"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 3
-section = "9"
+section = "state"
 summary = "State plane is AP; stale warmth causes miss only, never crash."
-requires_test = false
+requires_test = true
+tests = ["stale_warmth_miss_only", "gossip_partition_heals_without_control_plane"]
 
 # --- Phase 4: control plane & pairing -------------------------------------
 
 [[requirement]]
 id = "DEMI-PAIR-GREEDY"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 4
-section = "8.4"
+section = "pairing"
 summary = "Greedy pf-then-dc pairing; documented approximation to joint objective."
-requires_test = false
+requires_test = true
+tests = ["greedy_pairing_prefill_first", "pairing_regret_within_budget"]
 
 [[requirement]]
 id = "DEMI-POOL-RATIO"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 4
-section = "10"
+section = "control"
 summary = "Pool rebalancer adjusts capacity share with hysteresis; shadow by default."
-requires_test = false
+requires_test = true
+tests = ["rebalance_respects_hysteresis_and_cooldown", "shadow_mode_never_actuates"]
 
 # --- Phase 5: data plane hardening ----------------------------------------
 

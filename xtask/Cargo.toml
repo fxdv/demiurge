@@ -7,6 +7,8 @@ publish = false
 [dependencies]
 demiurge-cost = { path = "../crates/demiurge-cost" }
 demiurge-router = { path = "../crates/demiurge-router" }
+demiurge-state = { path = "../crates/demiurge-state" }
+demiurge-control = { path = "../crates/demiurge-control" }
 toml = "0.8"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

@@ -9,12 +9,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use demiurge_control::{greedy_pair, PoolPressure, PoolRebalancer, RebalancerMode, ScoredBackend};
 use demiurge_cost::{
     compose, kv_breakdown, phi_barrier_marginal, BarrierFactor, Corrector, Discount, TimeCore,
 };
 use demiurge_router::{
     estimate_prompt_tokens, parse_prompt_tokens, route, select, Backend, Router,
 };
+use demiurge_state::{default_routing_blocks, WarmthMap};
 use serde::Deserialize;
 
 const BENCH_GATES: &str = "design/bench-gates.toml";
@@ -180,6 +182,75 @@ const CLASSIFY_HEAD: &[u8] =
 
 const SHORT_HEAD: &[u8] = b"GET / HTTP/1.1\r\nhost: x\r\nx-demiurge-tokens: 32\r\n\r\n";
 
+struct WarmLookupBench {
+    map: WarmthMap,
+    blocks: Vec<u64>,
+}
+
+impl WarmLookupBench {
+    fn new() -> Self {
+        let mut map = WarmthMap::with_capacity(256);
+        for i in 0..16 {
+            map.insert(i * 256);
+        }
+        Self {
+            map,
+            blocks: default_routing_blocks(2048),
+        }
+    }
+
+    fn run(&self) {
+        std::hint::black_box(self.map.hit_strength(&self.blocks));
+    }
+}
+
+struct PairGreedyBench {
+    pf: Vec<Arc<ScoredBackend>>,
+    dc: Vec<Arc<ScoredBackend>>,
+}
+
+impl PairGreedyBench {
+    fn new() -> Self {
+        let addr: SocketAddr = "127.0.0.1:1".parse().expect("addr");
+        Self {
+            pf: (0..8)
+                .map(|i| ScoredBackend::new(format!("pf{i}"), addr, 0.01 + i as f64 * 0.001))
+                .collect(),
+            dc: (0..8)
+                .map(|i| ScoredBackend::new(format!("dc{i}"), addr, 0.02 + i as f64 * 0.001))
+                .collect(),
+        }
+    }
+
+    fn run(&self) {
+        std::hint::black_box(greedy_pair(&self.pf, &self.dc, None, 2048, 1.05));
+    }
+}
+
+struct RebalanceBench {
+    rebalancer: PoolRebalancer,
+    signals: PoolPressure,
+}
+
+impl RebalanceBench {
+    fn new() -> Self {
+        Self {
+            rebalancer: PoolRebalancer::new(RebalancerMode::Shadow),
+            signals: PoolPressure {
+                q_prefill: 0.8,
+                q_decode: 0.2,
+                kv_decode: 0.3,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn run(&mut self) {
+        std::hint::black_box(self.rebalancer.shadow_pi_star(&self.signals));
+        let _ = self.rebalancer.maybe_update(&self.signals);
+    }
+}
+
 fn bench_kv_reserve() {
     let b = std::hint::black_box(kv_breakdown(
         std::hint::black_box(2048_u64),
@@ -208,6 +279,9 @@ fn run_gate(gate: &Gate, settings: &Settings) -> Result<(SampleStats, u64), Box<
     let backend_cost = BackendCostBench::new();
     let route_short = RouteBench::short();
     let route_long = RouteBench::disaggregated();
+    let warm_lookup = WarmLookupBench::new();
+    let pair_greedy = PairGreedyBench::new();
+    let mut rebalance = RebalanceBench::new();
 
     let stats = match gate.id.as_str() {
         "BENCH-COMPOSE-8" => sample_ns_per_op(
@@ -245,6 +319,24 @@ fn run_gate(gate: &Gate, settings: &Settings) -> Result<(SampleStats, u64), Box<
             gate.bench_iters,
             settings.samples,
             bench_kv_reserve,
+        ),
+        "BENCH-WARM-LOOKUP" => sample_ns_per_op(
+            gate.warmup_iters,
+            gate.bench_iters,
+            settings.samples,
+            || warm_lookup.run(),
+        ),
+        "BENCH-PAIR-GREEDY" => sample_ns_per_op(
+            gate.warmup_iters,
+            gate.bench_iters,
+            settings.samples,
+            || pair_greedy.run(),
+        ),
+        "BENCH-REBALANCE" => sample_ns_per_op(
+            gate.warmup_iters,
+            gate.bench_iters,
+            settings.samples,
+            || rebalance.run(),
         ),
         other => return Err(format!("unknown bench gate id {other:?}").into()),
     };

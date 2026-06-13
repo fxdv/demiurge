@@ -36,8 +36,8 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 | **0** | Foundations | 4 / 4 | **done** |
 | **1** | Non-blocking routing loop | 2 / 2 | **done** |
 | **2** | KV hand-off & memory barriers | 5 / 5 | **done** |
-| **3** | State plane | 0 / 2 | planned |
-| **4** | Control plane & pairing | 0 / 2 | planned |
+| **3** | State plane | 2 / 2 | **done** |
+| **4** | Control plane & pairing | 2 / 2 | **done** |
 | **5** | Data plane hardening | 0 / 2 | planned |
 | **6** | Live migration | 0 / 1 | planned |
 | **7** | Multi-tenancy & cache security | 0 / 1 | planned |
@@ -78,14 +78,14 @@ CI applies `settings.ci_slack` (2×) for runner jitter. Run
 | `BENCH-CLASSIFY` | 1 | HTTP head parse + fast-path / disaggregated classification | ≤ 350 ns/op |
 | `BENCH-ROUTE-DISPATCH` | 1 | Disaggregated path — RequestId alloc + admission (no I/O) | ≤ 350 ns/op |
 | `BENCH-KV-RESERVE` | 2 | `kv_breakdown()` + `phi_barrier_marginal()` hot path | ≤ 200 ns/op |
+| `BENCH-WARM-LOOKUP` | 3 | Cuckoo warmth probe per routing key block | ≤ 500 ns/op |
+| `BENCH-PAIR-GREEDY` | 4 | Greedy pf→dc pair selection over N×M candidates | ≤ 5 µs/op |
+| `BENCH-REBALANCE` | 4 | Pool pressure normalization + π* computation | ≤ 800 ns/op |
 
 ### Planned gates (register before closing the phase)
 
 | Phase | Proposed ID | Target |
 |------:|-------------|--------|
-| **3** | `BENCH-WARM-LOOKUP` | Cuckoo warmth probe per routing key block |
-| **4** | `BENCH-PAIR-GREEDY` | Greedy pf→dc pair selection over N×M candidates |
-| **4** | `BENCH-REBALANCE` | Pool pressure normalization + π* computation |
 | **5** | `BENCH-RCU-SNAPSHOT` | RCU table read on data-plane routing path |
 
 Each new gate gets a row in `bench-gates.toml` in the **same PR** that lands the
@@ -494,7 +494,7 @@ tenant isolation, pool rebalancing actuation.
 
 ---
 
-## Phase 3 — State plane (warmth + occupancy)
+## Phase 3 — State plane (warmth + occupancy) ✅ (shipped)
 
 **Goal.** Eventually-consistent backend state feeds routing discounts; a wrong
 guess costs a cache miss, never a correctness violation. Enable **warmth
@@ -520,17 +520,17 @@ override** on the short-context fast path.
 
 **Exit gate**
 
-- [ ] Synthetic trace replay: warmth-aware routing improves cache-hit ratio vs phase-1 baseline at equal load.
-- [ ] Injected stale warmth → miss only; no panic, no auth side effects.
-- [ ] Gossip partition heals without control-plane involvement.
-- [ ] Short prompt + strong warmth on remote backend → disaggregated path (override).
-- [ ] `BENCH-WARM-LOOKUP` gate passes.
+- [x] Synthetic trace replay: warmth-aware routing improves cache-hit ratio vs phase-1 baseline at equal load.
+- [x] Injected stale warmth → miss only; no panic, no auth side effects.
+- [x] Gossip partition heals without control-plane involvement.
+- [x] Short prompt + strong warmth on remote backend → disaggregated path (override).
+- [x] `BENCH-WARM-LOOKUP` gate passes.
 
 **Out of scope.** Strongly-consistent authorization (Phase 7), corrector training, rebalancer actuation.
 
 ---
 
-## Phase 4 — Control plane & pairing
+## Phase 4 — Control plane & pairing ✅ (shipped)
 
 **Goal.** Full analytic cost on the control plane; **greedy pf→dc pairing**
 (documented approximation); **dynamic pool rebalancing** (shadow → can actuate);
@@ -556,12 +556,12 @@ pairing-regret monitor.
 
 **Exit gate**
 
-- [ ] `DEMI-COST-POS` / `DEMI-CORR-CLAMP` still green under full compose path.
-- [ ] Pairing-regret p95 within budget on shadow trace (budget in params file).
-- [ ] **Corrector OFF** in production path; identity corrector only.
-- [ ] Rebalancer shadow replay: `π*` tracks prefill-heavy windows on production trace.
-- [ ] Step-load test: no pool-weight oscillation (hysteresis holds).
-- [ ] `BENCH-PAIR-GREEDY` and `BENCH-REBALANCE` gates pass.
+- [x] `DEMI-COST-POS` / `DEMI-CORR-CLAMP` still green under full compose path.
+- [x] Pairing-regret p95 within budget on shadow trace (budget in params file).
+- [x] **Corrector OFF** in production path; identity corrector only.
+- [x] Rebalancer shadow replay: `π*` tracks prefill-heavy windows on production trace.
+- [x] Step-load test: no pool-weight oscillation (hysteresis holds).
+- [x] `BENCH-PAIR-GREEDY` and `BENCH-REBALANCE` gates pass.
 
 **Out of scope.** Learned corrector in prod (Phase 8), XDP (Phase 5), autoscaler actuation (Phase 5).
 

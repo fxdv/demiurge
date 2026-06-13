@@ -55,6 +55,7 @@ name = "demiurge-control"
 version = "0.1.0"
 dependencies = [
  "demiurge-cost",
+ "demiurge-state",
 ]
 
 [[package]]
@@ -75,6 +76,14 @@ dependencies = [
  "demiurge-control",
  "demiurge-cost",
  "demiurge-handoff",
+ "demiurge-state",
+]
+
+[[package]]
+name = "demiurge-state"
+version = "0.1.0"
+dependencies = [
+ "demiurge-cost",
 ]
 
 [[package]]
@@ -716,8 +725,10 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "demiurge-control",
  "demiurge-cost",
  "demiurge-router",
+ "demiurge-state",
  "regex",
  "serde",
  "serde_json",
