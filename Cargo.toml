@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/demiurge-cost", "xtask"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/fxdv/demiurge"
+
+[profile.release]
+lto = "thin"

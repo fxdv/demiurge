@@ -1,0 +1,4 @@
+# Design artifacts are the contract — changes need a design owner's review.
+/design/        @fxdv
+/spec/          @fxdv
+/xtask/         @fxdv

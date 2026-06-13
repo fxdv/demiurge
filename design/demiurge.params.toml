@@ -1,0 +1,22 @@
+# design/demiurge.params.toml — the single source of truth for every tunable.
+#
+# Edit values here, then run `cargo xtask gen` to project them into:
+#   - crates/demiurge-cost/src/generated_params.rs  (the binary's constants)
+#   - spec/generated/params_table.tex               (the spec's table)
+# CI fails if the generated files drift from this file.
+
+[cache]
+block_tokens = 256
+chbl_load_factor_c = 1.25
+cuckoo_max_loadfactor = 0.90
+
+[corrector]
+alpha = 0.20
+
+[migration]
+itl_budget_fraction_eps = 0.5
+
+[telemetry]
+gossip_interval_ms = 100
+frame_rate_hz = 50
+free_block_interrupt_pct = 20

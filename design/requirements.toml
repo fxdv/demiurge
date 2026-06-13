@@ -1,0 +1,40 @@
+# design/requirements.toml — registry of normative/structural claims.
+#
+# Every `id` here must be referenced verbatim from the spec (\req{ID}) and/or
+# code ([ID]). Anything with requires_test = true must be referenced from a
+# test. `cargo xtask lint` enforces all of this.
+
+[[requirement]]
+id = "DEMI-COST-POS"
+kind = "normative"
+section = "4.3, 4.5"
+summary = "Cost is strictly positive by construction."
+requires_test = true
+
+[[requirement]]
+id = "DEMI-CORR-CLAMP"
+kind = "normative"
+section = "4.5, 7"
+summary = "Corrector multiplier is bounded to [1-alpha, 1+alpha]."
+requires_test = true
+
+[[requirement]]
+id = "DEMI-S1-DOMAIN"
+kind = "normative"
+section = "6.1"
+summary = "A non-member never obtains a shared cache-domain key."
+requires_test = false
+
+[[requirement]]
+id = "DEMI-MIG-SUBITL"
+kind = "normative"
+section = "8"
+summary = "Migration cutover never commits unless est <= eps * ITL budget."
+requires_test = false
+
+[[requirement]]
+id = "ALG-ROUTE"
+kind = "structural"
+section = "8"
+summary = "Route admits, dispatches prefill asynchronously, and returns immediately."
+requires_test = false

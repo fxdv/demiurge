@@ -1,0 +1,7 @@
+% spec/preamble-req.tex — \input this from the main spec preamble.
+%
+% \req{ID} marks an inline normative/structural claim. The SAME string appears
+% verbatim as [ID] in Rust doc-comments and #[test]s, and as a row in
+% design/requirements.toml. `cargo xtask lint` enforces the three-way join.
+\usepackage{xcolor}
+\newcommand{\req}[1]{\textsf{\footnotesize\textcolor{black!55}{[\,#1\,]}}}
