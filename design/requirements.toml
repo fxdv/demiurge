@@ -52,20 +52,22 @@ tests = ["selects_min_cost_backend", "forwards_to_cheapest_backend"]
 [[requirement]]
 id = "ALG-ROUTE"
 kind = "structural"
-status = "intended"
+status = "implemented"
 phase = 1
 section = "8.2"
 summary = "Route admits, dispatches prefill asynchronously, and returns immediately."
-requires_test = false
+requires_test = true
+tests = ["route_returns_before_prefill_complete"]
 
 [[requirement]]
 id = "DEMI-SHORT-FASTPATH"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 1
 section = "8.2"
 summary = "Short contexts use colocated routing unless warmth override applies."
-requires_test = false
+requires_test = true
+tests = ["short_context_uses_colocated_path"]
 
 # --- Phase 2: KV hand-off & memory barriers -------------------------------
 

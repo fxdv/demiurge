@@ -229,7 +229,7 @@ plans (short-context fast path, KV overhead accounting, dynamic pool
 rebalancing), and the live burndown — lives in **[`ROADMAP.md`](ROADMAP.md)**.
 
 Track progress: `cargo xtask lint` prints per-phase burndown
-(`P0: 4/4`, `P1: 0/2`, …). The spec conformance matrix includes a Phase column.
+(`P0: 4/4`, `P1: 2/2`, …). The spec conformance matrix includes a Phase column.
 
 ## Contributing
 

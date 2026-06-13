@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use demiurge_cost::{compose, BarrierFactor, Corrector, Discount, TimeCore};
-use demiurge_router::{select, Backend};
+use demiurge_router::{route, select, Backend, Router};
 use serde::Deserialize;
 
 const BENCH_GATES: &str = "design/bench-gates.toml";
@@ -84,6 +84,29 @@ fn bench_backend_cost() {
     std::hint::black_box(b.cost());
 }
 
+fn sample_router() -> Router {
+    let addr: SocketAddr = "127.0.0.1:1".parse().expect("addr");
+    Router::new(
+        vec![Backend::new("pf", addr, 0.01)],
+        vec![Backend::new("dc", addr, 0.02)],
+    )
+}
+
+const CLASSIFY_HEAD: &[u8] =
+    b"GET /long/2048 HTTP/1.1\r\nhost: x\r\nx-demiurge-tokens: 2048\r\n\r\n";
+
+const SHORT_HEAD: &[u8] = b"GET / HTTP/1.1\r\nhost: x\r\nx-demiurge-tokens: 32\r\n\r\n";
+
+fn bench_classify() {
+    let router = sample_router();
+    let _ = std::hint::black_box(route(&router, SHORT_HEAD));
+}
+
+fn bench_route_dispatch() {
+    let router = sample_router();
+    let _ = std::hint::black_box(route(&router, CLASSIFY_HEAD));
+}
+
 fn run_gate(gate: &Gate, settings: &Settings) -> Result<(u64, u64), Box<dyn Error>> {
     let measured = match gate.id.as_str() {
         "BENCH-COMPOSE-8" => median_ns_per_op(
@@ -103,6 +126,18 @@ fn run_gate(gate: &Gate, settings: &Settings) -> Result<(u64, u64), Box<dyn Erro
             gate.bench_iters,
             settings.samples,
             bench_backend_cost,
+        ),
+        "BENCH-CLASSIFY" => median_ns_per_op(
+            gate.warmup_iters,
+            gate.bench_iters,
+            settings.samples,
+            bench_classify,
+        ),
+        "BENCH-ROUTE-DISPATCH" => median_ns_per_op(
+            gate.warmup_iters,
+            gate.bench_iters,
+            settings.samples,
+            bench_route_dispatch,
         ),
         other => return Err(format!("unknown bench gate id {other:?}").into()),
     };

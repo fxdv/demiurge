@@ -136,12 +136,12 @@ Within a phase pool, the forwarder selects the backend with minimum $\ln C$
 \texttt{Backend::cost()}.
 
 \subsection{Non-Blocking Route and Fast Path}\label{sec:route}
-\intent{\texttt{Route} admits a request, dispatches prefill asynchronously, and
+\texttt{Route} admits a request, dispatches prefill asynchronously, and
 returns immediately \req{ALG-ROUTE}; decode placement runs in
 \textsc{OnPrefillComplete} on fresh telemetry. Prompts at or below
 \texttt{routing.short\_context\_tokens} use a \textbf{colocated} fast path
 (single backend, no cross-pool hand-off) unless a warmth override forces
-disaggregation \req{DEMI-SHORT-FASTPATH}.}
+disaggregation \req{DEMI-SHORT-FASTPATH}.
 
 \begin{algorithm}[h]
 \caption{Route (target behavior; Phase~1)}

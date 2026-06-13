@@ -1,28 +1,76 @@
-//! Minimal phase-aware, cost-based TCP forwarder.
+//! Phase-aware, cost-based TCP forwarder.
 //!
-//! This is the smallest real thing that earns the word "router": it accepts a
-//! connection, classifies it into a prefill or decode pool, selects the
-//! minimum-cost backend in that pool using `demiurge-cost`, and proxies bytes
-//! to it. It is deliberately *not* the full design in `spec/` — there is no
-//! XDP, RDMA, gossip, KV hand-off, or asynchronous prefill dispatch; those
-//! remain design intent. This is the load-bearing core the rest grows around.
+//! **Phase 0:** min-cost selection over phase pools (`select`, `Router::pick`).
+//! **Phase 1:** async disaggregated `Route` + short-context colocated fast path
+//! ([ALG-ROUTE], [DEMI-SHORT-FASTPATH]). KV hand-off, warmth override, XDP, and
+//! gossip remain design intent (see `spec/`).
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
+use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
 use demiurge_cost::{compose, BarrierFactor, Corrector, Cost, TimeCore};
 
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Request phase. Prefill is compute-bound and cache-producing; decode is
-/// memory-bandwidth-bound and cache-consuming, so they are scheduled in
-/// separate pools.
+/// memory-bandwidth-bound and cache-consuming.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
     Prefill,
     Decode,
 }
+
+/// Opaque correlation handle for disaggregated prefill → decode continuations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestId(u64);
+
+impl RequestId {
+    pub fn new() -> Self {
+        Self(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Telemetry produced when prefill finishes; feeds decode placement.
+#[derive(Debug, Clone, Copy)]
+pub struct PrefillSignals {
+    pub prompt_tokens: u64,
+}
+
+/// Admission outcome from [`route`].
+#[derive(Debug, Clone)]
+pub enum RoutePath {
+    /// Short context: colocated prefill+decode on one backend. [DEMI-SHORT-FASTPATH]
+    Colocated(Arc<Backend>),
+    /// Long (or unknown) context: async prefill, decode in [`on_prefill_complete`].
+    /// [ALG-ROUTE]
+    Disaggregated {
+        prefill: Arc<Backend>,
+        request_id: RequestId,
+        prompt_tokens: u64,
+    },
+    /// Client declared decode phase only (`X-Demiurge-Phase: decode` or `/decode`).
+    DecodeOnly(Arc<Backend>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteError {
+    NoBackend,
+}
+
+impl std::fmt::Display for RouteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouteError::NoBackend => write!(f, "no backend available for route"),
+        }
+    }
+}
+
+impl std::error::Error for RouteError {}
 
 /// A backend instance plus its live load signal.
 #[derive(Debug)]
@@ -47,19 +95,14 @@ impl Backend {
         self.inflight.load(Ordering::Relaxed)
     }
 
-    /// Mark a request as dispatched to this backend (raises its load signal).
     pub fn incr_inflight(&self) {
         self.inflight.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Mark a dispatched request as finished.
     pub fn decr_inflight(&self) {
         self.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Live cost estimate: configured base service time, penalized by a queueing
-    /// barrier that grows with in-flight requests. Fail-expensive clamping means
-    /// a broken signal can never make this backend look artificially cheap.
     pub fn cost(&self) -> Cost {
         let core = TimeCore::clamped(self.base_service_seconds);
         let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
@@ -67,8 +110,7 @@ impl Backend {
     }
 }
 
-/// Select the minimum-cost backend from a candidate set (spec §8.1).
-/// [DEMI-ROUTE-MINCOST]
+/// Select the minimum-cost backend (spec §8.1). [DEMI-ROUTE-MINCOST]
 pub fn select(candidates: &[Arc<Backend>]) -> Option<Arc<Backend>> {
     candidates
         .iter()
@@ -76,7 +118,6 @@ pub fn select(candidates: &[Arc<Backend>]) -> Option<Arc<Backend>> {
         .cloned()
 }
 
-/// Two phase-keyed pools of backends.
 #[derive(Clone, Default)]
 pub struct Router {
     prefill: Vec<Arc<Backend>>,
@@ -95,14 +136,16 @@ impl Router {
         }
     }
 
-    /// Minimum-cost backend for the given phase. [DEMI-ROUTE-MINCOST]
     pub fn pick(&self, phase: Phase) -> Option<Arc<Backend>> {
         select(self.pool(phase))
     }
+
+    /// Colocated fast path uses the prefill pool (single hop prefill+decode).
+    pub fn pick_colocated(&self) -> Option<Arc<Backend>> {
+        self.pick(Phase::Prefill)
+    }
 }
 
-/// Parse a pool spec of the form `label@host:port@seconds` items separated by
-/// commas, e.g. `p0@127.0.0.1:9001@0.05,p1@127.0.0.1:9002@0.05`.
 pub fn parse_pool(spec: &str) -> Result<Vec<Arc<Backend>>, String> {
     let mut out = Vec::new();
     for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
@@ -125,21 +168,104 @@ pub fn parse_pool(spec: &str) -> Result<Vec<Arc<Backend>>, String> {
 
 const MAX_HEAD: usize = 64 * 1024;
 
-/// Classify a request by its head: an `X-Demiurge-Phase: decode` header or a
-/// `/decode` path routes to the decode pool; everything else is prefill.
-fn classify(head: &[u8]) -> Phase {
-    let text = String::from_utf8_lossy(head).to_ascii_lowercase();
-    let decode_hdr = text.contains("x-demiurge-phase: decode");
-    let decode_path = text.lines().next().is_some_and(|l| l.contains(" /decode"));
-    if decode_hdr || decode_path {
-        Phase::Decode
-    } else {
-        Phase::Prefill
+/// Parse `X-Demiurge-Tokens: N` from the request head.
+pub fn parse_prompt_tokens(head: &[u8]) -> Option<u64> {
+    let text = String::from_utf8_lossy(head);
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("x-demiurge-tokens:") {
+            if let Ok(n) = rest.trim().parse::<u64>() {
+                return Some(n);
+            }
+        }
     }
+    None
 }
 
-/// Read the HTTP request head (through the blank line) so we can classify it
-/// before choosing a backend.
+/// Parse token count from `/prefill/<n>` or `/long/<n>` path segments.
+pub fn parse_path_tokens(head: &[u8]) -> Option<u64> {
+    let first = head.split(|&b| b == b'\r' || b == b'\n').next()?;
+    let first = std::str::from_utf8(first).ok()?;
+    let path = first.split_whitespace().nth(1)?;
+    for prefix in ["/prefill/", "/long/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = num.parse() {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+/// Estimate prompt tokens for admission. Unknown prompts default to above the
+/// fast-path threshold so we never colocate a long unknown request.
+pub fn estimate_prompt_tokens(head: &[u8]) -> u64 {
+    parse_prompt_tokens(head)
+        .or_else(|| parse_path_tokens(head))
+        .unwrap_or(ROUTING_SHORT_CONTEXT_TOKENS + 1)
+}
+
+/// True when the client declared decode-only routing.
+pub fn is_decode_only(head: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(head).to_ascii_lowercase();
+    text.contains("x-demiurge-phase: decode")
+        || text.lines().next().is_some_and(|l| l.contains(" /decode"))
+}
+
+/// Classify admission path from the HTTP head. [ALG-ROUTE] [DEMI-SHORT-FASTPATH]
+pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
+    if is_decode_only(head) {
+        return router
+            .pick(Phase::Decode)
+            .map(RoutePath::DecodeOnly)
+            .ok_or(RouteError::NoBackend);
+    }
+
+    let prompt_tokens = estimate_prompt_tokens(head);
+    if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
+        return router
+            .pick_colocated()
+            .map(RoutePath::Colocated)
+            .ok_or(RouteError::NoBackend);
+    }
+
+    let prefill = router.pick(Phase::Prefill).ok_or(RouteError::NoBackend)?;
+    Ok(RoutePath::Disaggregated {
+        prefill,
+        request_id: RequestId::new(),
+        prompt_tokens,
+    })
+}
+
+/// Decode placement continuation after prefill completes. [ALG-ROUTE]
+pub fn on_prefill_complete(router: &Router, _signals: &PrefillSignals) -> Option<Arc<Backend>> {
+    router.pick(Phase::Decode).or_else(|| router.pick_colocated())
+}
+
+/// Dispatch prefill I/O on a worker thread; invoke `on_complete` when done.
+/// Returns immediately without waiting for prefill (non-blocking dispatch).
+pub fn dispatch_prefill(
+    prefill: Arc<Backend>,
+    head: Vec<u8>,
+    prompt_tokens: u64,
+    on_complete: impl FnOnce(PrefillSignals) + Send + 'static,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let _ = run_prefill_io(&prefill, &head);
+        on_complete(PrefillSignals { prompt_tokens });
+    })
+}
+
+fn run_prefill_io(prefill: &Backend, head: &[u8]) -> io::Result<()> {
+    let mut upstream = TcpStream::connect(prefill.addr)?;
+    upstream.write_all(head)?;
+    upstream.shutdown(Shutdown::Write)?;
+    let mut drain = [0u8; 4096];
+    while upstream.read(&mut drain)? > 0 {}
+    Ok(())
+}
+
 fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(1024);
     let mut byte = [0u8; 1];
@@ -152,7 +278,6 @@ fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Decrement a backend's in-flight counter when the connection ends.
 struct InflightGuard<'a>(&'a Backend);
 
 impl Drop for InflightGuard<'_> {
@@ -161,51 +286,159 @@ impl Drop for InflightGuard<'_> {
     }
 }
 
-fn handle_conn(mut client: TcpStream, router: &Router) -> io::Result<()> {
-    let head = read_head(&mut client)?;
-    let phase = classify(&head);
-
-    let backend = match router.pick(phase) {
-        Some(b) => b,
-        None => {
-            let _ =
-                client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
-            return Ok(());
-        }
-    };
-
+fn proxy_to_backend(client: &mut TcpStream, head: &[u8], backend: &Backend) -> io::Result<()> {
     backend.incr_inflight();
-    let _guard = InflightGuard(backend.as_ref());
+    let _guard = InflightGuard(backend);
 
     let mut upstream = TcpStream::connect(backend.addr)?;
-    upstream.write_all(&head)?;
+    upstream.write_all(head)?;
 
-    // Full-duplex pump: upstream -> client on a helper thread, client ->
-    // upstream on this one.
     let mut up_read = upstream.try_clone()?;
     let mut client_write = client.try_clone()?;
     let pump = thread::spawn(move || {
         let _ = io::copy(&mut up_read, &mut client_write);
         let _ = client_write.shutdown(Shutdown::Write);
     });
-    let _ = io::copy(&mut client, &mut upstream);
+    let mut client_read = client.try_clone()?;
+    let _ = io::copy(&mut client_read, &mut upstream);
     let _ = upstream.shutdown(Shutdown::Write);
     let _ = pump.join();
     Ok(())
 }
 
-/// Accept connections forever, forwarding each to its phase's minimum-cost
-/// backend. [DEMI-ROUTE-MINCOST]
+fn handle_disaggregated(
+    mut client: TcpStream,
+    head: Vec<u8>,
+    router: Arc<Router>,
+    prefill: Arc<Backend>,
+    prompt_tokens: u64,
+) -> io::Result<()> {
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let router2 = Arc::clone(&router);
+    let _prefill_worker = dispatch_prefill(prefill, head.clone(), prompt_tokens, move |signals| {
+        let decode = match on_prefill_complete(&router2, &signals) {
+            Some(d) => d,
+            None => {
+                let _ = done_tx.send(Err(RouteError::NoBackend));
+                return;
+            }
+        };
+        let _ = done_tx.send(Ok(decode));
+    });
+
+    let decode = match done_rx.recv().map_err(|_| io::Error::other("prefill channel"))? {
+        Ok(d) => d,
+        Err(RouteError::NoBackend) => {
+            let _ = client.write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
+            );
+            return Ok(());
+        }
+    };
+
+    proxy_to_backend(&mut client, &head, decode.as_ref())
+}
+
+fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
+    let mut client = client;
+    let head = read_head(&mut client)?;
+
+    match route(&router, &head) {
+        Ok(RoutePath::Colocated(b) | RoutePath::DecodeOnly(b)) => {
+            proxy_to_backend(&mut client, &head, b.as_ref())
+        }
+        Ok(RoutePath::Disaggregated {
+            prefill,
+            prompt_tokens,
+            ..
+        }) => handle_disaggregated(client, head, router, prefill, prompt_tokens),
+        Err(RouteError::NoBackend) => {
+            let _ =
+                client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+            Ok(())
+        }
+    }
+}
+
 pub fn serve(listener: TcpListener, router: Arc<Router>) -> io::Result<()> {
     for conn in listener.incoming() {
-        let client = match conn {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let Ok(client) = conn else { continue };
         let router = Arc::clone(&router);
         thread::spawn(move || {
-            let _ = handle_conn(client, &router);
+            let _ = handle_conn(client, router);
         });
     }
     Ok(())
+}
+
+/// Test helper: prefill backend that blocks until `release()` is called.
+pub fn spawn_latch_prefill_backend() -> (SocketAddr, LatchBackend) {
+    let latch = Arc::new((Mutex::new(false), Condvar::new()));
+    let latch2 = Arc::clone(&latch);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut s) = conn else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let (lock, cv) = &*latch2;
+            let mut started = lock.lock().expect("lock");
+            while !*started {
+                started = cv.wait(started).expect("wait");
+            }
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\rx-demiurge-prefill-done: 1\r\ncontent-length: 0\r\n\r\n");
+            let _ = s.shutdown(Shutdown::Write);
+        }
+    });
+    (addr, LatchBackend { latch })
+}
+
+pub struct LatchBackend {
+    latch: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl LatchBackend {
+    pub fn release(&self) {
+        let (lock, cv) = &*self.latch;
+        *lock.lock().expect("lock") = true;
+        cv.notify_all();
+    }
+}
+
+/// Test helper: marker backend for E2E proxy tests.
+pub fn spawn_marker_backend(marker: u8) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut s) = conn else { continue };
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\n{}",
+                marker as char
+            );
+            let _ = s.write_all(resp.as_bytes());
+            let _ = s.shutdown(Shutdown::Write);
+        }
+    });
+    addr
+}
+
+/// Sleep backend for timing tests.
+pub fn spawn_delay_backend(delay: Duration) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut s) = conn else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            thread::sleep(delay);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+            let _ = s.shutdown(Shutdown::Write);
+        }
+    });
+    addr
 }

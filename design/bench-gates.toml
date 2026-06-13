@@ -38,3 +38,21 @@ summary = "Backend::cost() — single target load signal"
 warmup_iters = 10_000
 bench_iters = 100_000
 max_median_ns = 150
+
+# --- Phase 1: route classification + async dispatch ----------------------------
+
+[[gate]]
+id = "BENCH-CLASSIFY"
+phase = 1
+summary = "route() — HTTP head parse + fast-path / disaggregated classification"
+warmup_iters = 5_000
+bench_iters = 50_000
+max_median_ns = 2_000
+
+[[gate]]
+id = "BENCH-ROUTE-DISPATCH"
+phase = 1
+summary = "route() disaggregated path — RequestId alloc + admission (no I/O)"
+warmup_iters = 5_000
+bench_iters = 50_000
+max_median_ns = 2_000
