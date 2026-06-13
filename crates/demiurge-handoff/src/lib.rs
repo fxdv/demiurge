@@ -1,10 +1,14 @@
 //! KV hand-off artifact between prefill and decode placement. [DEMI-KV-HANDOFF]
 //!
 //! Phase 2 ships an in-process registry plus HTTP header parsing; TCP blob
-//! transport remains pluggable for later RDMA work.
+//! transport remains pluggable for later RDMA work. Completed transfers record
+//! byte length and wall time for p50/p99 telemetry. [DEMI-KV-TRANSFER-TELEM]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const TRANSFER_SAMPLES: usize = 1024;
 
 static NEXT_KV_HANDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -76,10 +80,30 @@ pub fn parse_prefill_handoff(
     })
 }
 
+/// Aggregated hand-off transfer cost (p50 / p99 bytes and wall time).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HandoffTransferMetrics {
+    pub count: u64,
+    pub bytes_p50: u64,
+    pub bytes_p99: u64,
+    pub wall_us_p50: u64,
+    pub wall_us_p99: u64,
+}
+
+fn percentile(sorted: &[u64], p: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = ((sorted.len() as f64 * p) as usize).min(sorted.len() - 1);
+    sorted[idx]
+}
+
 /// In-process hand-off registry (TCP proof: prefill publishes, decode consumes).
 #[derive(Debug, Default)]
 pub struct HandoffRegistry {
     inner: Mutex<HashMap<u64, HandoffDescriptor>>,
+    transfer_bytes: Mutex<Vec<u64>>,
+    transfer_wall_us: Mutex<Vec<u64>>,
 }
 
 impl HandoffRegistry {
@@ -109,6 +133,54 @@ impl HandoffRegistry {
     pub fn take(&self, request_id: u64) -> Option<HandoffDescriptor> {
         self.inner.lock().expect("handoff lock").remove(&request_id)
     }
+
+    /// Record a completed KV hand-off transfer. [DEMI-KV-TRANSFER-TELEM]
+    pub fn record_transfer(&self, bytes: u64, wall: Duration) {
+        if bytes == 0 {
+            return;
+        }
+        let wall_us = wall.as_micros().min(u64::MAX as u128) as u64;
+        let mut sizes = self.transfer_bytes.lock().expect("transfer bytes");
+        if sizes.len() >= TRANSFER_SAMPLES {
+            sizes.remove(0);
+        }
+        sizes.push(bytes);
+        let mut walls = self.transfer_wall_us.lock().expect("transfer wall");
+        if walls.len() >= TRANSFER_SAMPLES {
+            walls.remove(0);
+        }
+        walls.push(wall_us);
+    }
+
+    /// p50 / p99 bytes and wall time over recorded transfers.
+    pub fn transfer_metrics(&self) -> HandoffTransferMetrics {
+        let mut bytes = self.transfer_bytes.lock().expect("transfer bytes").clone();
+        let mut walls = self.transfer_wall_us.lock().expect("transfer wall").clone();
+        if bytes.is_empty() {
+            return HandoffTransferMetrics::default();
+        }
+        bytes.sort_unstable();
+        walls.sort_unstable();
+        HandoffTransferMetrics {
+            count: bytes.len() as u64,
+            bytes_p50: percentile(&bytes, 0.50),
+            bytes_p99: percentile(&bytes, 0.99),
+            wall_us_p50: percentile(&walls, 0.50),
+            wall_us_p99: percentile(&walls, 0.99),
+        }
+    }
+
+    /// Log transfer cost summary to stderr (load bench / ops).
+    pub fn log_transfer_cost(&self, label: &str) {
+        let m = self.transfer_metrics();
+        if m.count == 0 {
+            return;
+        }
+        eprintln!(
+            "handoff-transfer: {label} n={} bytes p50/p99={}/{} wall_us p50/p99={}/{}",
+            m.count, m.bytes_p50, m.bytes_p99, m.wall_us_p50, m.wall_us_p99
+        );
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +200,20 @@ mod tests {
         let h = reg.take(1).expect("handoff");
         assert!(h.is_valid());
         assert!(reg.get(1).is_none());
+    }
+
+    #[test]
+    fn handoff_transfer_telemetry_p50_p99() {
+        let reg = HandoffRegistry::new();
+        for (bytes, us) in [(100_u64, 10_u64), (200, 20), (300, 30), (400, 40)] {
+            reg.record_transfer(bytes, Duration::from_micros(us));
+        }
+        let m = reg.transfer_metrics();
+        assert_eq!(m.count, 4);
+        assert_eq!(m.bytes_p50, 300);
+        assert_eq!(m.bytes_p99, 400);
+        assert_eq!(m.wall_us_p50, 30);
+        assert_eq!(m.wall_us_p99, 40);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use demiurge_cost::kv_breakdown;
-use demiurge_router::{serve, Backend, KvReservationLedger, Router};
+use demiurge_router::{serve, Backend, KvHandoffRegistry, KvReservationLedger, Router};
 use serde::{Deserialize, Serialize};
 
 const LOAD_BENCH: &str = "design/load-bench.toml";
@@ -112,6 +112,16 @@ pub struct ScenarioResult {
     pub kv_bytes_reserved_peak: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_admit_rejects: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_transfer_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_bytes_p50: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_bytes_p99: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_wall_us_p50: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff_wall_us_p99: Option<u64>,
     #[serde(default)]
     pub latencies_us: Vec<u64>,
 }
@@ -126,6 +136,7 @@ pub struct LoadBenchReport {
 struct RouterStack {
     addr: SocketAddr,
     ledger: Option<Arc<KvReservationLedger>>,
+    handoffs: Option<Arc<KvHandoffRegistry>>,
 }
 
 fn spawn_mock_backend(delay_us: u64, kv_bytes: Option<u64>) -> SocketAddr {
@@ -169,7 +180,7 @@ fn spawn_router_stack(
             let per = kv_breakdown(sc.long_prompt_tokens, sc.bytes_per_token).kv_reserved;
             per.saturating_mul(10)
         };
-        let (router, ledger, _handoffs) = Router::with_kv_pool(
+        let (router, ledger, handoffs) = Router::with_kv_pool(
             prefill.to_vec(),
             decode.to_vec(),
             capacity,
@@ -184,6 +195,7 @@ fn spawn_router_stack(
         RouterStack {
             addr,
             ledger: Some(ledger),
+            handoffs: Some(handoffs),
         }
     } else {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind router");
@@ -192,7 +204,11 @@ fn spawn_router_stack(
         thread::spawn(move || {
             let _ = serve(listener, router);
         });
-        RouterStack { addr, ledger: None }
+        RouterStack {
+            addr,
+            ledger: None,
+            handoffs: None,
+        }
     }
 }
 
@@ -391,6 +407,12 @@ fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn st
         _ => (0, 0),
     };
 
+    let transfer = stack
+        .handoffs
+        .as_ref()
+        .map(|h| h.transfer_metrics())
+        .filter(|m| m.count > 0);
+
     Ok(ScenarioResult {
         id: sc.id.clone(),
         summary: sc.summary.clone(),
@@ -422,6 +444,11 @@ fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn st
         } else {
             None
         },
+        handoff_transfer_count: transfer.map(|m| m.count),
+        handoff_bytes_p50: transfer.map(|m| m.bytes_p50),
+        handoff_bytes_p99: transfer.map(|m| m.bytes_p99),
+        handoff_wall_us_p50: transfer.map(|m| m.wall_us_p50),
+        handoff_wall_us_p99: transfer.map(|m| m.wall_us_p99),
         latencies_us: samples,
     })
 }
@@ -584,6 +611,16 @@ fn load_bench_inner(
                     }
                 );
             }
+        }
+        if let Some(count) = result.handoff_transfer_count {
+            eprintln!(
+                "load-bench: {} handoff transfer — n={count} bytes p50/p99 {}/{} wall_us p50/p99 {}/{}",
+                result.id,
+                result.handoff_bytes_p50.unwrap_or(0),
+                result.handoff_bytes_p99.unwrap_or(0),
+                result.handoff_wall_us_p50.unwrap_or(0),
+                result.handoff_wall_us_p99.unwrap_or(0),
+            );
         }
         if let Some(limit) = result.max_p99_ms {
             if result.ok == 0 {

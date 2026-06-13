@@ -2,6 +2,7 @@ use demiurge_cost::kv_breakdown;
 use demiurge_router::{
     on_prefill_complete, Backend, Phase, PrefillSignals, RequestId, RouteError, Router,
 };
+use std::time::Duration;
 
 // Integration: wired KV pool rejects decode without prefill hand-off headers.
 #[test]
@@ -13,6 +14,7 @@ fn disaggregated_decode_requires_handoff() {
     let signals = PrefillSignals {
         request_id: RequestId::new(),
         prompt_tokens: 32,
+        prefill_wall: Duration::from_micros(1),
     };
 
     let empty = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n";
@@ -29,6 +31,9 @@ fn disaggregated_decode_requires_handoff() {
         on_prefill_complete(&router, &signals, with_handoff.as_bytes(), "pf").expect("ok");
     assert_eq!(placement.backend().label, "dc");
     assert!(ledger.fleet_reserved() > 0);
+    let telem = router.handoffs().expect("handoffs").transfer_metrics();
+    assert_eq!(telem.count, 1);
+    assert_eq!(telem.bytes_p50, reserved);
     drop(placement);
     assert_eq!(ledger.fleet_reserved(), 0);
 }

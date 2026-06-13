@@ -18,7 +18,9 @@ use demiurge_cost::{compose, kv_breakdown, BarrierFactor, Corrector, Cost, TimeC
 use demiurge_handoff::{parse_prefill_handoff, HandoffRegistry};
 
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
-pub use demiurge_handoff::{HandoffRegistry as KvHandoffRegistry, KvHandle};
+pub use demiurge_handoff::{
+    HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
+};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -55,6 +57,8 @@ impl Default for RequestId {
 pub struct PrefillSignals {
     pub request_id: RequestId,
     pub prompt_tokens: u64,
+    /// Wall time for prefill I/O including KV hand-off header receipt.
+    pub prefill_wall: Duration,
 }
 
 /// Admission outcome from [`route`].
@@ -387,7 +391,8 @@ pub fn on_prefill_complete(
 
     if let Some(h) = handoff {
         if let Some(reg) = &router.handoffs {
-            reg.publish(h);
+            reg.publish(h.clone());
+            reg.record_transfer(h.byte_len, signals.prefill_wall);
         }
     }
 
@@ -406,11 +411,14 @@ pub fn dispatch_prefill(
     on_complete: impl FnOnce(PrefillSignals, Vec<u8>) + Send + 'static,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let started = std::time::Instant::now();
         let response = run_prefill_io(&prefill, &head).unwrap_or_default();
+        let prefill_wall = started.elapsed();
         on_complete(
             PrefillSignals {
                 request_id,
                 prompt_tokens,
+                prefill_wall,
             },
             response,
         );

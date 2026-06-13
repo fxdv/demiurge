@@ -166,6 +166,33 @@ pub fn render(report: &LoadBenchReport) -> String {
                 );
             }
         }
+        if let Some(n) = s.handoff_transfer_count {
+            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+            let _ = writeln!(out, "{}", pad_line("HAND-OFF TRANSFER (Phase 2 exit)"));
+            let _ = writeln!(
+                out,
+                "{}",
+                pad_line(&format!("  transfers ............ {:>12}", n))
+            );
+            let _ = writeln!(
+                out,
+                "{}",
+                pad_line(&format!(
+                    "  bytes p50 / p99 ...... {:>6} / {}",
+                    s.handoff_bytes_p50.unwrap_or(0),
+                    s.handoff_bytes_p99.unwrap_or(0)
+                ))
+            );
+            let _ = writeln!(
+                out,
+                "{}",
+                pad_line(&format!(
+                    "  wall p50 / p99 (µs) .. {:>6} / {}",
+                    s.handoff_wall_us_p50.unwrap_or(0),
+                    s.handoff_wall_us_p99.unwrap_or(0)
+                ))
+            );
+        }
         if let Some(limit) = s.max_p99_ms {
             let gate = if s.ok == 0 {
                 "FAIL ✗ (no ok)"

@@ -111,6 +111,16 @@ summary = "Session end, abort, or TTL always releases KV reservation."
 requires_test = true
 tests = ["reservation_released_on_session_end"]
 
+[[requirement]]
+id = "DEMI-KV-TRANSFER-TELEM"
+kind = "structural"
+status = "implemented"
+phase = 2
+section = "8.3"
+summary = "Hand-off transfer cost logged as p50/p99 bytes and wall time."
+requires_test = true
+tests = ["handoff_transfer_telemetry_p50_p99", "disaggregated_decode_requires_handoff"]
+
 # --- Phase 3: state plane -------------------------------------------------
 
 [[requirement]]

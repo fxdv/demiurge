@@ -120,6 +120,8 @@ backend threads do not accumulate across scenarios. Thin-place scouts (local onl
 | `LOAD-CLASSIFY-MIX` | Mixed short/long token headers + KV hand-off on long requests |
 | `LOAD-DISAGG-CHAIN` | Full disagg chain with backend I/O delay |
 
+KV scenarios log hand-off transfer telemetry (bytes/wall p50/p99) — Phase 2 exit gate.
+
 Debug one scenario: `cargo run --release -q --package xtask -- load-bench --scenario LOAD-KV-BURST`.
 
 ---
@@ -459,7 +461,7 @@ cannot OOM the decode pool.
 **Exit gate**
 
 - [x] No decode-pool OOM in the 10× prefill burst bench with overhead terms enabled.
-- [ ] Hand-off transfer cost logged: p50 / p99 bytes and wall time.
+- [x] Hand-off transfer cost logged: p50 / p99 bytes and wall time.
 - [x] Φ barrier visible in cost: overloaded decode pool raises all decode targets’ log-cost monotonically.
 - [x] `kv_reservation_error` metric present and bounded in steady-state bench.
 - [x] `BENCH-KV-RESERVE` gate passes.

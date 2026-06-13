@@ -157,8 +157,9 @@ disaggregation \req{DEMI-SHORT-FASTPATH}.
 
 \subsection{KV Hand-Off}\label{sec:handoff}
 Prefill completion publishes a KV hand-off handle; decode placement never
-proceeds without it \req{DEMI-KV-HANDOFF}. Transport is pluggable (TCP proof,
-then RDMA).
+proceeds without it \req{DEMI-KV-HANDOFF}. Each completed transfer records byte
+length and prefill I/O wall time; operators report p50/p99 aggregates
+\req{DEMI-KV-TRANSFER-TELEM}. Transport is pluggable (TCP proof, then RDMA).
 
 \subsection{Greedy Pairing}\label{sec:pairing}
 \intent{Joint pf$\to$dc placement is approximated greedily: fix prefill target,
