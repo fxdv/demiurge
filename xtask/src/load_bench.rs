@@ -6,7 +6,7 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,9 @@ struct LoadSettings {
     report_dir: String,
     warmup_requests: u32,
     startup_delay_ms: u64,
+    /// Pause between isolated `--stress` subprocess runs (ephemeral-port recovery).
+    #[serde(default)]
+    stress_recovery_ms: u64,
     #[serde(default)]
     gate_strict: bool,
 }
@@ -38,6 +41,9 @@ struct Scenario {
     summary: String,
     #[serde(default)]
     ci: bool,
+    /// Real stress scenarios: run via `load-bench --stress` only (excluded from default suite).
+    #[serde(default)]
+    stress: bool,
     backends: u32,
     base_cost_seconds: f64,
     cost_step_seconds: f64,
@@ -65,6 +71,9 @@ struct Scenario {
     /// Long-context token count for `long_tokens` / KV hand-off paths.
     #[serde(default = "default_long_tokens")]
     long_prompt_tokens: u64,
+    /// Cap concurrent in-flight TCP requests (0 = unlimited).
+    #[serde(default)]
+    max_inflight: u32,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -262,6 +271,20 @@ fn request_line(
     .into_bytes()
 }
 
+fn connect_router(router: SocketAddr) -> Result<TcpStream, ()> {
+    const ATTEMPTS: u32 = 4;
+    for attempt in 0..ATTEMPTS {
+        match TcpStream::connect(router) {
+            Ok(s) => return Ok(s),
+            Err(_) if attempt + 1 < ATTEMPTS => {
+                thread::sleep(Duration::from_millis(1 << attempt));
+            }
+            Err(_) => return Err(()),
+        }
+    }
+    Err(())
+}
+
 fn one_request(
     router: SocketAddr,
     request_style: &str,
@@ -270,8 +293,8 @@ fn one_request(
     seq: u64,
 ) -> Result<u64, ()> {
     let start = Instant::now();
-    let mut s = TcpStream::connect(router).map_err(|_| ())?;
-    s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    let mut s = connect_router(router)?;
+    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
     s.write_all(&request_line(
         request_style,
         long_prompt_tokens,
@@ -294,6 +317,45 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
     }
     let idx = ((sorted.len() as f64 * p) as usize).min(sorted.len() - 1);
     sorted[idx]
+}
+
+struct InflightGate {
+    slots: Mutex<usize>,
+    cv: Condvar,
+    max: usize,
+}
+
+struct InflightGuard {
+    gate: Arc<InflightGate>,
+}
+
+impl InflightGate {
+    fn new(max: usize) -> Arc<Self> {
+        Arc::new(Self {
+            slots: Mutex::new(0),
+            cv: Condvar::new(),
+            max,
+        })
+    }
+
+    fn enter(self: &Arc<Self>) -> InflightGuard {
+        let mut slots = self.slots.lock().expect("inflight");
+        while *slots >= self.max {
+            slots = self.cv.wait(slots).expect("inflight wait");
+        }
+        *slots += 1;
+        InflightGuard {
+            gate: Arc::clone(self),
+        }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let mut slots = self.gate.slots.lock().expect("inflight");
+        *slots -= 1;
+        self.gate.cv.notify_one();
+    }
 }
 
 struct PeakGuard {
@@ -342,6 +404,11 @@ fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn st
 
     let start_wall = Instant::now();
     let mut handles = Vec::new();
+    let inflight = if sc.max_inflight > 0 {
+        Some(InflightGate::new(sc.max_inflight as usize))
+    } else {
+        None
+    };
     let peak_sampler = stack.ledger.clone();
     let peak_atomic = peak_guard.as_ref().map(|g| Arc::clone(&g.peak));
     for w in 0..sc.concurrency {
@@ -355,6 +422,7 @@ fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn st
         let long_prompt_tokens = sc.long_prompt_tokens;
         let peak_atomic = peak_atomic.clone();
         let peak_sampler = peak_sampler.clone();
+        let inflight = inflight.clone();
         handles.push(thread::spawn(move || {
             for r in 0..requests_per_worker {
                 let seq = u64::from(w) * u64::from(requests_per_worker) + u64::from(r);
@@ -366,6 +434,7 @@ fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn st
                 } else {
                     (seq % 100) as f64 / 100.0 < prefill_fraction
                 };
+                let _slot = inflight.as_ref().map(|g| g.enter());
                 match one_request(
                     router_addr,
                     &request_style,
@@ -476,26 +545,40 @@ fn xtask_exe() -> PathBuf {
 pub fn load_bench(
     ci_only: bool,
     only_scenario: Option<&str>,
+    stress: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if only_scenario.is_none() && !ci_only {
-        return load_bench_isolated(false);
+        if stress {
+            return load_bench_isolated(IsolatedMode::Stress);
+        }
+        return load_bench_isolated(IsolatedMode::Local);
     }
-    load_bench_inner(ci_only, only_scenario)
+    load_bench_inner(ci_only, only_scenario, stress)
 }
 
-fn load_bench_isolated(ci_only: bool) -> Result<(), Box<dyn std::error::Error>> {
+enum IsolatedMode {
+    Local,
+    Stress,
+}
+
+fn load_bench_isolated(mode: IsolatedMode) -> Result<(), Box<dyn std::error::Error>> {
     let file: LoadBenchFile = toml::from_str(&fs::read_to_string(LOAD_BENCH)?)?;
-    let ids: Vec<String> = if ci_only {
-        file.scenario
-            .iter()
-            .filter(|s| s.ci)
-            .map(|s| s.id.clone())
-            .collect()
-    } else {
-        file.scenario.iter().map(|s| s.id.clone()).collect()
-    };
+    let stress_run = matches!(mode, IsolatedMode::Stress);
+    let ids: Vec<String> = file
+        .scenario
+        .iter()
+        .filter(|s| match mode {
+            IsolatedMode::Local => !s.stress,
+            IsolatedMode::Stress => s.stress,
+        })
+        .map(|s| s.id.clone())
+        .collect();
     if ids.is_empty() {
-        return Err("no scenarios to run".into());
+        return Err(if stress_run {
+            "no scenarios with stress=true in load-bench.toml".into()
+        } else {
+            "no scenarios in load-bench.toml".into()
+        });
     }
 
     let exe = xtask_exe();
@@ -510,10 +593,13 @@ fn load_bench_isolated(ci_only: bool) -> Result<(), Box<dyn std::error::Error>> 
     let mut failures = 0usize;
     for id in &ids {
         eprintln!("load-bench: isolate → {id} …");
-        let status = Command::new(&exe)
-            .current_dir(&root)
-            .args(["load-bench", "--scenario", id])
-            .status()?;
+        let mut cmd = Command::new(&exe);
+        cmd.current_dir(&root)
+            .args(["load-bench", "--scenario", id]);
+        if stress_run {
+            cmd.arg("--stress");
+        }
+        let status = cmd.status()?;
         if !status.success() {
             failures += 1;
         }
@@ -523,7 +609,14 @@ fn load_bench_isolated(ci_only: bool) -> Result<(), Box<dyn std::error::Error>> 
                 serde_json::from_str(&fs::read_to_string(&partial_path)?)?;
             scenarios.extend(partial.scenarios);
         }
-        if file.settings.startup_delay_ms > 0 {
+        if stress_run {
+            let delay = if file.settings.stress_recovery_ms > 0 {
+                file.settings.stress_recovery_ms
+            } else {
+                file.settings.startup_delay_ms.max(10_000)
+            };
+            thread::sleep(Duration::from_millis(delay));
+        } else if file.settings.startup_delay_ms > 0 {
             thread::sleep(Duration::from_millis(file.settings.startup_delay_ms));
         }
     }
@@ -533,7 +626,12 @@ fn load_bench_isolated(ci_only: bool) -> Result<(), Box<dyn std::error::Error>> 
         hostname: hostname(),
         scenarios,
     };
-    let (json_path, _) = report_paths(&file.settings.report_dir);
+    let report_name = if stress_run {
+        "stress.json"
+    } else {
+        "latest.json"
+    };
+    let json_path = PathBuf::from(&file.settings.report_dir).join(report_name);
     write_report(&json_path, &report)?;
     eprintln!(
         "load-bench: merged {} scenario(s) → {}",
@@ -551,6 +649,7 @@ fn load_bench_isolated(ci_only: bool) -> Result<(), Box<dyn std::error::Error>> 
 fn load_bench_inner(
     ci_only: bool,
     only_scenario: Option<&str>,
+    stress: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file: LoadBenchFile = toml::from_str(&fs::read_to_string(LOAD_BENCH)?)?;
 
@@ -581,7 +680,10 @@ fn load_bench_inner(
 
     let mut scenarios = Vec::new();
     let mut gate_failures = 0usize;
-    let strict = ci_only || file.settings.gate_strict;
+    let strict = ci_only || file.settings.gate_strict || stress;
+    if stress {
+        eprintln!("load-bench: STRESS — zero errors required; all soft gates enforced");
+    }
 
     for sc in selected {
         eprintln!("load-bench: running {} …", sc.id);
@@ -679,9 +781,14 @@ fn load_bench_inner(
     }
 }
 
-pub fn load_report() -> Result<(), Box<dyn std::error::Error>> {
+pub fn load_report(stress: bool) -> Result<(), Box<dyn std::error::Error>> {
     let file: LoadBenchFile = toml::from_str(&fs::read_to_string(LOAD_BENCH)?)?;
-    let (json_path, pseudo_path) = report_paths(&file.settings.report_dir);
+    let dir = PathBuf::from(&file.settings.report_dir);
+    let (json_path, pseudo_path) = if stress {
+        (dir.join("stress.json"), dir.join("stress.pseudo"))
+    } else {
+        report_paths(&file.settings.report_dir)
+    };
 
     if !json_path.exists() {
         return Err(format!(

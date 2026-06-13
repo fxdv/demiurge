@@ -124,6 +124,22 @@ KV scenarios log hand-off transfer telemetry (bytes/wall p50/p99) — Phase 2 ex
 
 Debug one scenario: `cargo run --release -q --package xtask -- load-bench --scenario LOAD-KV-BURST`.
 
+### Real stress (`./scripts/load-stress.sh`)
+
+Strict local stress — zero errors and p99 gates enforced. Not in `gate.sh` or CI.
+Each scenario runs in an isolated subprocess with 30s recovery between runs.
+
+| ID | What it stresses |
+|----|------------------|
+| `LOAD-STRESS-REAL` | **THE REAL ONE**: 5k omni — mixed + KV + skew + 4096-token context |
+| `LOAD-STRESS-KV-ARMY` | 4.8k mixed disagg + KV hand-off |
+| `LOAD-STRESS-FLOOD` | 1.8k colocated flood (capped in-flight; runs last) |
+
+```bash
+./scripts/load-stress.sh
+# → target/load-bench/stress.json + stress.pseudo
+```
+
 ---
 
 ## Cross-cutting plans

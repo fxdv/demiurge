@@ -77,12 +77,16 @@ fn main() {
         "load-bench" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             let ci_only = args.iter().any(|a| a == "--ci");
+            let stress = args.iter().any(|a| a == "--stress");
             let scenario = args
                 .windows(2)
                 .find_map(|w| (w[0] == "--scenario").then_some(w[1].as_str()));
-            load_bench::load_bench(ci_only, scenario)
+            load_bench::load_bench(ci_only, scenario, stress)
         }
-        "load-report" => load_bench::load_report(),
+        "load-report" => {
+            let stress = std::env::args().skip(2).any(|a| a == "--stress");
+            load_bench::load_report(stress)
+        }
         other => {
             eprintln!(
                 "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `bench-probe`, `load-bench`, or `load-report`"

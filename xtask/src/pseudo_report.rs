@@ -7,8 +7,10 @@ use crate::load_bench::LoadBenchReport;
 const W: usize = 72;
 
 fn pad_line(inner: &str) -> String {
-    let content = if inner.len() > W - 4 {
-        format!("{}…", &inner[..W - 5])
+    let max_len = W - 4;
+    let content = if inner.chars().count() > max_len {
+        let truncated: String = inner.chars().take(max_len - 1).collect();
+        format!("{truncated}…")
     } else {
         inner.to_string()
     };
