@@ -80,6 +80,7 @@ backend_delay_us = 0
 concurrency = 12
 requests_per_worker = 4
 max_p99_ms = 150.0
+isolate_recovery = true
 
 [[scenario]]
 id = "LOAD-LARGE-POOL"
@@ -156,6 +157,7 @@ backend_delay_us = 0
 concurrency = 24
 requests_per_worker = 40
 max_p99_ms = 200.0
+isolate_recovery = true
 
 [[scenario]]
 id = "LOAD-PAIR-KV-PRESSURE"
@@ -175,6 +177,7 @@ concurrency = 12
 requests_per_worker = 16
 max_kv_admit_rejects = 48
 max_p99_ms = 150.0
+isolate_recovery = true
 
 [[scenario]]
 id = "LOAD-STEP-ACTUATE"
@@ -193,6 +196,7 @@ step_prefill_fraction = [0.5, 1.0]
 step_request_style = ["path", "long_tokens"]
 min_dataplane_pi = 0.55
 max_p99_ms = 200.0
+isolate_recovery = true
 
 # --- Real stress (load-bench --stress / ./scripts/load-stress.sh) ------------
 # Excluded from ./scripts/load-bench.sh. Strict gates: zero errors + p99.

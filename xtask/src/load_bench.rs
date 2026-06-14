@@ -104,6 +104,9 @@ struct Scenario {
     /// Fail when final dataplane π stays below this after actuation scenarios.
     #[serde(default)]
     min_dataplane_pi: Option<f64>,
+    /// Pause `stress_recovery_ms` before this scenario's isolated subprocess (port recovery).
+    #[serde(default)]
+    isolate_recovery: bool,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -842,6 +845,17 @@ fn load_bench_isolated(mode: IsolatedMode) -> Result<(), Box<dyn std::error::Err
     let mut scenarios = Vec::new();
     let mut failures = 0usize;
     for id in &ids {
+        if let Some(sc) = file.scenario.iter().find(|s| s.id == *id) {
+            if sc.isolate_recovery {
+                let delay = if file.settings.stress_recovery_ms > 0 {
+                    file.settings.stress_recovery_ms
+                } else {
+                    file.settings.startup_delay_ms.max(10_000)
+                };
+                eprintln!("load-bench: recovery {delay}ms before {id} …");
+                thread::sleep(Duration::from_millis(delay));
+            }
+        }
         eprintln!("load-bench: isolate → {id} …");
         let mut cmd = Command::new(&exe);
         cmd.current_dir(&root)
@@ -930,14 +944,23 @@ fn load_bench_inner(
 
     let mut scenarios = Vec::new();
     let mut gate_failures = 0usize;
-    let strict = ci_only || file.settings.gate_strict || stress;
+    let mut strict_failures = 0usize;
     if stress {
         eprintln!("load-bench: STRESS — zero errors required; all soft gates enforced");
     }
 
     for sc in selected {
+        let strict = ci_only
+            || file.settings.gate_strict
+            || stress
+            || sc.rebalancer_actuation
+            || sc.isolate_recovery;
+        if sc.isolate_recovery && only_scenario.is_some() {
+            eprintln!("load-bench: strict gates — zero errors required for {}", sc.id);
+        }
         eprintln!("load-bench: running {} …", sc.id);
         let result = run_scenario(sc, file.settings.warmup_requests)?;
+        let failures_before = gate_failures;
         if result.errors > 0 {
             let rejects = result.kv_admit_rejects.unwrap_or(0);
             if let Some(cap) = sc.max_kv_admit_rejects {
@@ -1063,6 +1086,9 @@ fn load_bench_inner(
             }
         }
         scenarios.push(result);
+        if strict && gate_failures > failures_before {
+            strict_failures += gate_failures - failures_before;
+        }
     }
 
     let report = LoadBenchReport {
@@ -1080,8 +1106,8 @@ fn load_bench_inner(
     write_report(&json_path, &report)?;
     eprintln!("load-bench: wrote {}", json_path.display());
 
-    if strict && gate_failures > 0 {
-        Err(format!("{gate_failures} scenario soft gate(s) failed (gate_strict=true)").into())
+    if strict_failures > 0 {
+        Err(format!("{strict_failures} strict gate(s) failed").into())
     } else {
         if gate_failures > 0 {
             eprintln!(
