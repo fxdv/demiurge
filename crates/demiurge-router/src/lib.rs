@@ -13,9 +13,8 @@ use std::thread;
 use std::time::Duration;
 
 use demiurge_control::{
-    export_pool_pressure, pairing_regret_targets,
-    AdmitError, LengthPredictor, PairingTarget, PoolPressure, PoolRebalancer, RebalancerMode,
-    ReservationGuard, ReservationLedger,
+    export_pool_pressure, pairing_regret_targets, AdmitError, LengthPredictor, PairingTarget,
+    PoolPressure, PoolRebalancer, RebalancerMode, ReservationGuard, ReservationLedger,
 };
 use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
 use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
@@ -30,8 +29,8 @@ use demiurge_state::default_routing_blocks;
 
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
 pub use demiurge_dataplane::{
-    pool_core_scale, DataPlaneSnapshot as RcuDataPlaneSnapshot, ForwardDecision,
-    IoUringForwarder, RcuRoutingTable,
+    pool_core_scale, DataPlaneSnapshot as RcuDataPlaneSnapshot, ForwardDecision, IoUringForwarder,
+    RcuRoutingTable,
 };
 pub use demiurge_handoff::{
     HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
@@ -594,8 +593,12 @@ impl Router {
         let extra: [BarrierFactor; 1] = [phi.unwrap_or(BarrierFactor::clamped(1.0))];
         let barriers = if phi.is_some() { &extra[..] } else { &[] };
         match phase {
-            Phase::Prefill => select_with_barriers_pi(self.pool(Phase::Prefill), barriers, pool_pi, true),
-            Phase::Decode => select_with_barriers_pi(self.pool(Phase::Decode), barriers, pool_pi, false),
+            Phase::Prefill => {
+                select_with_barriers_pi(self.pool(Phase::Prefill), barriers, pool_pi, true)
+            }
+            Phase::Decode => {
+                select_with_barriers_pi(self.pool(Phase::Decode), barriers, pool_pi, false)
+            }
         }
     }
 

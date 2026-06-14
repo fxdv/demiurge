@@ -622,8 +622,7 @@ fn run_e2e_scenario(
             })
             .collect()
     };
-    let total =
-        u64::from(sc.concurrency) * u64::from(sc.requests_per_worker) * phases.len() as u64;
+    let total = u64::from(sc.concurrency) * u64::from(sc.requests_per_worker) * phases.len() as u64;
     let ok = Arc::new(AtomicU64::new(0));
     let err = Arc::new(AtomicU64::new(0));
     let latencies = Arc::new(Mutex::new(Vec::with_capacity(total as usize)));
@@ -694,9 +693,8 @@ fn run_e2e_scenario(
         }
         let phase_pi = stack.router.control_metrics().dataplane_pi;
         min_pi_sampled = min_pi_sampled.min(phase_pi);
-        seq_base = seq_base.saturating_add(
-            u64::from(sc.concurrency) * u64::from(sc.requests_per_worker),
-        );
+        seq_base =
+            seq_base.saturating_add(u64::from(sc.concurrency) * u64::from(sc.requests_per_worker));
     }
     let duration_secs = start_wall.elapsed().as_secs_f64();
 
@@ -956,7 +954,10 @@ fn load_bench_inner(
             || sc.rebalancer_actuation
             || sc.isolate_recovery;
         if sc.isolate_recovery && only_scenario.is_some() {
-            eprintln!("load-bench: strict gates — zero errors required for {}", sc.id);
+            eprintln!(
+                "load-bench: strict gates — zero errors required for {}",
+                sc.id
+            );
         }
         eprintln!("load-bench: running {} …", sc.id);
         let result = run_scenario(sc, file.settings.warmup_requests)?;
