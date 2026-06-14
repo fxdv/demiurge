@@ -186,6 +186,18 @@ pub struct ScenarioResult {
     pub pi_star: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_dataplane_pi_sampled: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fast_path_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colocated_routes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disagg_routes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fastpath_misroute_mean: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fastpath_misroute_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corrector_shadow_samples: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -529,6 +541,12 @@ fn run_admit_decouple_scenario(
         rcu_stale: None,
         pi_star: None,
         min_dataplane_pi_sampled: None,
+        fast_path_ratio: None,
+        colocated_routes: None,
+        disagg_routes: None,
+        fastpath_misroute_mean: None,
+        fastpath_misroute_samples: None,
+        corrector_shadow_samples: None,
     })
 }
 
@@ -770,6 +788,12 @@ fn run_e2e_scenario(
         rcu_stale: Some(control.rcu_stale),
         pi_star: Some(control.pi_star),
         min_dataplane_pi_sampled: min_pi,
+        fast_path_ratio: Some(control.fast_path_ratio),
+        colocated_routes: Some(control.colocated_routes),
+        disagg_routes: Some(control.disagg_routes),
+        fastpath_misroute_mean: Some(control.fastpath_misroute_mean),
+        fastpath_misroute_samples: Some(control.fastpath_misroute_samples),
+        corrector_shadow_samples: Some(control.corrector_shadow_samples),
     })
 }
 
@@ -1069,6 +1093,17 @@ fn load_bench_inner(
                     result.id
                 );
             }
+        }
+        if let Some(fp) = result.fast_path_ratio {
+            eprintln!(
+                "load-bench: {} control — fast_path_ratio={fp:.3} colocated={} disagg={} misroute_mean={:.3} (n={}) corrector_shadow={}",
+                result.id,
+                result.colocated_routes.unwrap_or(0),
+                result.disagg_routes.unwrap_or(0),
+                result.fastpath_misroute_mean.unwrap_or(0.0),
+                result.fastpath_misroute_samples.unwrap_or(0),
+                result.corrector_shadow_samples.unwrap_or(0),
+            );
         }
         if let Some(min_pi) = sc.min_dataplane_pi {
             if let Some(observed) = result.dataplane_pi {

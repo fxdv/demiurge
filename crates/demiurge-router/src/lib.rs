@@ -13,8 +13,9 @@ use std::thread;
 use std::time::Duration;
 
 use demiurge_control::{
-    export_pool_pressure, pairing_regret_targets, AdmitError, LengthPredictor, PairingTarget,
-    PoolPressure, PoolRebalancer, RebalancerMode, ReservationGuard, ReservationLedger,
+    export_pool_pressure, pairing_regret_targets, AdmitError, CorrectorShadowLog,
+    CorrectorShadowSample, LengthPredictor, PairingTarget, PoolPressure, PoolRebalancer,
+    RebalancerMode, ReservationGuard, ReservationLedger,
 };
 use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
 use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
@@ -25,7 +26,9 @@ use demiurge_cost::{
     POOL_ACTUATION_ENABLED,
 };
 use demiurge_dataplane::{AdmitBucket, DataPlaneSnapshot};
-use demiurge_handoff::{parse_prefill_handoff, HandoffRegistry};
+use demiurge_handoff::{
+    parse_prefill_handoff, HandoffRegistry, HandoffTransport, HeaderPassthroughTransport,
+};
 use demiurge_state::default_routing_blocks;
 
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
@@ -404,6 +407,7 @@ pub struct Router {
     rebalancer_actuation: bool,
     colocated_routes: AtomicU64,
     disagg_routes: AtomicU64,
+    handoff_transport: Option<Arc<dyn HandoffTransport>>,
 }
 
 impl Clone for Router {
@@ -421,11 +425,13 @@ impl Clone for Router {
             rebalancer_actuation: self.rebalancer_actuation,
             colocated_routes: AtomicU64::new(self.colocated_routes.load(Ordering::Relaxed)),
             disagg_routes: AtomicU64::new(self.disagg_routes.load(Ordering::Relaxed)),
+            handoff_transport: self.handoff_transport.clone(),
         }
     }
 }
 
-/// Shadow control-plane telemetry (rebalancer π*, pairing regret, length predictor).
+/// Shadow control-plane telemetry (rebalancer π*, pairing regret, length predictor,
+/// fast-path ratio, corrector shadow). [DEMI-FASTPATH-TELEM]
 #[derive(Debug, Clone, Copy)]
 pub struct ControlMetrics {
     pub pi: f64,
@@ -438,6 +444,14 @@ pub struct ControlMetrics {
     pub rcu_stale: bool,
     pub rcu_stale_alert_ms: u64,
     pub admit_shed_total: u64,
+    /// Fraction of routes on the short-context colocated path. [DEMI-FASTPATH-TELEM]
+    pub fast_path_ratio: f64,
+    pub colocated_routes: u64,
+    pub disagg_routes: u64,
+    /// Near-threshold colocated admits (shadow regret telemetry).
+    pub fastpath_misroute_mean: f64,
+    pub fastpath_misroute_samples: u64,
+    pub corrector_shadow_samples: u64,
 }
 
 #[derive(Debug)]
@@ -447,6 +461,9 @@ struct ControlPlane {
     regret_sum: f64,
     regret_samples: u64,
     last_pi_star: f64,
+    corrector_shadow: CorrectorShadowLog,
+    fastpath_misroute_sum: f64,
+    fastpath_misroute_samples: u64,
 }
 
 impl Default for ControlPlane {
@@ -457,6 +474,9 @@ impl Default for ControlPlane {
             regret_sum: 0.0,
             regret_samples: 0,
             last_pi_star: 0.5,
+            corrector_shadow: CorrectorShadowLog::new(4096),
+            fastpath_misroute_sum: 0.0,
+            fastpath_misroute_samples: 0,
         }
     }
 }
@@ -480,7 +500,12 @@ impl Router {
             rebalancer_actuation: rebalancer_actuation_enabled(),
             colocated_routes: AtomicU64::new(0),
             disagg_routes: AtomicU64::new(0),
+            handoff_transport: None,
         }
+    }
+
+    fn default_handoff_transport() -> Arc<dyn HandoffTransport> {
+        Arc::new(HeaderPassthroughTransport)
     }
 
     /// Phase 2 router with KV reservation ledger and hand-off registry.
@@ -505,6 +530,7 @@ impl Router {
             rebalancer_actuation: rebalancer_actuation_enabled(),
             colocated_routes: AtomicU64::new(0),
             disagg_routes: AtomicU64::new(0),
+            handoff_transport: Some(Self::default_handoff_transport()),
         };
         (router, ledger, handoffs)
     }
@@ -520,6 +546,11 @@ impl Router {
             let mut cp = self.control.lock().expect("control plane");
             cp.rebalancer = PoolRebalancer::new(RebalancerMode::CanActuate);
         }
+        self
+    }
+
+    pub fn with_handoff_transport(mut self, transport: Arc<dyn HandoffTransport>) -> Self {
+        self.handoff_transport = Some(transport);
         self
     }
 
@@ -566,6 +597,19 @@ impl Router {
         } else {
             0.0
         };
+        let misroute_mean = if cp.fastpath_misroute_samples > 0 {
+            cp.fastpath_misroute_sum / cp.fastpath_misroute_samples as f64
+        } else {
+            0.0
+        };
+        let colocated = self.colocated_routes.load(Ordering::Relaxed);
+        let disagg = self.disagg_routes.load(Ordering::Relaxed);
+        let routed = colocated.saturating_add(disagg);
+        let fast_path_ratio = if routed > 0 {
+            colocated as f64 / routed as f64
+        } else {
+            0.0
+        };
         ControlMetrics {
             pi: cp.rebalancer.pi(),
             pi_star: cp.last_pi_star,
@@ -577,7 +621,21 @@ impl Router {
             rcu_stale: self.dataplane.is_stale(DATAPLANE_RCU_STALE_ALERT_MS),
             rcu_stale_alert_ms: DATAPLANE_RCU_STALE_ALERT_MS,
             admit_shed_total: self.admit.shed_total(),
+            fast_path_ratio,
+            colocated_routes: colocated,
+            disagg_routes: disagg,
+            fastpath_misroute_mean: misroute_mean,
+            fastpath_misroute_samples: cp.fastpath_misroute_samples,
+            corrector_shadow_samples: cp.corrector_shadow.len() as u64,
         }
+    }
+
+    pub fn corrector_shadow_samples(&self) -> Vec<CorrectorShadowSample> {
+        self.control
+            .lock()
+            .expect("control plane")
+            .corrector_shadow
+            .samples()
     }
 
     fn tick_control(
@@ -598,11 +656,24 @@ impl Router {
             || self.rebalancer_actuation
             || self.dataplane.age_ms() >= DATAPLANE_RCU_HEARTBEAT_MS;
 
+        let mut cp = self.control.lock().expect("control plane");
+        if let Some(colocated) = colocated {
+            if colocated {
+                if let Some(tokens) = prompt_tokens {
+                    let threshold = ROUTING_SHORT_CONTEXT_TOKENS.max(1);
+                    if tokens * 100 / threshold >= 80 {
+                        let frac = (tokens as f64 / threshold as f64).clamp(0.0, 1.0);
+                        cp.fastpath_misroute_sum += frac;
+                        cp.fastpath_misroute_samples += 1;
+                    }
+                }
+            }
+        }
+
         if prompt_tokens.is_none() && !need_rebalancer {
             return;
         }
 
-        let mut cp = self.control.lock().expect("control plane");
         if let Some(tokens) = prompt_tokens {
             cp.predictor.record(tokens);
         }
@@ -874,7 +945,7 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
             .pick_colocated()
             .map(RoutePath::Colocated)
             .ok_or(RouteError::NoBackend)?;
-        router.tick_control(Some(true), None, false);
+        router.tick_control(Some(true), Some(prompt_tokens), false);
         return Ok(path);
     }
 
@@ -909,6 +980,15 @@ fn warmth_override_target(router: &Router, prompt_tokens: u64) -> Option<(Arc<Ba
         }
     }
     best
+}
+
+fn record_corrector_shadow(router: &Router, sample: CorrectorShadowSample) {
+    router
+        .control
+        .lock()
+        .expect("control plane")
+        .corrector_shadow
+        .record(sample);
 }
 
 /// Decode placement after prefill; requires valid hand-off when KV pool is wired.
@@ -979,9 +1059,30 @@ pub fn on_prefill_complete(
     if let Some(h) = handoff {
         if let Some(reg) = &router.handoffs {
             reg.publish(h.clone());
-            reg.record_transfer(h.byte_len, signals.prefill_wall);
+            let transport = router
+                .handoff_transport
+                .as_ref()
+                .map(Arc::clone)
+                .unwrap_or_else(Router::default_handoff_transport);
+            let outcome = transport.transfer(&h, signals.prefill_wall);
+            reg.record_transfer(outcome.bytes, outcome.wall);
         }
     }
+
+    let blocks = default_routing_blocks(signals.prompt_tokens);
+    let analytic_ln = backend
+        .cost_with_warmth_pi(&extra, router.state.as_ref(), &blocks, true, pool_pi)
+        .ln();
+    record_corrector_shadow(
+        router,
+        CorrectorShadowSample {
+            prompt_tokens: signals.prompt_tokens,
+            analytic_ln,
+            observed_us: signals.prefill_wall.as_micros().min(u64::MAX as u128) as u64,
+            pool_pi,
+            backend_label: backend.label.clone(),
+        },
+    );
 
     router.tick_control(None, Some(signals.prompt_tokens), true);
 

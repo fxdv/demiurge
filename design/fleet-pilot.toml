@@ -1,0 +1,6 @@
+# Fleet pilot shadow replay (Track A — macOS portable).
+# JSONL trace windows; held_out=true rows are gated for π* correlation.
+
+trace_path = "design/traces/synthetic-fleet.jsonl"
+min_heldout_correlation = 0.45
+min_corrector_goodput = 0.25

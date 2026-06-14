@@ -1,8 +1,15 @@
 //! KV hand-off artifact between prefill and decode placement. [DEMI-KV-HANDOFF]
 //!
-//! Phase 2 ships an in-process registry plus HTTP header parsing; TCP blob
-//! transport remains pluggable for later RDMA work. Completed transfers record
-//! byte length and wall time for p50/p99 telemetry. [DEMI-KV-TRANSFER-TELEM]
+//! Phase 2 ships an in-process registry, HTTP header parsing, and pluggable
+//! `HandoffTransport` (TCP header pass-through default; mock RDMA for Track A).
+//! Completed transfers record byte length and wall time for p50/p99 telemetry.
+//! [DEMI-KV-TRANSFER-TELEM] [DEMI-HANDOFF-XPORT]
+
+mod transport;
+
+pub use transport::{
+    HandoffTransport, HeaderPassthroughTransport, MockRdmaTransport, TransferOutcome,
+};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -26,6 +26,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 mod bench_gate;
+mod fleet_pilot;
 mod load_bench;
 mod pseudo_report;
 
@@ -99,9 +100,10 @@ fn main() {
             load_bench::load_report(stress)
         }
         "build-bpf" => build_bpf(),
+        "fleet-pilot" => fleet_pilot::fleet_pilot(),
         other => {
             eprintln!(
-                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, or `build-bpf`"
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, `build-bpf`, or `fleet-pilot`"
             );
             exit(2);
         }

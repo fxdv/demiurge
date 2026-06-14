@@ -196,6 +196,52 @@ summary = "XDP sheds overload before L7 on bucket exhaustion."
 requires_test = true
 tests = ["admit_bucket_sheds_when_exhausted", "admit_bucket_sheds_on_live_router"]
 
+# --- Track A (macOS portable) — shadow tooling --------------------------------
+
+[[requirement]]
+id = "DEMI-FLEET-SHADOW"
+kind = "normative"
+status = "implemented"
+phase = 4
+section = "control"
+summary = "Shadow fleet replay: held-out π* correlates with prefill-heavy windows."
+requires_test = true
+tests = ["fleet_pilot_heldout_correlates", "bundled_trace_passes_gate"]
+
+[[requirement]]
+id = "DEMI-CORR-SHADOW"
+kind = "normative"
+status = "implemented"
+phase = 8
+section = "7"
+summary = "Corrector shadow logs features/cost/latency; trains bounded δ offline."
+requires_test = true
+tests = [
+    "train_delta_clamped",
+    "corrector_shadow_records_on_prefill_complete",
+    "corrector_shadow_train_and_eval",
+]
+
+[[requirement]]
+id = "DEMI-HANDOFF-XPORT"
+kind = "structural"
+status = "implemented"
+phase = 2
+section = "8.3"
+summary = "Pluggable HandoffTransport trait; TCP default; mock RDMA on Mac."
+requires_test = true
+tests = ["mock_rdma_fixed_latency", "mock_rdma_transport_records_fast_wall", "header_passthrough_uses_prefill_wall"]
+
+[[requirement]]
+id = "DEMI-FASTPATH-TELEM"
+kind = "structural"
+status = "implemented"
+phase = 4
+section = "control"
+summary = "Exports fast_path_ratio and near-threshold mis-route regret telemetry."
+requires_test = true
+tests = ["fast_path_ratio_tracks_colocated_routes"]
+
 # --- Phase 6: live migration --------------------------------------------
 
 [[requirement]]

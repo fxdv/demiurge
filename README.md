@@ -72,7 +72,8 @@ Demiurge is built to exploit exactly those three facts.
 | CPU bench gates (`bench-gates.toml`, `cargo xtask bench-gate`) | **implemented** — in CI |
 | Local load bench (`load-bench.sh`, pseudo report) | **implemented** — CI runs `load-bench --ci` smoke |
 | Real stress suite (`load-stress.sh`, strict zero-error gates) | **implemented** — local only, not in CI |
-| XDP/L4 admission, io_uring data plane, RCU data-plane serving | **proof shipped (P5)** — userspace RCU + admit shed; **production** XDP/io_uring planned (P5+) |
+| XDP/L4 admission, io_uring data plane, RCU data-plane serving | **proof shipped (P5)** — userspace RCU + admit shed; **production** XDP/io_uring planned (Track B) |
+| Track A shadow tooling (fleet pilot, corrector shadow, HandoffTransport) | **implemented** — `cargo xtask fleet-pilot` |
 | RDMA hand-off production path, live migration | design intent (P6) |
 | Cross-tenant cache sharing, learned corrector graduation | design intent (P7–P8) |
 

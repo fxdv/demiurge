@@ -2,12 +2,19 @@
 //!
 //! Phase 4: greedy pairing, length predictor, shadow pool rebalancer.
 
+mod corrector_shadow;
+mod fleet_pilot;
 mod pairing;
 mod predictor;
 mod pressure;
 mod rebalancer;
 mod scored;
 
+pub use corrector_shadow::{
+    delta_within_envelope, eval_goodput_improvement, train_bounded_delta, CorrectorShadowLog,
+    CorrectorShadowSample,
+};
+pub use fleet_pilot::{replay_fleet_pilot, FleetPilotReport, TraceWindow, WindowReplay};
 pub use pairing::{
     greedy_pair, oracle_pair, pairing_regret, pairing_regret_targets, select_decode,
     select_decode_target, select_prefill, select_prefill_target, PairingTarget,

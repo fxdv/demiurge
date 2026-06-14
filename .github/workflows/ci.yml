@@ -45,3 +45,6 @@ jobs:
 
       - name: Load smoke
         run: cargo run --release -q --package xtask -- load-bench --ci
+
+      - name: Track A fleet pilot (shadow π* + corrector shadow)
+        run: cargo run --release -q --package xtask -- fleet-pilot

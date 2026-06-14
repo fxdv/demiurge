@@ -38,6 +38,9 @@ cargo run --release -q --package xtask -- bench-gate
 bold "load regression smoke (CI scenarios)"
 cargo run --release -q --package xtask -- load-bench --ci
 
+bold "Track A fleet pilot (shadow π* + corrector shadow)"
+cargo run --release -q --package xtask -- fleet-pilot
+
 bold "spec build (optional)"
 if command -v latexmk >/dev/null 2>&1; then
   ( cd spec && latexmk -pdf -interaction=nonstopmode -halt-on-error demiurge.tex >/dev/null )

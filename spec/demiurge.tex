@@ -131,7 +131,9 @@ causes miss only \req{DEMI-STATE-AP}.
 
 \section{Learned Corrector}\label{sec:corrector}
 The analytic corrector multiplier $\delta$ is clamped to $[1-\alpha,1+\alpha]$
-\req{DEMI-CORR-CLAMP}. \intent{Production use of a learned $\delta$ follows a
+\req{DEMI-CORR-CLAMP}. Shadow mode logs $(\text{features}, \ln C, t_{\mathrm{obs}})$
+and trains a bounded $\delta$ offline without actuation \req{DEMI-CORR-SHADOW}.
+\intent{Production use of a learned $\delta$ follows a
 shadow $\to$ canary $\to$ prod graduation path; promotion requires no clamp
 saturation and no violation of \req{DEMI-COST-POS} \req{DEMI-CORR-GRAD}. Until
 Phase~8, the router uses $\delta=1$.}
@@ -167,7 +169,9 @@ disaggregation \req{DEMI-SHORT-FASTPATH}.
 Prefill completion publishes a KV hand-off handle; decode placement never
 proceeds without it \req{DEMI-KV-HANDOFF}. Each completed transfer records byte
 length and prefill I/O wall time; operators report p50/p99 aggregates
-\req{DEMI-KV-TRANSFER-TELEM}. Transport is pluggable (TCP proof, then RDMA).
+\req{DEMI-KV-TRANSFER-TELEM}. Transport is pluggable via
+\texttt{HandoffTransport} (TCP header pass-through default; mock RDMA for local
+proof) \req{DEMI-HANDOFF-XPORT}.
 
 \subsection{Greedy Pairing}\label{sec:pairing}
 Joint pf$\to$dc placement is approximated greedily: fix prefill target,
@@ -183,7 +187,10 @@ otherwise the original placement is restored.}
 The pool-ratio controller adjusts prefill vs decode capacity share
 $\pi$ using queue, KV, and SLO pressure with hysteresis and cooldown
 (\texttt{pool.*}) \req{DEMI-POOL-RATIO}. Shadow mode is default until Phase~5
-actuation.
+actuation. Shadow fleet replay on a held-out trace must show $\pi^\*$ tracking
+prefill-heavy windows \req{DEMI-FLEET-SHADOW}. The router exports
+\texttt{fast\_path\_ratio} and near-threshold mis-route regret
+\req{DEMI-FASTPATH-TELEM}.
 
 \section{Data Plane}\label{sec:dataplane}
 The live TCP forwarder reads the last published RCU routing snapshot and never

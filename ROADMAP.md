@@ -44,7 +44,7 @@ Track C — Fleet, GPU & economics →  real accelerator fleets, actuation, migr
 | Track | Platform | Phases | Gate / CI | Status |
 |-------|----------|--------|-----------|--------|
 | **A — macOS & local dev** | macOS (primary), portable Rust | **0–5 proof** | `./scripts/gate.sh`, `pre-release.sh`, tagged macOS release | **done** |
-| **A — remaining (portable)** | macOS + trace replay | shadow fleet pilot, corrector **shadow** pipeline | local / optional CI | planned |
+| **A — remaining (portable)** | macOS + trace replay | fleet pilot, corrector shadow, HandoffTransport | `cargo xtask fleet-pilot` | **done** |
 | **B — Linux production** | Linux x86_64 | **5+** dataplane | `bpf` workflow, `publish-linux.yml` → `linux-nightly` | in progress (BPF compiles ✅) |
 | **C — Fleet & GPU** | Linux + GPU fleet | **6–8**, RDMA prod, π actuation at scale | measured on reference hardware | planned |
 
@@ -431,7 +431,7 @@ if |π* − π| > rebalance_hysteresis:
 
 **Exit gate**
 
-- [ ] Shadow replay on production trace: `π*` correlates with known prefill-heavy windows *(Track A — portable; blocks Track C actuation sign-off)*.
+- [x] Shadow replay on production trace: `π*` correlates with known prefill-heavy windows *(Track A — `cargo xtask fleet-pilot`)*.
 - [ ] Step-load test: actuation removes sustained queue imbalance without oscillation *(Track C — fleet / autoscaler)*.
 - [ ] Fast-path traffic spike reduces `demand_prefill` via `FP_share` term (no manual retune).
 
@@ -675,15 +675,16 @@ shedding; actuated π on the hot path; observability for RCU staleness.
 **Validation.** Local load bench **8,060/8,060** ok; stress **11,600/11,600** ok.
 Pre-release: `./scripts/pre-release.sh` (gate + full load + stress).
 
-### Track A — remaining (portable, planned)
+### Track A — remaining (portable) — **done**
 
-Work that stays on macOS before Track B/C hardware:
+| Item | Goal | Gate | Status |
+|------|------|------|--------|
+| Fleet pilot (shadow) | Replay production trace; `π*` vs prefill-heavy windows | `cargo xtask fleet-pilot` held-out corr ≥ 0.45 | **done** |
+| Corrector shadow | Log `(features, analytic_cost, observed_latency)`; train bounded δ | shadow log + offline train/eval in `fleet-pilot` | **done** |
+| RDMA trait | `HandoffTransport` + mock RDMA; TCP default on Mac | `mock_rdma_*` tests | **done** |
+| Fast-path telemetry | `fast_path_ratio` + near-threshold mis-route regret | `ControlMetrics` + `track_a` tests | **done** |
 
-| Item | Goal | Gate |
-|------|------|------|
-| Fleet pilot (shadow) | Replay production trace; `π*` vs prefill-heavy windows | correlates on held-out trace |
-| Corrector shadow | Log `(features, analytic_cost, observed_latency)`; train bounded δ | no prod actuation |
-| RDMA trait | Keep TCP proof default; production RDMA lands in Track C on Linux | trait + mock only on Mac |
+Run: `cargo xtask fleet-pilot` (also in `./scripts/gate.sh`).
 
 ---
 

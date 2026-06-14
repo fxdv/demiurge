@@ -27,7 +27,7 @@ impl std::fmt::Display for XdpAttachError {
             Self::ObjectNotBuilt => {
                 write!(
                     f,
-                    "missing target/bpf/{OBJECT_FILE}; run ./scripts/build-bpf.sh"
+                    "missing target/bpf/{OBJECT_FILE} ({PROGRAM_NAME}); run ./scripts/build-bpf.sh"
                 )
             }
             Self::AttachFailed => write!(f, "XDP program attach failed"),
