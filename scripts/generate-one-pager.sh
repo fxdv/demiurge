@@ -27,7 +27,7 @@ PRE_STATUS="UNKNOWN"
 if [[ -f "$PRE_RELEASE" ]]; then
   if grep -q 'PRE-RELEASE PASSED' "$PRE_RELEASE"; then
     PRE_STATUS="PASSED"
-  elif grep -q 'FAIL\|failed' "$PRE_RELEASE"; then
+  elif grep -qE 'ERROR: pre-release failed|strict gate\(s\) failed|isolated scenario run\(s\) failed' "$PRE_RELEASE"; then
     PRE_STATUS="FAILED"
   fi
 elif [[ -f "$LOAD_JSON" && -f "$STRESS_JSON" ]]; then
