@@ -69,4 +69,20 @@ impl RcuRoutingTable {
         let snap = self.current.load();
         now_ms().saturating_sub(snap.published_at_ms)
     }
+
+    pub fn is_stale(&self, alert_ms: u64) -> bool {
+        self.age_ms() > alert_ms
+    }
+}
+
+/// Scale analytic service core by pool capacity share π.
+///
+/// Prefill targets scale by `(1−π)/π`; decode by `π/(1−π)`. At π=0.5 both are unity.
+pub fn pool_core_scale(base_seconds: f64, pi: f64, prefill: bool) -> f64 {
+    let pi = pi.clamp(0.05, 0.95);
+    if prefill {
+        base_seconds * (1.0 - pi) / pi
+    } else {
+        base_seconds * pi / (1.0 - pi)
+    }
 }

@@ -1,3 +1,4 @@
+use demiurge_dataplane::pool_core_scale;
 use demiurge_router::{Backend, Router};
 
 // [DEMI-DP-RCU] — live TCP path reads RCU π without blocking.
@@ -6,6 +7,16 @@ fn router_exposes_dataplane_pi() {
     let pf = Backend::new("pf0", "127.0.0.1:1".parse().unwrap(), 0.01);
     let router = Router::new(vec![pf], vec![]);
     assert!((0.0..=1.0).contains(&router.dataplane_pi()));
+}
+
+#[test]
+fn pool_core_scale_biases_prefill_under_high_pi() {
+    let base = 0.02;
+    let prefill_at_high = pool_core_scale(base, 0.85, true);
+    let prefill_at_mid = pool_core_scale(base, 0.5, true);
+    assert!(prefill_at_high < prefill_at_mid);
+    let decode_at_high = pool_core_scale(base, 0.85, false);
+    assert!(decode_at_high > base);
 }
 
 // [DEMI-XDP-SHED] — admit bucket sheds when tokens exhausted.
@@ -34,4 +45,6 @@ fn rebalancer_actuation_publishes_pi() {
     }
     let metrics = router.control_metrics();
     assert!(metrics.dataplane_pi >= 0.0 && metrics.dataplane_pi <= 1.0);
+    assert!(!metrics.rcu_stale);
+    assert_eq!(metrics.rcu_stale_alert_ms, 500);
 }

@@ -182,6 +182,7 @@ requires_test = true
 tests = [
     "rcu_read_never_blocks_under_publish",
     "rcu_hot_read_under_cp_stall",
+    "rcu_read_p99_unchanged_under_slow_publish",
     "router_exposes_dataplane_pi",
 ]
 

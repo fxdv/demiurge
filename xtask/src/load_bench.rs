@@ -92,6 +92,18 @@ struct Scenario {
     /// Allow up to this many KV admit rejects (503) without failing the scenario.
     #[serde(default)]
     max_kv_admit_rejects: Option<u64>,
+    /// Publish rebalancer π to the RCU dataplane (`DEMIURGE_REBALANCER_ACTUATE=1` equivalent).
+    #[serde(default)]
+    rebalancer_actuation: bool,
+    /// Sequential load phases (each runs `requests_per_worker` per worker); last phase drives π gates.
+    #[serde(default)]
+    step_prefill_fraction: Vec<f64>,
+    /// Per-phase request style (`path`, `long_tokens`, …); defaults to `request_style` when omitted.
+    #[serde(default)]
+    step_request_style: Vec<String>,
+    /// Fail when final dataplane π stays below this after actuation scenarios.
+    #[serde(default)]
+    min_dataplane_pi: Option<f64>,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -161,6 +173,16 @@ pub struct ScenarioResult {
     pub accept_p99_ratio: Option<f64>,
     #[serde(default)]
     pub latencies_us: Vec<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dataplane_pi: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dataplane_age_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcu_stale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pi_star: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_dataplane_pi_sampled: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -172,6 +194,7 @@ pub struct LoadBenchReport {
 
 struct RouterStack {
     addr: SocketAddr,
+    router: Arc<Router>,
     ledger: Option<Arc<KvReservationLedger>>,
     handoffs: Option<Arc<KvHandoffRegistry>>,
 }
@@ -223,26 +246,39 @@ fn spawn_router_stack(
             capacity,
             sc.bytes_per_token,
         );
+        let router = if sc.rebalancer_actuation {
+            router.with_rebalancer_actuation(true)
+        } else {
+            router
+        };
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind router");
         let addr = listener.local_addr().expect("router addr");
         let router = Arc::new(router);
+        let serve_router = Arc::clone(&router);
         thread::spawn(move || {
-            let _ = serve(listener, router);
+            let _ = serve(listener, serve_router);
         });
         RouterStack {
             addr,
+            router,
             ledger: Some(ledger),
             handoffs: Some(handoffs),
         }
     } else {
+        let mut router = Router::new(prefill.to_vec(), decode.to_vec());
+        if sc.rebalancer_actuation {
+            router = router.with_rebalancer_actuation(true);
+        }
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind router");
         let addr = listener.local_addr().expect("router addr");
-        let router = Arc::new(Router::new(prefill.to_vec(), decode.to_vec()));
+        let router = Arc::new(router);
+        let serve_router = Arc::clone(&router);
         thread::spawn(move || {
-            let _ = serve(listener, router);
+            let _ = serve(listener, serve_router);
         });
         RouterStack {
             addr,
+            router,
             ledger: None,
             handoffs: None,
         }
@@ -485,6 +521,11 @@ fn run_admit_decouple_scenario(
         accept_p99_us_high: Some(p99_high),
         accept_p99_ratio: Some(ratio),
         latencies_us: p99_samples,
+        dataplane_pi: None,
+        dataplane_age_ms: None,
+        rcu_stale: None,
+        pi_star: None,
+        min_dataplane_pi_sampled: None,
     })
 }
 
@@ -562,13 +603,29 @@ fn run_e2e_scenario(
         );
     }
 
-    let total = u64::from(sc.concurrency) * u64::from(sc.requests_per_worker);
+    let phases: Vec<(f64, String)> = if sc.step_prefill_fraction.is_empty() {
+        vec![(sc.prefill_fraction, sc.request_style.clone())]
+    } else {
+        sc.step_prefill_fraction
+            .iter()
+            .enumerate()
+            .map(|(i, frac)| {
+                let style = sc
+                    .step_request_style
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| sc.request_style.clone());
+                (*frac, style)
+            })
+            .collect()
+    };
+    let total =
+        u64::from(sc.concurrency) * u64::from(sc.requests_per_worker) * phases.len() as u64;
     let ok = Arc::new(AtomicU64::new(0));
     let err = Arc::new(AtomicU64::new(0));
     let latencies = Arc::new(Mutex::new(Vec::with_capacity(total as usize)));
 
     let start_wall = Instant::now();
-    let mut handles = Vec::new();
     let inflight = if sc.max_inflight > 0 {
         Some(InflightGate::new(sc.max_inflight as usize))
     } else {
@@ -576,54 +633,67 @@ fn run_e2e_scenario(
     };
     let peak_sampler = stack.ledger.clone();
     let peak_atomic = peak_guard.as_ref().map(|g| Arc::clone(&g.peak));
-    for w in 0..sc.concurrency {
-        let ok = Arc::clone(&ok);
-        let err = Arc::clone(&err);
-        let latencies = Arc::clone(&latencies);
-        let prefill_fraction = sc.prefill_fraction;
-        let requests_per_worker = sc.requests_per_worker;
-        let router_addr = stack.addr;
-        let request_style = sc.request_style.clone();
-        let long_prompt_tokens = sc.long_prompt_tokens;
-        let peak_atomic = peak_atomic.clone();
-        let peak_sampler = peak_sampler.clone();
-        let inflight = inflight.clone();
-        handles.push(thread::spawn(move || {
-            for r in 0..requests_per_worker {
-                let seq = u64::from(w) * u64::from(requests_per_worker) + u64::from(r);
-                let prefill = if request_style == "mixed_tokens"
-                    || request_style == "short_tokens"
-                    || request_style == "long_tokens"
-                {
-                    true
-                } else {
-                    (seq % 100) as f64 / 100.0 < prefill_fraction
-                };
-                let _slot = inflight.as_ref().map(|g| g.enter());
-                match one_request(
-                    router_addr,
-                    &request_style,
-                    long_prompt_tokens,
-                    prefill,
-                    seq,
-                ) {
-                    Ok(us) => {
-                        ok.fetch_add(1, Ordering::Relaxed);
-                        latencies.lock().expect("lat").push(us);
-                        if let (Some(ledger), Some(peak)) = (&peak_sampler, &peak_atomic) {
-                            let cur = ledger.fleet_reserved();
-                            peak.fetch_max(cur, Ordering::Relaxed);
+    let mut min_pi_sampled = f64::MAX;
+    let mut seq_base = 0u64;
+
+    for (prefill_fraction, request_style) in &phases {
+        let mut handles = Vec::new();
+        for w in 0..sc.concurrency {
+            let ok = Arc::clone(&ok);
+            let err = Arc::clone(&err);
+            let latencies = Arc::clone(&latencies);
+            let requests_per_worker = sc.requests_per_worker;
+            let router_addr = stack.addr;
+            let request_style = request_style.clone();
+            let long_prompt_tokens = sc.long_prompt_tokens;
+            let peak_atomic = peak_atomic.clone();
+            let peak_sampler = peak_sampler.clone();
+            let inflight = inflight.clone();
+            let prefill_fraction = *prefill_fraction;
+            let seq_base = seq_base;
+            handles.push(thread::spawn(move || {
+                for r in 0..requests_per_worker {
+                    let seq =
+                        seq_base + u64::from(w) * u64::from(requests_per_worker) + u64::from(r);
+                    let prefill = if request_style == "mixed_tokens"
+                        || request_style == "short_tokens"
+                        || request_style == "long_tokens"
+                    {
+                        true
+                    } else {
+                        (seq % 100) as f64 / 100.0 < prefill_fraction
+                    };
+                    let _slot = inflight.as_ref().map(|g| g.enter());
+                    match one_request(
+                        router_addr,
+                        &request_style,
+                        long_prompt_tokens,
+                        prefill,
+                        seq,
+                    ) {
+                        Ok(us) => {
+                            ok.fetch_add(1, Ordering::Relaxed);
+                            latencies.lock().expect("lat").push(us);
+                            if let (Some(ledger), Some(peak)) = (&peak_sampler, &peak_atomic) {
+                                let cur = ledger.fleet_reserved();
+                                peak.fetch_max(cur, Ordering::Relaxed);
+                            }
+                        }
+                        Err(()) => {
+                            err.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    Err(()) => {
-                        err.fetch_add(1, Ordering::Relaxed);
-                    }
                 }
-            }
-        }));
-    }
-    for h in handles {
-        h.join().expect("worker");
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker");
+        }
+        let phase_pi = stack.router.control_metrics().dataplane_pi;
+        min_pi_sampled = min_pi_sampled.min(phase_pi);
+        seq_base = seq_base.saturating_add(
+            u64::from(sc.concurrency) * u64::from(sc.requests_per_worker),
+        );
     }
     let duration_secs = start_wall.elapsed().as_secs_f64();
 
@@ -646,6 +716,13 @@ fn run_e2e_scenario(
         .as_ref()
         .map(|h| h.transfer_metrics())
         .filter(|m| m.count > 0);
+
+    let control = stack.router.control_metrics();
+    let min_pi = if min_pi_sampled.is_finite() {
+        Some(min_pi_sampled)
+    } else {
+        None
+    };
 
     Ok(ScenarioResult {
         id: sc.id.clone(),
@@ -687,6 +764,11 @@ fn run_e2e_scenario(
         accept_p99_us_high: None,
         accept_p99_ratio: None,
         latencies_us: samples,
+        dataplane_pi: Some(control.dataplane_pi),
+        dataplane_age_ms: Some(control.dataplane_age_ms),
+        rcu_stale: Some(control.rcu_stale),
+        pi_star: Some(control.pi_star),
+        min_dataplane_pi_sampled: min_pi,
     })
 }
 
@@ -944,6 +1026,37 @@ fn load_bench_inner(
                 } else {
                     eprintln!(
                         "load-bench: {} soft gate OK — p99 {p99_ms:.2}ms ≤ {limit:.1}ms",
+                        result.id
+                    );
+                }
+            }
+        }
+        if let Some(pi) = result.dataplane_pi {
+            let age = result.dataplane_age_ms.unwrap_or(0);
+            let stale = result.rcu_stale.unwrap_or(false);
+            eprintln!(
+                "load-bench: {} dataplane — π={pi:.3} π*={:.3} age={age}ms stale={stale}",
+                result.id,
+                result.pi_star.unwrap_or(0.0)
+            );
+            if stale {
+                eprintln!(
+                    "load-bench: {} ALERT — RCU snapshot age {age}ms > rcu_stale_alert_ms",
+                    result.id
+                );
+            }
+        }
+        if let Some(min_pi) = sc.min_dataplane_pi {
+            if let Some(observed) = result.dataplane_pi {
+                if observed < min_pi {
+                    eprintln!(
+                        "load-bench: {} FAIL — dataplane π {observed:.3} < min {min_pi:.3}",
+                        result.id
+                    );
+                    gate_failures += 1;
+                } else {
+                    eprintln!(
+                        "load-bench: {} actuation OK — dataplane π {observed:.3} ≥ {min_pi:.3}",
                         result.id
                     );
                 }

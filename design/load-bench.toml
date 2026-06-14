@@ -176,6 +176,24 @@ requests_per_worker = 16
 max_kv_admit_rejects = 48
 max_p99_ms = 150.0
 
+[[scenario]]
+id = "LOAD-STEP-ACTUATE"
+summary = "P5 step-load: decode-heavy then prefill-heavy; actuated π tracks prefill window"
+rebalancer_actuation = true
+backends = 4
+decode_backends = 2
+base_cost_seconds = 0.01
+cost_step_seconds = 0.002
+backend_delay_us = 50
+concurrency = 16
+requests_per_worker = 40
+request_style = "path"
+long_prompt_tokens = 1024
+step_prefill_fraction = [0.5, 1.0]
+step_request_style = ["path", "long_tokens"]
+min_dataplane_pi = 0.55
+max_p99_ms = 200.0
+
 # --- Real stress (load-bench --stress / ./scripts/load-stress.sh) ------------
 # Excluded from ./scripts/load-bench.sh. Strict gates: zero errors + p99.
 # Order matters: heaviest KV/disagg first while ports are fresh; flood last.

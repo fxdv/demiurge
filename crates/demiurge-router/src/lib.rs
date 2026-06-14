@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use demiurge_control::{
-    export_pool_pressure, pairing_regret_targets, select_decode_target, select_prefill_target,
+    export_pool_pressure, pairing_regret_targets,
     AdmitError, LengthPredictor, PairingTarget, PoolPressure, PoolRebalancer, RebalancerMode,
     ReservationGuard, ReservationLedger,
 };
@@ -22,14 +22,17 @@ use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
 use demiurge_cost::ROUTING_TRANSFER_PENALTY;
 use demiurge_cost::{
     compose, kv_breakdown, warmth_discount, BarrierFactor, Corrector, Cost, TimeCore,
-    DATAPLANE_ADMIT_BURST, POOL_ACTUATION_ENABLED,
+    DATAPLANE_ADMIT_BURST, DATAPLANE_RCU_STALE_ALERT_MS, POOL_ACTUATION_ENABLED,
 };
 use demiurge_dataplane::{AdmitBucket, DataPlaneSnapshot};
 use demiurge_handoff::{parse_prefill_handoff, HandoffRegistry};
 use demiurge_state::default_routing_blocks;
 
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
-pub use demiurge_dataplane::{DataPlaneSnapshot as RcuDataPlaneSnapshot, RcuRoutingTable};
+pub use demiurge_dataplane::{
+    pool_core_scale, DataPlaneSnapshot as RcuDataPlaneSnapshot, ForwardDecision,
+    IoUringForwarder, RcuRoutingTable,
+};
 pub use demiurge_handoff::{
     HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
 };
@@ -153,6 +156,17 @@ impl Backend {
         blocks: &[u64],
         decode_pool: bool,
     ) -> Cost {
+        self.cost_with_warmth_pi(extra, snapshot, blocks, decode_pool, 0.5)
+    }
+
+    pub fn cost_with_warmth_pi(
+        &self,
+        extra: &[BarrierFactor],
+        snapshot: Option<&StateSnapshot>,
+        blocks: &[u64],
+        decode_pool: bool,
+        pool_pi: f64,
+    ) -> Cost {
         let mut discounts = Vec::new();
         if let Some(snap) = snapshot {
             let pool = if decode_pool {
@@ -166,7 +180,8 @@ impl Backend {
                 }
             }
         }
-        let core = TimeCore::clamped(self.base_service_seconds);
+        let scaled = pool_core_scale(self.base_service_seconds, pool_pi, !decode_pool);
+        let core = TimeCore::clamped(scaled);
         let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
         let mut barriers = Vec::with_capacity(1 + extra.len());
         barriers.push(queue);
@@ -175,7 +190,17 @@ impl Backend {
     }
 
     pub fn cost_with_barriers(&self, extra: &[BarrierFactor]) -> Cost {
-        let core = TimeCore::clamped(self.base_service_seconds);
+        self.cost_with_barriers_pi(extra, 0.5, true)
+    }
+
+    pub fn cost_with_barriers_pi(
+        &self,
+        extra: &[BarrierFactor],
+        pool_pi: f64,
+        prefill: bool,
+    ) -> Cost {
+        let scaled = pool_core_scale(self.base_service_seconds, pool_pi, prefill);
+        let core = TimeCore::clamped(scaled);
         let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
         if extra.is_empty() {
             return compose(core, &[queue], &[], Corrector::identity());
@@ -213,6 +238,78 @@ impl PairingTarget for Backend {
     }
 }
 
+fn select_prefill_with_pi(
+    candidates: &[Arc<Backend>],
+    snapshot: Option<&StateSnapshot>,
+    prompt_tokens: u64,
+    pool_pi: f64,
+) -> Option<Arc<Backend>> {
+    let blocks = default_routing_blocks(prompt_tokens);
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            a.cost_with_warmth_pi(&[], snapshot, &blocks, false, pool_pi)
+                .ln()
+                .total_cmp(
+                    &b.cost_with_warmth_pi(&[], snapshot, &blocks, false, pool_pi)
+                        .ln(),
+                )
+        })
+        .cloned()
+}
+
+fn select_decode_with_pi(
+    prefill_label: &str,
+    candidates: &[Arc<Backend>],
+    snapshot: Option<&StateSnapshot>,
+    prompt_tokens: u64,
+    transfer_penalty: f64,
+    extra_barriers: &[BarrierFactor],
+    pool_pi: f64,
+) -> Option<Arc<Backend>> {
+    let blocks = default_routing_blocks(prompt_tokens);
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            let mut ba = extra_barriers.to_vec();
+            let mut bb = extra_barriers.to_vec();
+            if prefill_label != a.label {
+                ba.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+            }
+            if prefill_label != b.label {
+                bb.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+            }
+            a.cost_with_warmth_pi(&ba, snapshot, &blocks, true, pool_pi)
+                .ln()
+                .total_cmp(
+                    &b.cost_with_warmth_pi(&bb, snapshot, &blocks, true, pool_pi)
+                        .ln(),
+                )
+        })
+        .cloned()
+}
+
+pub fn select_with_warmth_pi(
+    candidates: &[Arc<Backend>],
+    extra: &[BarrierFactor],
+    snapshot: Option<&StateSnapshot>,
+    blocks: &[u64],
+    decode_pool: bool,
+    pool_pi: f64,
+) -> Option<Arc<Backend>> {
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            a.cost_with_warmth_pi(extra, snapshot, blocks, decode_pool, pool_pi)
+                .ln()
+                .total_cmp(
+                    &b.cost_with_warmth_pi(extra, snapshot, blocks, decode_pool, pool_pi)
+                        .ln(),
+                )
+        })
+        .cloned()
+}
+
 pub fn select_with_warmth(
     candidates: &[Arc<Backend>],
     extra: &[BarrierFactor],
@@ -238,18 +335,27 @@ pub fn select(candidates: &[Arc<Backend>]) -> Option<Arc<Backend>> {
     select_with_barriers(candidates, &[])
 }
 
-pub fn select_with_barriers(
+pub fn select_with_barriers_pi(
     candidates: &[Arc<Backend>],
     extra: &[BarrierFactor],
+    pool_pi: f64,
+    prefill: bool,
 ) -> Option<Arc<Backend>> {
     candidates
         .iter()
         .min_by(|a, b| {
-            a.cost_with_barriers(extra)
+            a.cost_with_barriers_pi(extra, pool_pi, prefill)
                 .ln()
-                .total_cmp(&b.cost_with_barriers(extra).ln())
+                .total_cmp(&b.cost_with_barriers_pi(extra, pool_pi, prefill).ln())
         })
         .cloned()
+}
+
+pub fn select_with_barriers(
+    candidates: &[Arc<Backend>],
+    extra: &[BarrierFactor],
+) -> Option<Arc<Backend>> {
+    select_with_barriers_pi(candidates, extra, 0.5, true)
 }
 
 #[derive(Clone)]
@@ -276,6 +382,8 @@ pub struct ControlMetrics {
     pub predictor_p90_tokens: u64,
     pub dataplane_pi: f64,
     pub dataplane_age_ms: u64,
+    pub rcu_stale: bool,
+    pub rcu_stale_alert_ms: u64,
     pub admit_shed_total: u64,
 }
 
@@ -413,6 +521,8 @@ impl Router {
             predictor_p90_tokens: cp.predictor.p90(),
             dataplane_pi: self.dataplane.read_pi(),
             dataplane_age_ms: self.dataplane.age_ms(),
+            rcu_stale: self.dataplane.is_stale(DATAPLANE_RCU_STALE_ALERT_MS),
+            rcu_stale_alert_ms: DATAPLANE_RCU_STALE_ALERT_MS,
             admit_shed_total: self.admit.shed_total(),
         }
     }
@@ -480,11 +590,12 @@ impl Router {
     }
 
     pub fn pick_with_phi(&self, phase: Phase, phi: Option<BarrierFactor>) -> Option<Arc<Backend>> {
+        let pool_pi = self.dataplane.read_pi();
         let extra: [BarrierFactor; 1] = [phi.unwrap_or(BarrierFactor::clamped(1.0))];
         let barriers = if phi.is_some() { &extra[..] } else { &[] };
         match phase {
-            Phase::Prefill => select(self.pool(Phase::Prefill)),
-            Phase::Decode => select_with_barriers(self.pool(Phase::Decode), barriers),
+            Phase::Prefill => select_with_barriers_pi(self.pool(Phase::Prefill), barriers, pool_pi, true),
+            Phase::Decode => select_with_barriers_pi(self.pool(Phase::Decode), barriers, pool_pi, false),
         }
     }
 
@@ -621,10 +732,12 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
         return Ok(path);
     }
 
-    let prefill = select_prefill_target(
+    let pool_pi = router.dataplane.read_pi();
+    let prefill = select_prefill_with_pi(
         router.pool(Phase::Prefill),
         router.state.as_ref(),
         prompt_tokens,
+        pool_pi,
     )
     .ok_or(RouteError::NoBackend)?;
     router.note_route_mix(false);
@@ -704,13 +817,15 @@ pub fn on_prefill_complete(
         .filter(|b| b.get() > 1.0);
     let extra: Vec<BarrierFactor> = phi.into_iter().collect();
 
-    let backend = select_decode_target(
+    let pool_pi = router.dataplane.read_pi();
+    let backend = select_decode_with_pi(
         prefill_label,
         router.pool(Phase::Decode),
         router.state.as_ref(),
         signals.prompt_tokens,
         ROUTING_TRANSFER_PENALTY,
         &extra,
+        pool_pi,
     )
     .or_else(|| router.pick_with_phi(Phase::Decode, phi))
     .or_else(|| router.pick_colocated())
