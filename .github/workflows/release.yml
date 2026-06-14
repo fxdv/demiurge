@@ -1,0 +1,56 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0-p5)"
+        required: true
+        default: "v0.1.0-p5"
+      skip_pre_release:
+        description: "Skip pre-release (pack only — must have prior green run)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pre-release validation
+        if: ${{ !inputs.skip_pre_release }}
+        run: |
+          bash ./scripts/pre-release.sh 2>&1 | tee target/release-artifacts/pre-release.log
+
+      - name: Build publish artifact
+        run: bash ./scripts/publish.sh --skip-pre-release
+
+      - name: Upload artifact tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: demiurge-release-${{ github.sha }}
+          path: target/release-artifacts/*.tar.gz
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(grep '^version' crates/demiurge-router/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          COMMIT="$(git rev-parse --short HEAD)"
+          STAGING="target/release-artifacts/demiurge-${VERSION}-linux-$(uname -m)-${COMMIT}"
+          TARBALL="target/release-artifacts/demiurge-${VERSION}-linux-$(uname -m)-${COMMIT}.tar.gz"
+          gh release create "${{ inputs.tag }}" \
+            "$TARBALL" \
+            "$STAGING/RELEASE-one-pager.md" \
+            "$STAGING/load-bench/latest.pseudo" \
+            "$STAGING/load-bench/stress.pseudo" \
+            --title "Demiurge ${VERSION} — P5 proof (${COMMIT})" \
+            --notes-file "$STAGING/RELEASE-one-pager.md"

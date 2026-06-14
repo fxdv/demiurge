@@ -55,7 +55,9 @@ suite, CPU bench gates, load regression smoke (`load-bench --ci`), and (if
 For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
 (strict zero-error gates; not part of `gate.sh` or CI). Before a release tag,
 run `./scripts/pre-release.sh` (full gate + load bench incl. `LOAD-STEP-ACTUATE`
-+ stress).
++ stress). To ship a local release artifact (binaries, validation logs, technical
+one-pager), run `./scripts/publish.sh`; CI uses the **release** workflow
+(manual dispatch) for GitHub Releases.
 
 ## CI gates
 
