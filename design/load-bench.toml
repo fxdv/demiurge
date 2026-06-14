@@ -65,7 +65,7 @@ max_p99_ms = 150.0
 
 [[scenario]]
 id = "LOAD-KV-BURST"
-summary = "P2: 10× KV budget, long disagg + hand-off headers, zero OOM"
+summary = "P2: 10× KV budget, long disagg + hand-off headers, zero OOM, bounded graceful rejects"
 backends = 2
 decode_backends = 2
 use_kv_pool = true
@@ -79,6 +79,7 @@ cost_step_seconds = 0.005
 backend_delay_us = 0
 concurrency = 12
 requests_per_worker = 4
+max_kv_admit_rejects = 6
 max_p99_ms = 150.0
 isolate_recovery = true
 

@@ -221,6 +221,13 @@ impl Cost {
     pub fn is_positive(self) -> bool {
         self.ln.is_finite()
     }
+
+    /// Construct from a finite log-cost (hot-path fast paths in the router).
+    #[inline]
+    pub fn from_ln(ln: f64) -> Self {
+        debug_assert!(ln.is_finite(), "cost log must be finite");
+        Self { ln }
+    }
 }
 
 impl fmt::Display for Cost {
@@ -234,6 +241,7 @@ impl fmt::Display for Cost {
 /// term is finite by the factor constructors, so the sum is finite and the
 /// represented cost is strictly positive — with no underflow-to-zero or
 /// sign-flip possible, unlike a linear product. [DEMI-COST-POS]
+#[inline]
 pub fn compose(
     core: TimeCore,
     barriers: &[BarrierFactor],
@@ -247,9 +255,10 @@ pub fn compose(
     for d in discounts {
         ln += d.get().ln();
     }
-    ln += corrector.get().ln();
-    // Finite for any realistic number of terms; only an astronomically long
-    // factor slice could overflow the sum, which is physically impossible.
+    let c = corrector.get();
+    if c != 1.0 {
+        ln += c.ln();
+    }
     debug_assert!(ln.is_finite(), "cost log overflowed: too many factors");
     Cost { ln }
 }

@@ -118,15 +118,28 @@ pub struct Backend {
     pub label: String,
     pub addr: SocketAddr,
     base_service_seconds: f64,
+    /// ln(base_service_seconds) — valid bases only; invalid inputs fail-expensive at construction.
+    ln_base: f64,
     inflight: AtomicUsize,
+}
+
+#[inline]
+fn queue_ln(inflight: usize) -> f64 {
+    (1.0 + inflight as f64).ln()
 }
 
 impl Backend {
     pub fn new(label: impl Into<String>, addr: SocketAddr, base_service_seconds: f64) -> Arc<Self> {
+        let ln_base = if base_service_seconds.is_finite() && base_service_seconds > 0.0 {
+            base_service_seconds.ln()
+        } else {
+            f64::MAX.ln()
+        };
         Arc::new(Self {
             label: label.into(),
             addr,
             base_service_seconds,
+            ln_base,
             inflight: AtomicUsize::new(0),
         })
     }
@@ -144,9 +157,12 @@ impl Backend {
     }
 
     pub fn cost(&self) -> Cost {
-        let core = TimeCore::clamped(self.base_service_seconds);
-        let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
-        compose(core, &[queue], &[], Corrector::identity())
+        Cost::from_ln(self.ln_base + queue_ln(self.inflight()))
+    }
+
+    #[inline]
+    fn selection_ln(&self, pool_pi: f64, prefill: bool) -> f64 {
+        self.ln_base + pool_core_scale(1.0, pool_pi, prefill).ln() + queue_ln(self.inflight())
     }
 
     pub fn cost_with_warmth(
@@ -180,6 +196,9 @@ impl Backend {
                 }
             }
         }
+        if extra.is_empty() && discounts.is_empty() {
+            return Cost::from_ln(self.selection_ln(pool_pi, !decode_pool));
+        }
         let scaled = pool_core_scale(self.base_service_seconds, pool_pi, !decode_pool);
         let core = TimeCore::clamped(scaled);
         let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
@@ -199,12 +218,12 @@ impl Backend {
         pool_pi: f64,
         prefill: bool,
     ) -> Cost {
+        if extra.is_empty() {
+            return Cost::from_ln(self.selection_ln(pool_pi, prefill));
+        }
         let scaled = pool_core_scale(self.base_service_seconds, pool_pi, prefill);
         let core = TimeCore::clamped(scaled);
         let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
-        if extra.is_empty() {
-            return compose(core, &[queue], &[], Corrector::identity());
-        }
         let mut barriers = Vec::with_capacity(1 + extra.len());
         barriers.push(queue);
         barriers.extend_from_slice(extra);
@@ -244,6 +263,9 @@ fn select_prefill_with_pi(
     prompt_tokens: u64,
     pool_pi: f64,
 ) -> Option<Arc<Backend>> {
+    if snapshot.is_none() {
+        return select_with_barriers_pi(candidates, &[], pool_pi, true);
+    }
     let blocks = default_routing_blocks(prompt_tokens);
     candidates
         .iter()
@@ -341,6 +363,17 @@ pub fn select_with_barriers_pi(
     pool_pi: f64,
     prefill: bool,
 ) -> Option<Arc<Backend>> {
+    if extra.is_empty() {
+        let ln_scale = pool_core_scale(1.0, pool_pi, prefill).ln();
+        return candidates
+            .iter()
+            .min_by(|a, b| {
+                let la = a.ln_base + ln_scale + queue_ln(a.inflight());
+                let lb = b.ln_base + ln_scale + queue_ln(b.inflight());
+                la.total_cmp(&lb)
+            })
+            .cloned();
+    }
     candidates
         .iter()
         .min_by(|a, b| {
@@ -358,7 +391,6 @@ pub fn select_with_barriers(
     select_with_barriers_pi(candidates, extra, 0.5, true)
 }
 
-#[derive(Clone)]
 pub struct Router {
     prefill: Vec<Arc<Backend>>,
     decode: Vec<Arc<Backend>>,
@@ -370,6 +402,27 @@ pub struct Router {
     dataplane: Arc<RcuRoutingTable>,
     admit: Arc<AdmitBucket>,
     rebalancer_actuation: bool,
+    colocated_routes: AtomicU64,
+    disagg_routes: AtomicU64,
+}
+
+impl Clone for Router {
+    fn clone(&self) -> Self {
+        Self {
+            prefill: self.prefill.clone(),
+            decode: self.decode.clone(),
+            ledger: self.ledger.clone(),
+            handoffs: self.handoffs.clone(),
+            bytes_per_token: self.bytes_per_token,
+            state: self.state.clone(),
+            control: Arc::clone(&self.control),
+            dataplane: Arc::clone(&self.dataplane),
+            admit: Arc::clone(&self.admit),
+            rebalancer_actuation: self.rebalancer_actuation,
+            colocated_routes: AtomicU64::new(self.colocated_routes.load(Ordering::Relaxed)),
+            disagg_routes: AtomicU64::new(self.disagg_routes.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 /// Shadow control-plane telemetry (rebalancer π*, pairing regret, length predictor).
@@ -393,8 +446,6 @@ struct ControlPlane {
     predictor: LengthPredictor,
     regret_sum: f64,
     regret_samples: u64,
-    colocated_routes: u64,
-    disagg_routes: u64,
     last_pi_star: f64,
 }
 
@@ -405,8 +456,6 @@ impl Default for ControlPlane {
             predictor: LengthPredictor::default(),
             regret_sum: 0.0,
             regret_samples: 0,
-            colocated_routes: 0,
-            disagg_routes: 0,
             last_pi_star: 0.5,
         }
     }
@@ -429,6 +478,8 @@ impl Router {
             dataplane: RcuRoutingTable::new(0.5),
             admit: Arc::new(AdmitBucket::new(DATAPLANE_ADMIT_BURST)),
             rebalancer_actuation: rebalancer_actuation_enabled(),
+            colocated_routes: AtomicU64::new(0),
+            disagg_routes: AtomicU64::new(0),
         }
     }
 
@@ -452,6 +503,8 @@ impl Router {
             dataplane: RcuRoutingTable::new(0.5),
             admit: Arc::new(AdmitBucket::new(DATAPLANE_ADMIT_BURST)),
             rebalancer_actuation: rebalancer_actuation_enabled(),
+            colocated_routes: AtomicU64::new(0),
+            disagg_routes: AtomicU64::new(0),
         };
         (router, ledger, handoffs)
     }
@@ -527,24 +580,42 @@ impl Router {
         }
     }
 
-    fn note_route_mix(&self, colocated: bool) {
-        let mut cp = self.control.lock().expect("control plane");
-        if colocated {
-            cp.colocated_routes = cp.colocated_routes.saturating_add(1);
-        } else {
-            cp.disagg_routes = cp.disagg_routes.saturating_add(1);
+    fn tick_control(
+        &self,
+        colocated: Option<bool>,
+        prompt_tokens: Option<u64>,
+        sample_regret: bool,
+    ) {
+        if let Some(colocated) = colocated {
+            if colocated {
+                self.colocated_routes.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.disagg_routes.fetch_add(1, Ordering::Relaxed);
+            }
         }
-    }
 
-    fn tick_control(&self, prompt_tokens: Option<u64>, sample_regret: bool) {
+        let need_rebalancer = sample_regret
+            || self.rebalancer_actuation
+            || self.dataplane.age_ms() >= DATAPLANE_RCU_HEARTBEAT_MS;
+
+        if prompt_tokens.is_none() && !need_rebalancer {
+            return;
+        }
+
         let mut cp = self.control.lock().expect("control plane");
         if let Some(tokens) = prompt_tokens {
             cp.predictor.record(tokens);
         }
 
-        let routed = cp.colocated_routes.saturating_add(cp.disagg_routes);
+        if !need_rebalancer {
+            return;
+        }
+
+        let colocated = self.colocated_routes.load(Ordering::Relaxed);
+        let disagg = self.disagg_routes.load(Ordering::Relaxed);
+        let routed = colocated.saturating_add(disagg);
         let fp_share = if routed > 0 {
-            cp.colocated_routes as f64 / routed as f64
+            colocated as f64 / routed as f64
         } else {
             0.5
         };
@@ -638,31 +709,95 @@ pub fn parse_pool(spec: &str) -> Result<Vec<Arc<Backend>>, String> {
 
 const MAX_HEAD: usize = 64 * 1024;
 
-/// Parse `X-Demiurge-Tokens: N` from the request head.
-pub fn parse_prompt_tokens(head: &[u8]) -> Option<u64> {
-    let text = String::from_utf8_lossy(head);
-    for line in text.lines() {
-        let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("x-demiurge-tokens:") {
-            if let Ok(n) = rest.trim().parse::<u64>() {
-                return Some(n);
-            }
+const HDR_TOKENS: &[u8] = b"x-demiurge-tokens";
+const HDR_PHASE: &[u8] = b"x-demiurge-phase";
+
+#[inline]
+fn trim_ascii_ws(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|p| p + 1)
+        .unwrap_or(start);
+    &bytes[start..end]
+}
+
+#[inline]
+fn ascii_eq_ci(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(&x, &y)| x.eq_ignore_ascii_case(&y))
+}
+
+#[inline]
+fn header_value_ci<'a>(head: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let mut i = 0;
+    while i < head.len() {
+        let line_end = head[i..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| i + p)
+            .unwrap_or(head.len());
+        let mut line = &head[i..line_end];
+        if let Some(stripped) = line.strip_suffix(b"\r") {
+            line = stripped;
         }
+        if line.len() > name.len()
+            && line[name.len()] == b':'
+            && ascii_eq_ci(&line[..name.len()], name)
+        {
+            return Some(trim_ascii_ws(&line[name.len() + 1..]));
+        }
+        if line_end >= head.len() {
+            break;
+        }
+        i = line_end + 1;
     }
     None
+}
+
+#[inline]
+fn parse_u64_digits(bytes: &[u8]) -> Option<u64> {
+    let mut n = 0u64;
+    let mut any = false;
+    for b in bytes {
+        if !b.is_ascii_digit() {
+            break;
+        }
+        any = true;
+        n = n.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+    }
+    if any {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
+    hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Parse `X-Demiurge-Tokens: N` from the request head.
+pub fn parse_prompt_tokens(head: &[u8]) -> Option<u64> {
+    header_value_ci(head, HDR_TOKENS).and_then(parse_u64_digits)
 }
 
 /// Parse token count from `/prefill/<n>` or `/long/<n>` path segments.
 pub fn parse_path_tokens(head: &[u8]) -> Option<u64> {
     let first = head.split(|&b| b == b'\r' || b == b'\n').next()?;
-    let first = std::str::from_utf8(first).ok()?;
-    let path = first.split_whitespace().nth(1)?;
-    for prefix in ["/prefill/", "/long/"] {
-        if let Some(rest) = path.strip_prefix(prefix) {
-            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = num.parse() {
-                return Some(n);
-            }
+    let mut parts = first.split(|&b| b == b' ').filter(|p| !p.is_empty());
+    parts.next()?;
+    let path = parts.next()?;
+    for prefix in [b"/prefill/" as &[u8], b"/long/"] {
+        if path.starts_with(prefix) {
+            return parse_u64_digits(&path[prefix.len()..]);
         }
     }
     None
@@ -678,9 +813,12 @@ pub fn estimate_prompt_tokens(head: &[u8]) -> u64 {
 
 /// True when the client declared decode-only routing.
 pub fn is_decode_only(head: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(head).to_ascii_lowercase();
-    text.contains("x-demiurge-phase: decode")
-        || text.lines().next().is_some_and(|l| l.contains(" /decode"))
+    if header_value_ci(head, HDR_PHASE).is_some_and(|v| ascii_eq_ci(v, b"decode")) {
+        return true;
+    }
+    head.split(|&b| b == b'\r' || b == b'\n')
+        .next()
+        .is_some_and(|line| contains_subslice(line, b" /decode"))
 }
 
 fn live_queue_pressure(backends: &[Arc<Backend>]) -> f64 {
@@ -718,16 +856,14 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
             .pick(Phase::Decode)
             .map(RoutePath::DecodeOnly)
             .ok_or(RouteError::NoBackend)?;
-        router.note_route_mix(false);
-        router.tick_control(None, false);
+        router.tick_control(Some(false), None, false);
         return Ok(path);
     }
 
     let prompt_tokens = estimate_prompt_tokens(head);
     if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
         if let Some((prefill, _strength)) = warmth_override_target(router, prompt_tokens) {
-            router.note_route_mix(false);
-            router.tick_control(Some(prompt_tokens), false);
+            router.tick_control(Some(false), Some(prompt_tokens), false);
             return Ok(RoutePath::Disaggregated {
                 prefill,
                 request_id: RequestId::new(),
@@ -738,8 +874,7 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
             .pick_colocated()
             .map(RoutePath::Colocated)
             .ok_or(RouteError::NoBackend)?;
-        router.note_route_mix(true);
-        router.tick_control(None, false);
+        router.tick_control(Some(true), None, false);
         return Ok(path);
     }
 
@@ -751,8 +886,7 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
         pool_pi,
     )
     .ok_or(RouteError::NoBackend)?;
-    router.note_route_mix(false);
-    router.tick_control(Some(prompt_tokens), false);
+    router.tick_control(Some(false), Some(prompt_tokens), false);
     Ok(RoutePath::Disaggregated {
         prefill,
         request_id: RequestId::new(),
@@ -849,7 +983,7 @@ pub fn on_prefill_complete(
         }
     }
 
-    router.tick_control(Some(signals.prompt_tokens), true);
+    router.tick_control(None, Some(signals.prompt_tokens), true);
 
     Ok(DecodePlacement {
         backend,
