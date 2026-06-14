@@ -246,9 +246,8 @@ Track progress: `cargo xtask lint` prints per-phase burndown
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). The short version: a behavior change and
-its spec change land together, generated files are never hand-edited, and
-`./scripts/gate.sh` must pass before you push.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). External contributors must sign the
+[`CLA.md`](CLA.md) before merge (see PR template).
 
 ## License
 

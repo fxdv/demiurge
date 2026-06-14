@@ -3,6 +3,25 @@
 Demiurge is **design-driven**: the spec in [`spec/`](spec/) is the contract, and
 the code is checked against it in CI. A few rules keep the two from drifting.
 
+## Contributor License Agreement (required)
+
+**External contributions require a signed CLA** before merge.
+
+1. Read [`CLA.md`](CLA.md) (Individual Contributor License Agreement).
+2. On your first pull request, check the CLA box in the PR template **or** comment:
+   `I have read the CLA and I sign it`.
+
+The CLA grants the Maintainers the right to use your work under the project’s
+**Apache-2.0 OR MIT** license and to relicense it in the future (including
+commercial / dual-license offerings). This keeps monetization paths open while
+the core stays open source.
+
+Contributions from **employees of a company** require a Corporate CLA — open a
+discussion with the Maintainers before your first merge.
+
+Maintainers and pre-CLA history: commits already on `main` before this policy
+remain under the repository license.
+
 ## The rules
 
 1. **Same-PR rule.** A behavior change and its spec change land in the same PR.
