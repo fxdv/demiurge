@@ -151,6 +151,7 @@ cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-
 ./scripts/load-stress.sh      # strict heavy stress — local only, not in gate.sh
 ./scripts/pre-release.sh      # gate + full load bench + stress (nightly / pre-tag)
 ./scripts/publish.sh          # pre-release + tarball (binaries, validation, one-pager)
+./scripts/publish.sh --github v0.1.0-p6   # local macOS/Linux + GitHub Release tag
 cargo test --all              # run the executable invariants (C>0, ±α)
 ./scripts/gate.sh             # run the full local gate (mirrors CI)
 ```

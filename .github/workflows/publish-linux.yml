@@ -1,0 +1,76 @@
+name: publish-linux
+
+# Weekly Linux release artifact + rolling `linux-nightly` GitHub Release.
+# Manual dispatch re-runs the same pipeline (e.g. after main fixes).
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      skip_pre_release:
+        description: "Skip pre-release (pack only — prior green run required)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+
+      - name: Pre-release validation
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_pre_release }}
+        run: |
+          mkdir -p target/release-artifacts
+          bash ./scripts/pre-release.sh 2>&1 | tee target/release-artifacts/pre-release.log
+
+      - name: Build publish artifact
+        run: bash ./scripts/publish.sh --skip-pre-release
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: demiurge-linux-${{ github.run_id }}
+          path: |
+            target/release-artifacts/*.tar.gz
+            target/release-artifacts/publish.env
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Update rolling linux-nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source target/release-artifacts/publish.env
+          VERSION="$(grep '^version' crates/demiurge-router/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%d)"
+          TAG="linux-nightly"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --prerelease \
+              --title "Linux nightly (automated)" \
+              --notes "Rolling pre-release: latest green Linux build from \`main\`."
+          fi
+
+          gh release upload "$TAG" \
+            "$TARBALL" \
+            "$STAGING/RELEASE-one-pager.md" \
+            "$STAGING/load-bench/latest.pseudo" \
+            "$STAGING/load-bench/stress.pseudo" \
+            --clobber
+
+          gh release edit "$TAG" \
+            --title "Linux nightly · ${VERSION} · ${DATE} (${COMMIT})" \
+            --notes-file "$STAGING/RELEASE-one-pager.md"
+
+          echo "Updated https://github.com/${{ github.repository }}/releases/tag/${TAG}"

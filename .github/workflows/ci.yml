@@ -6,34 +6,12 @@ on:
   pull_request:
 
 jobs:
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build workspace (release)
-        run: cargo build --release --workspace
-
-      - name: Verify shipped binaries
-        run: |
-          test -x target/release/demiurge-router
-          test -x target/release/xtask
-
   quality:
-    name: Lint & test
-    needs: build
+    name: Quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -44,22 +22,26 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      - name: Release build + binary check
+        run: |
+          cargo build --release --workspace
+          test -x target/release/demiurge-router
+          test -x target/release/xtask
+
   regression:
     name: Regression
-    needs: build
+    needs: quality
     runs-on: ubuntu-latest
     env:
       CI: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust
 
-      - name: Build workspace (release)
-        run: cargo build --release --workspace
+      - name: CPU bench gates
+        run: |
+          cargo build --release --workspace
+          cargo run --release -q --package xtask -- bench-gate
 
-      - name: CPU bench gates (hot-path ns/op)
-        run: cargo run --release -q --package xtask -- bench-gate
-
-      - name: Load smoke regression (TCP end-to-end)
+      - name: Load smoke
         run: cargo run --release -q --package xtask -- load-bench --ci

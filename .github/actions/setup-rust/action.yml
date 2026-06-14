@@ -1,0 +1,9 @@
+name: Setup Rust
+description: Stable toolchain (rustfmt + clippy) and cargo cache
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    - uses: Swatinem/rust-cache@v2

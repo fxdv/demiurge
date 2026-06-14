@@ -137,6 +137,14 @@ bold "manifest + checksums"
 mkdir -p target/release-artifacts
 tar -czf "$TARBALL" -C "$(dirname "$STAGING")" "$(basename "$STAGING")"
 
+{
+  echo "VERSION=$VERSION"
+  echo "COMMIT=$COMMIT"
+  echo "ARCH=$ARCH"
+  echo "STAGING=$STAGING"
+  echo "TARBALL=$TARBALL"
+} > target/release-artifacts/publish.env
+
 bold "artifact ready"
 echo "  dir:     $STAGING"
 echo "  tarball: $TARBALL"

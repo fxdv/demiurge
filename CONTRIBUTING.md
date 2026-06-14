@@ -56,13 +56,34 @@ For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
 (strict zero-error gates; not part of `gate.sh` or CI). Before a release tag,
 run `./scripts/pre-release.sh` (full gate + load bench incl. `LOAD-STEP-ACTUATE`
 + stress). To ship a local release artifact (binaries, validation logs, technical
-one-pager), run `./scripts/publish.sh`; CI uses the **release** workflow
-(manual dispatch) for GitHub Releases.
+one-pager), run `./scripts/publish.sh`; CI publishes **Linux** weekly via the
+`publish-linux` workflow (rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly)
+release) and on demand via the **release** workflow for tagged semver builds.
 
 ## CI gates
 
 | Workflow | What it enforces |
 |----------|------------------|
 | `design-conformance` | generated artifacts are not stale; spec ⇄ code ⇄ test links are intact |
-| `ci` | **Build** (release workspace + binary check); **lint & test**; **regression** (CPU bench gates + load smoke) |
+| `ci` | **Quality** (fmt, clippy, test, release build); **Regression** (CPU bench gates + load smoke) |
 | `spec` | the design PDF compiles from regenerated inputs |
+| `publish-linux` | **Weekly** Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) release (Mon 06:00 UTC); manual dispatch |
+| `release` | manual semver tag release (Linux artifact + one-pager) |
+
+All workflows share [`.github/actions/setup-rust`](.github/actions/setup-rust/) (toolchain + cache).
+Local `./scripts/gate.sh` still mirrors **design-conformance + ci quality + regression**; it does not run pre-release or publish.
+
+### CI structure (refactored)
+
+| Before | After |
+|--------|-------|
+| 3 `ci` jobs each checkout + toolchain + cache | 2 jobs (`quality` → `regression`); shared `setup-rust` action |
+| Toolchain/cache duplicated in 4 workflows | `.github/actions/setup-rust` reused everywhere |
+| Release path hard-coded in workflow YAML | `scripts/publish.sh` writes `target/release-artifacts/publish.env` |
+
+**Further opportunities** (not done — trade-offs):
+
+- Merge `design-conformance` into `ci` quality job (one less workflow badge, ~30s saved on PRs).
+- Pass release `target/` via artifacts from `quality` to `regression` (skip second `cargo build --release`; cache usually makes this marginal).
+- Reusable workflow wrapping `./scripts/gate.sh` flags so CI and local gate share one entrypoint.
+- `publish-linux` on every green `main` push (currently weekly only — pre-release is ~4 min + 2 min port recovery).
