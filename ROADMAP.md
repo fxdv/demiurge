@@ -29,22 +29,62 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 
 ---
 
-## Burndown (today)
+## Development tracks
 
-| Phase | Name | Requirements | Status |
-|------:|------|--------------|--------|
-| **0** | Foundations | 4 / 4 | **done** |
-| **1** | Non-blocking routing loop | 2 / 2 | **done** |
-| **2** | KV hand-off & memory barriers | 5 / 5 | **done** |
-| **3** | State plane | 2 / 2 | **done** |
-| **4** | Control plane & pairing | 2 / 2 | **done** |
-| **5** | Data plane hardening (**proof**) | 2 / 2 | **done** |
-| **5+** | Data plane **production** (XDP / io_uring) | — | planned |
-| **6** | Live migration | 0 / 1 | planned |
-| **7** | Multi-tenancy & cache security | 0 / 1 | planned |
-| **8** | Learned corrector graduation | 0 / 1 (`DEMI-CORR-GRAD`) | planned |
+Work is grouped by **where it runs**, not only by dependency order. Requirement
+**phase numbers (0–8)** in `design/requirements.toml` stay unchanged — `cargo xtask lint`
+still prints `P0: 4/4`, `P1: 2/2`, … — but the build plan below follows three tracks.
 
-Run `cargo xtask lint` for the live burndown line.
+```text
+Track A — macOS & local dev     →  everything provable on a Mac today (mock TCP, userspace dataplane)
+Track B — Linux production      →  kernel dataplane (XDP, io_uring), linux-nightly binaries
+Track C — Fleet, GPU & economics →  real accelerator fleets, actuation, migration, production ML
+```
+
+| Track | Platform | Phases | Gate / CI | Status |
+|-------|----------|--------|-----------|--------|
+| **A — macOS & local dev** | macOS (primary), portable Rust | **0–5 proof** | `./scripts/gate.sh`, `pre-release.sh`, tagged macOS release | **done** |
+| **A — remaining (portable)** | macOS + trace replay | shadow fleet pilot, corrector **shadow** pipeline | local / optional CI | planned |
+| **B — Linux production** | Linux x86_64 | **5+** dataplane | `bpf` workflow, `publish-linux.yml` → `linux-nightly` | in progress (BPF compiles ✅) |
+| **C — Fleet & GPU** | Linux + GPU fleet | **6–8**, RDMA prod, π actuation at scale | measured on reference hardware | planned |
+
+**What runs where**
+
+| Work | macOS | Linux | GPU fleet |
+|------|:-----:|:-----:|:---------:|
+| Cost algebra, router, KV hand-off (TCP), state/control planes | ✅ | ✅ | — |
+| CPU bench gates, load-bench, load-stress (mock backends) | ✅ | ✅ | — |
+| Userspace RCU + `AdmitBucket` (P5 proof) | ✅ | ✅ | — |
+| `cargo xtask lint` / spec PDF / design-conformance | ✅ | ✅ (CI) | — |
+| macOS tagged release (`scripts/publish.sh`) | ✅ | — | — |
+| XDP compile + attach, `io_uring` L7 forwarder | — | ✅ | — |
+| Weekly `linux-nightly` pre-release binaries | — | ✅ | — |
+| RDMA KV hand-off (production transport) | — | ✅ | ✅ |
+| Live migration sub-ITL cutover | — | ✅ | ✅ |
+| Pool autoscaler / GPU fraction actuation | shadow ✅ | ✅ | ✅ |
+| Corrector canary → production | shadow ✅ | — | ✅ |
+
+Honest scope: **`DEMI-XDP-SHED` at `implemented`** is the userspace proof (Track A).
+Runtime XDP shed before decode saturation is Track B (`Phase 5+`).
+
+---
+
+## Burndown (requirement phases)
+
+| Phase | Track | Name | Requirements | Status |
+|------:|-------|------|--------------|--------|
+| **0** | A | Foundations | 4 / 4 | **done** |
+| **1** | A | Non-blocking routing loop | 2 / 2 | **done** |
+| **2** | A | KV hand-off & memory barriers | 5 / 5 | **done** |
+| **3** | A | State plane | 2 / 2 | **done** |
+| **4** | A | Control plane & pairing | 2 / 2 | **done** |
+| **5** | A | Data plane hardening (**proof**) | 2 / 2 | **done** |
+| **5+** | B | Data plane **production** (XDP / io_uring) | — | planned |
+| **6** | C | Live migration | 0 / 1 | planned |
+| **7** | C | Multi-tenancy & cache security | 0 / 1 | planned |
+| **8** | C | Learned corrector graduation | 0 / 1 (`DEMI-CORR-GRAD`) | planned |
+
+Run `cargo xtask lint` for the live per-phase burndown line.
 
 ---
 
@@ -108,9 +148,9 @@ Re-run after changes: `cargo xtask bench-probe`.
 
 ### Planned gates (register before closing the phase)
 
-| Phase | Proposed ID | Target |
-|------:|-------------|--------|
-| **5** | *(future)* | io_uring forward path latency |
+| Track | Phase | Proposed ID | Target |
+|-------|------:|-------------|--------|
+| **B** | **5+** | `BENCH-IOURING-FWD` | `io_uring` forward path latency (Linux only) |
 
 Each new gate gets a row in `bench-gates.toml` in the **same PR** that lands the
 code it measures. Tighten a limit only when deliberately optimizing that path;
@@ -391,8 +431,8 @@ if |π* − π| > rebalance_hysteresis:
 
 **Exit gate**
 
-- [ ] Shadow replay on production trace: `π*` correlates with known prefill-heavy windows.
-- [ ] Step-load test: actuation removes sustained queue imbalance without oscillation.
+- [ ] Shadow replay on production trace: `π*` correlates with known prefill-heavy windows *(Track A — portable; blocks Track C actuation sign-off)*.
+- [ ] Step-load test: actuation removes sustained queue imbalance without oscillation *(Track C — fleet / autoscaler)*.
 - [ ] Fast-path traffic spike reduces `demand_prefill` via `FP_share` term (no manual retune).
 
 **Parameters** (to add when Phase 4 starts):
@@ -407,6 +447,14 @@ weight_slo = 0.35
 ```
 
 ---
+
+# Track A — macOS & local development
+
+Everything in this track runs on macOS without Linux-only kernel APIs: mock-TCP
+backends, userspace dataplane proof, CPU gates, load/stress suites, and local
+publish. Phases **0–5 proof** are **done**; remaining Track A work is portable
+shadow tooling (fleet trace replay, corrector shadow) that does not require a GPU
+fleet or XDP.
 
 ## Phase 0 — Foundations ✅ (shipped)
 
@@ -587,14 +635,14 @@ pairing-regret monitor.
 - [x] Step-load test: no pool-weight oscillation (hysteresis holds).
 - [x] `BENCH-PAIR-GREEDY` and `BENCH-REBALANCE` gates pass.
 
-**Out of scope.** Learned corrector in prod (Phase 8), XDP production dataplane (Phase 5+), live migration (Phase 6).
+**Out of scope.** Learned corrector in prod (Phase 8 / Track C), XDP production dataplane (Phase 5+ / Track B), live migration (Phase 6 / Track C).
 
 ---
 
-## Phase 5 — Data plane hardening
+## Phase 5 — Data plane hardening (Track A proof)
 
-Phase 5 splits into **proof** (shipped, `DEMI-DP-RCU` + `DEMI-XDP-SHED` at `implemented`) and
-**production** (eBPF XDP + real `io_uring` forwarder — planned as **Phase 5+**).
+Phase 5 closes on macOS with a **userspace proof** (`DEMI-DP-RCU` + `DEMI-XDP-SHED` at
+`implemented`). Kernel dataplane production moves to **Track B — Phase 5+**.
 
 ### Phase 5 proof — **done** (`cargo xtask lint`: 2/2)
 
@@ -627,7 +675,25 @@ shedding; actuated π on the hot path; observability for RCU staleness.
 **Validation.** Local load bench **8,060/8,060** ok; stress **11,600/11,600** ok.
 Pre-release: `./scripts/pre-release.sh` (gate + full load + stress).
 
-### Phase 5+ production — **planned**
+### Track A — remaining (portable, planned)
+
+Work that stays on macOS before Track B/C hardware:
+
+| Item | Goal | Gate |
+|------|------|------|
+| Fleet pilot (shadow) | Replay production trace; `π*` vs prefill-heavy windows | correlates on held-out trace |
+| Corrector shadow | Log `(features, analytic_cost, observed_latency)`; train bounded δ | no prod actuation |
+| RDMA trait | Keep TCP proof default; production RDMA lands in Track C on Linux | trait + mock only on Mac |
+
+---
+
+# Track B — Linux production dataplane
+
+**Platform:** Linux x86_64 only (XDP, `io_uring`, real NIC path). CI:
+[`publish-linux.yml`](.github/workflows/publish-linux.yml) (weekly + dispatch → rolling
+**`linux-nightly`**), [`bpf.yml`](.github/workflows/bpf.yml) (eBPF compile).
+
+## Phase 5+ — Kernel dataplane — **planned**
 
 **Goal.** Replace userspace proof with kernel dataplane: XDP admission, `io_uring` L7 forwarder.
 
@@ -637,17 +703,25 @@ Pre-release: `./scripts/pre-release.sh` (gate + full load + stress).
 | `demiurge-dataplane` | Rust loader stub (`XdpAdmitShed`); wire `aya`/libbpf attach + map seeding. |
 | `demiurge-dataplane` | Rust `io_uring` L7 forwarder wired to recv/send; RCU snapshot only on hot path. |
 | Bench | `BENCH-IOURING-FWD` — forward path latency gate (register in same PR as code). |
+| CI / release | `linux-nightly` pre-release on Ubuntu (gate + load + stress + artifacts). |
 
 **Exit gate — production**
 
 - [x] XDP program **compiles** in CI (`bpf` workflow → `target/bpf/admit_shed.o`).
+- [x] `linux-nightly` rolling release green on Ubuntu.
 - [ ] Shed at **XDP** before decode pool saturation (runtime attach + map sync, not userspace bucket alone).
 - [ ] `io_uring` forwarder serves production TCP path.
-- [ ] Data-plane p99 admit latency within budget under CP slowdown on reference hardware.
+- [ ] Data-plane p99 admit latency within budget under CP slowdown on reference Linux hardware.
 
-**Out of scope.** Live migration (Phase 6), cross-tenant auth (Phase 7).
+**Out of scope.** Live migration (Track C / Phase 6), cross-tenant auth (Track C / Phase 7).
 
 ---
+
+# Track C — Fleet, GPU & production economics
+
+**Platform:** Linux + accelerator fleet (reference hardware for migration cutover, GPU pool
+autoscaler, corrector canary). Logic crates remain portable; **exit gates are measured on
+fleet**, not mock TCP alone.
 
 ## Phase 6 — Live migration
 
@@ -682,6 +756,9 @@ If p99 cutover exceeds ITL on reference hardware, migration stays shadow-only.
 
 **Out of scope.** Cross-tenant migration (Phase 7 auth must approve targets).
 
+**Also Track C:** production **RDMA** KV hand-off (TCP proof stays Track A); pool
+**autoscaler actuation** and GPU-fraction scaling beyond shadow mode (shadow ✅ in P4/P5 proof).
+
 ---
 
 ## Phase 7 — Multi-tenancy & cache security (S1)
@@ -715,6 +792,10 @@ AP warmth, CP membership.
 ---
 
 ## Phase 8 — Learned corrector graduation
+
+**Track split.** Shadow pipeline + offline eval → **Track A** (macOS). Canary and
+production corrector actuation → **Track C** (GPU fleet, after Phase 4 exit with
+corrector OFF).
 
 **Goal.** Shadow → canary → production corrector without violating
 `DEMI-CORR-CLAMP` or `DEMI-COST-POS`. **Only after Phase 4 exit with corrector

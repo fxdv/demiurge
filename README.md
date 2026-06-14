@@ -20,13 +20,12 @@
 > formless chaos into an ordered cosmos — which is precisely this system's job:
 > imposing locality-aware order on chaotic inference traffic.
 
-> **Status.** Phases **0–4** are implemented and gated in CI: cost algebra, async
-> routing with short-context fast path, KV hand-off (TCP proof transport),
-> overhead-aware reservation, the Φ memory-pressure barrier, warmth-aware state
-> plane (AP gossip + RCU snapshots), and shadow control-plane pairing/rebalancing.
-> XDP admission, io_uring data plane, live migration, and cross-tenant cache
-> sharing remain **design intent** for later phases. See
-> [Status](#status-what-exists).
+> **Status.** **Track A (macOS / local dev):** Phases **0–5 proof** are implemented
+> and gated — through userspace RCU + admit shed, load/stress, and macOS release.
+> **Track B (Linux):** XDP compile + `linux-nightly` CI are live; runtime attach and
+> `io_uring` forwarder are next. **Track C (fleet / GPU):** migration, production
+> actuation, cross-tenant cache sharing, and corrector graduation remain design
+> intent. See [Status](#status-what-exists) and [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
@@ -240,12 +239,13 @@ looser.
 
 ## Roadmap & gates
 
-The full phased plan — deliverables, requirement IDs, exit gates, cross-cutting
-plans (short-context fast path, KV overhead accounting, dynamic pool
-rebalancing), and the live burndown — lives in **[`ROADMAP.md`](ROADMAP.md)**.
+The full plan — **three tracks** (macOS local dev → Linux production dataplane →
+fleet/GPU economics), deliverables, requirement IDs, exit gates, cross-cutting
+plans, and the live burndown — lives in **[`ROADMAP.md`](ROADMAP.md)**.
 
 Track progress: `cargo xtask lint` prints per-phase burndown
-(`P0: 4/4`, `P1: 2/2`, `P2: 5/5`, `P3: 2/2`, `P4: 2/2`, …). The spec conformance matrix includes a Phase column.
+(`P0: 4/4`, …, `P5: 2/2`). The spec conformance matrix includes a Phase column;
+the roadmap maps phases **0–5** to Track A, **5+** to Track B, **6–8** to Track C.
 
 ## Contributing
 
