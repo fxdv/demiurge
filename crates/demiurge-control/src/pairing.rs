@@ -7,8 +7,8 @@ use demiurge_state::{default_routing_blocks, StateSnapshot};
 
 use crate::scored::ScoredBackend;
 
-/// Default cross-node KV transfer barrier when pf and dc labels differ.
-pub const DEFAULT_TRANSFER_PENALTY: f64 = 1.05;
+/// Cross-node KV transfer barrier when pf label != dc label (Phase 4 pairing).
+pub const DEFAULT_TRANSFER_PENALTY: f64 = demiurge_cost::ROUTING_TRANSFER_PENALTY;
 
 /// Live routing and shadow pairing share this cost surface.
 pub trait PairingTarget {

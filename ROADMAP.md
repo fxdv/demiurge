@@ -38,7 +38,7 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 | **2** | KV hand-off & memory barriers | 5 / 5 | **done** |
 | **3** | State plane | 2 / 2 | **done** |
 | **4** | Control plane & pairing | 2 / 2 | **done** |
-| **5** | Data plane hardening | 0 / 2 | planned |
+| **5** | Data plane hardening | 2 / 2 | **in progress** |
 | **6** | Live migration | 0 / 1 | planned |
 | **7** | Multi-tenancy & cache security | 0 / 1 | planned |
 | **8** | Learned corrector graduation | 0 / 1 (`DEMI-CORR-GRAD`) | planned |
@@ -81,12 +81,13 @@ CI applies `settings.ci_slack` (2×) for runner jitter. Run
 | `BENCH-WARM-LOOKUP` | 3 | Cuckoo warmth probe per routing key block | ≤ 500 ns/op |
 | `BENCH-PAIR-GREEDY` | 4 | Greedy pf→dc pair selection over N×M candidates | ≤ 5 µs/op |
 | `BENCH-REBALANCE` | 4 | Pool pressure normalization + π* computation | ≤ 800 ns/op |
+| `BENCH-RCU-SNAPSHOT` | 5 | RCU table read on data-plane routing path | ≤ 50 ns/op |
 
 ### Planned gates (register before closing the phase)
 
 | Phase | Proposed ID | Target |
 |------:|-------------|--------|
-| **5** | `BENCH-RCU-SNAPSHOT` | RCU table read on data-plane routing path |
+| **5** | *(future)* | io_uring forward path latency |
 
 Each new gate gets a row in `bench-gates.toml` in the **same PR** that lands the
 code it measures. Tighten a limit only when deliberately optimizing that path;

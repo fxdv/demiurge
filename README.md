@@ -2,7 +2,7 @@
 
 # Demiurge
 
-**A phase-aware, cache-locality-first load balancer for inference fleets** *(Phases 0–4 shipped; data-plane hardening is next).*
+**A phase-aware, cache-locality-first load balancer for inference fleets** *(Phases 0–4 shipped; Phase 5 data plane started).*
 
 *Target: route prefill and decode as independent phases across two pools, with the KV cache as the explicit hand-off artifact — because an inference request is a lease on stateful accelerator memory, not a packet.*
 
@@ -71,7 +71,7 @@ Demiurge is built to exploit exactly those three facts.
 | CPU bench gates (`bench-gates.toml`, `cargo xtask bench-gate`) | **implemented** — in CI |
 | Local load bench (`load-bench.sh`, pseudo report) | **implemented** — CI runs `load-bench --ci` smoke |
 | Real stress suite (`load-stress.sh`, strict zero-error gates) | **implemented** — local only, not in CI |
-| XDP/L4 admission, io_uring data plane, RCU data-plane serving | design intent (P5) |
+| XDP/L4 admission, io_uring data plane, RCU data-plane serving | design intent (P5) — RCU + admit shed proof landed |
 | RDMA hand-off production path, live migration | design intent (P6) |
 | Cross-tenant cache sharing, learned corrector graduation | design intent (P7–P8) |
 

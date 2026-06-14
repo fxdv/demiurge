@@ -96,3 +96,13 @@ summary = "Pool rebalancer π* computation + hysteresis check"
 warmup_iters = 5_000
 bench_iters = 50_000
 max_median_ns = 800
+
+# --- Phase 5: RCU snapshot read ------------------------------------------------
+
+[[gate]]
+id = "BENCH-RCU-SNAPSHOT"
+phase = 5
+summary = "RcuRoutingTable::read_pi hot path (lock-free Arc clone)"
+warmup_iters = 5_000
+bench_iters = 50_000
+max_median_ns = 50

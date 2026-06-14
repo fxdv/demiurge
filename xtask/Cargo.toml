@@ -9,6 +9,7 @@ demiurge-cost = { path = "../crates/demiurge-cost" }
 demiurge-router = { path = "../crates/demiurge-router" }
 demiurge-state = { path = "../crates/demiurge-state" }
 demiurge-control = { path = "../crates/demiurge-control" }
+demiurge-dataplane = { path = "../crates/demiurge-dataplane" }
 toml = "0.8"
 regex = "1"
 serde = { version = "1", features = ["derive"] }

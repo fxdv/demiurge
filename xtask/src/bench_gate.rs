@@ -13,6 +13,7 @@ use demiurge_control::{greedy_pair, PoolPressure, PoolRebalancer, RebalancerMode
 use demiurge_cost::{
     compose, kv_breakdown, phi_barrier_marginal, BarrierFactor, Corrector, Discount, TimeCore,
 };
+use demiurge_dataplane::RcuRoutingTable;
 use demiurge_router::{
     estimate_prompt_tokens, parse_prompt_tokens, route, select, Backend, Router,
 };
@@ -232,6 +233,22 @@ struct RebalanceBench {
     signals: PoolPressure,
 }
 
+struct RcuSnapshotBench {
+    table: Arc<RcuRoutingTable>,
+}
+
+impl RcuSnapshotBench {
+    fn new() -> Self {
+        Self {
+            table: RcuRoutingTable::new(0.5),
+        }
+    }
+
+    fn run(&self) {
+        std::hint::black_box(self.table.read_pi());
+    }
+}
+
 impl RebalanceBench {
     fn new() -> Self {
         Self {
@@ -282,6 +299,7 @@ fn run_gate(gate: &Gate, settings: &Settings) -> Result<(SampleStats, u64), Box<
     let warm_lookup = WarmLookupBench::new();
     let pair_greedy = PairGreedyBench::new();
     let mut rebalance = RebalanceBench::new();
+    let rcu_snapshot = RcuSnapshotBench::new();
 
     let stats = match gate.id.as_str() {
         "BENCH-COMPOSE-8" => sample_ns_per_op(
@@ -337,6 +355,12 @@ fn run_gate(gate: &Gate, settings: &Settings) -> Result<(SampleStats, u64), Box<
             gate.bench_iters,
             settings.samples,
             || rebalance.run(),
+        ),
+        "BENCH-RCU-SNAPSHOT" => sample_ns_per_op(
+            gate.warmup_iters,
+            gate.bench_iters,
+            settings.samples,
+            || rcu_snapshot.run(),
         ),
         other => return Err(format!("unknown bench gate id {other:?}").into()),
     };

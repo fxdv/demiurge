@@ -47,13 +47,13 @@ code that exists today.
         (\req{DEMI-WARM-DISCOUNT}, \req{DEMI-STATE-AP}); fast-path warmth override.
   \item \textbf{Phase~4 (control)} --- Greedy pf$\to$dc pairing
         (\req{DEMI-PAIR-GREEDY}) and shadow pool rebalancer (\req{DEMI-POOL-RATIO}).
+  \item \textbf{Phase~5 (start)} --- RCU routing snapshot on the live TCP path
+        (\req{DEMI-DP-RCU}); userspace admit-bucket shed proof (\req{DEMI-XDP-SHED}).
 \end{itemize}
-\textbf{Not shipped.} Everything else in this spec---including data-plane hardening
-(\S\ref{sec:dataplane}), KV warmth map and gossip (\S\ref{sec:state}),
-production RDMA hand-off, cross-tenant sharing (\S\ref{sec:sharing}),
-live migration (\S\ref{sec:migration}), pool rebalancing actuation
-(\S\ref{sec:control}), and corrector graduation (\S\ref{sec:corrector})---is
-\textbf{design intent} tracked by requirement IDs and development phases in
+\textbf{Not shipped.} Production eBPF/XDP and \texttt{io\_uring} forwarder, pool
+rebalancing actuation in production fleets, cross-tenant sharing
+(\S\ref{sec:sharing}), live migration (\S\ref{sec:migration}), and corrector
+graduation (\S\ref{sec:corrector}) remain \textbf{design intent} tracked in
 \texttt{design/requirements.toml} and \texttt{ROADMAP.md}.
 
 \begin{table}[h]
@@ -186,8 +186,9 @@ $\pi$ using queue, KV, and SLO pressure with hysteresis and cooldown
 actuation.
 
 \section{Data Plane}\label{sec:dataplane}
-\intent{The L7 forwarder serves the last published RCU snapshot and never blocks
-on control-plane consensus \req{DEMI-DP-RCU}. Tenant token buckets and DDoS shed
-run at XDP before L7 \req{DEMI-XDP-SHED} (\texttt{free\_block\_interrupt\_pct}).}
+The live TCP forwarder reads the last published RCU routing snapshot and never
+blocks on control-plane publish \req{DEMI-DP-RCU}. Overload shedding uses a
+token-bucket admit gate before L7 (XDP proof in userspace) \req{DEMI-XDP-SHED}.
+Production eBPF/XDP and \texttt{io\_uring} wiring follow in later Phase~5 work.
 
 \end{document}

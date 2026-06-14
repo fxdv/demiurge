@@ -28,6 +28,8 @@ free_block_interrupt_pct = 20
 [routing]
 short_context_tokens = 512
 short_context_warmth_override = 0.15
+# Cross-node KV transfer barrier when pf label != dc label (Phase 4 pairing).
+transfer_penalty = 1.05
 
 # Phase 2 — KV overhead accounting (shipped)
 [kv]
@@ -35,10 +37,17 @@ metadata_overhead_fraction = 0.08
 fragmentation_slack = 0.05
 abandoned_session_ttl_s = 300
 
-# Phase 4 — dynamic pool rebalancing (design intent)
+# Phase 4 — dynamic pool rebalancing (shipped shadow; actuation Phase 5)
 [pool]
 rebalance_hysteresis = 0.10
 rebalance_cooldown_s = 300
 weight_queue = 0.35
 weight_kv = 0.30
 weight_slo = 0.35
+# When true, rebalancer may actuate π and publish to the data-plane RCU table.
+actuation_enabled = false
+
+# Phase 5 — data plane hardening (in progress)
+[dataplane]
+admit_burst = 4096
+rcu_stale_alert_ms = 500

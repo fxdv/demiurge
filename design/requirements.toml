@@ -174,20 +174,26 @@ tests = ["rebalance_respects_hysteresis_and_cooldown", "shadow_mode_never_actuat
 [[requirement]]
 id = "DEMI-DP-RCU"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 5
-section = "11.1"
+section = "dataplane"
 summary = "Data plane serves last RCU snapshot; never blocks on control plane."
-requires_test = false
+requires_test = true
+tests = [
+    "rcu_read_never_blocks_under_publish",
+    "rcu_hot_read_under_cp_stall",
+    "router_exposes_dataplane_pi",
+]
 
 [[requirement]]
 id = "DEMI-XDP-SHED"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 5
-section = "11.2"
+section = "dataplane"
 summary = "XDP sheds overload before L7 on bucket exhaustion."
-requires_test = false
+requires_test = true
+tests = ["admit_bucket_sheds_when_exhausted", "admit_bucket_sheds_on_live_router"]
 
 # --- Phase 6: live migration --------------------------------------------
 

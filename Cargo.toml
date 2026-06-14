@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/demiurge-cost",
     "crates/demiurge-control",
+    "crates/demiurge-dataplane",
     "crates/demiurge-handoff",
     "crates/demiurge-router",
     "crates/demiurge-state",

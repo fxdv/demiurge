@@ -86,6 +86,12 @@ struct Scenario {
     /// Max p99_slow / p99_fast for `admit_decouple` (default 8.0).
     #[serde(default)]
     max_accept_p99_ratio: Option<f64>,
+    /// Matching pf/dc labels (`node0`..) for greedy pairing colocation tests.
+    #[serde(default)]
+    paired_labels: bool,
+    /// Allow up to this many KV admit rejects (503) without failing the scenario.
+    #[serde(default)]
+    max_kv_admit_rejects: Option<u64>,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -248,7 +254,12 @@ fn build_pool(count: u32, prefix: &str, sc: &Scenario, kv_bytes: Option<u64>) ->
         .map(|i| {
             let addr = spawn_mock_backend(sc.backend_delay_us, kv_bytes);
             let cost = sc.base_cost_seconds + sc.cost_step_seconds * f64::from(i);
-            Backend::new(format!("{prefix}{i}"), addr, cost)
+            let label = if sc.paired_labels {
+                format!("node{i}")
+            } else {
+                format!("{prefix}{i}")
+            };
+            Backend::new(label, addr, cost)
         })
         .collect()
 }
@@ -846,11 +857,27 @@ fn load_bench_inner(
         eprintln!("load-bench: running {} …", sc.id);
         let result = run_scenario(sc, file.settings.warmup_requests)?;
         if result.errors > 0 {
-            eprintln!(
-                "load-bench: {} FAIL — {} errors / {} requests",
-                result.id, result.errors, result.total_requests
-            );
-            gate_failures += 1;
+            let rejects = result.kv_admit_rejects.unwrap_or(0);
+            if let Some(cap) = sc.max_kv_admit_rejects {
+                if result.errors <= cap && rejects <= cap {
+                    eprintln!(
+                        "load-bench: {} KV rejects OK — {} errors / {} rejects (cap {cap})",
+                        result.id, result.errors, rejects
+                    );
+                } else {
+                    eprintln!(
+                        "load-bench: {} FAIL — {} errors / {} requests",
+                        result.id, result.errors, result.total_requests
+                    );
+                    gate_failures += 1;
+                }
+            } else {
+                eprintln!(
+                    "load-bench: {} FAIL — {} errors / {} requests",
+                    result.id, result.errors, result.total_requests
+                );
+                gate_failures += 1;
+            }
         }
         if let Some(peak) = result.kv_bytes_reserved_peak {
             if sc.use_kv_pool && sc.decode_capacity_bytes > 0 && peak > sc.decode_capacity_bytes {

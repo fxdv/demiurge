@@ -157,6 +157,25 @@ concurrency = 24
 requests_per_worker = 40
 max_p99_ms = 200.0
 
+[[scenario]]
+id = "LOAD-PAIR-KV-PRESSURE"
+summary = "P4 pairing under tight KV cap — paired labels, graceful rejects, no OOM"
+backends = 4
+decode_backends = 4
+paired_labels = true
+base_cost_seconds = 0.01
+cost_step_seconds = 0.002
+use_kv_pool = true
+prefill_kv_headers = true
+request_style = "long_tokens"
+long_prompt_tokens = 2048
+bytes_per_token = 128
+decode_capacity_bytes = 4_500_000
+concurrency = 12
+requests_per_worker = 16
+max_kv_admit_rejects = 48
+max_p99_ms = 150.0
+
 # --- Real stress (load-bench --stress / ./scripts/load-stress.sh) ------------
 # Excluded from ./scripts/load-bench.sh. Strict gates: zero errors + p99.
 # Order matters: heaviest KV/disagg first while ports are fresh; flood last.

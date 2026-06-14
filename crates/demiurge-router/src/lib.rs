@@ -3,6 +3,7 @@
 //! **Phase 0:** min-cost selection over phase pools (`select`, `Router::pick`).
 //! **Phase 3:** RCU state snapshot, warmth discounts, fast-path override ([DEMI-WARM-DISCOUNT], [DEMI-STATE-AP]).
 //! **Phase 4:** Greedy pf→dc pairing on the disaggregated path ([DEMI-PAIR-GREEDY]).
+//! **Phase 5:** RCU routing table + admit shed on the live TCP path ([DEMI-DP-RCU], [DEMI-XDP-SHED]).
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -14,17 +15,21 @@ use std::time::Duration;
 use demiurge_control::{
     export_pool_pressure, pairing_regret_targets, select_decode_target, select_prefill_target,
     AdmitError, LengthPredictor, PairingTarget, PoolPressure, PoolRebalancer, RebalancerMode,
-    ReservationGuard, ReservationLedger, DEFAULT_TRANSFER_PENALTY,
+    ReservationGuard, ReservationLedger,
 };
 use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
 use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
+use demiurge_cost::ROUTING_TRANSFER_PENALTY;
 use demiurge_cost::{
     compose, kv_breakdown, warmth_discount, BarrierFactor, Corrector, Cost, TimeCore,
+    DATAPLANE_ADMIT_BURST, POOL_ACTUATION_ENABLED,
 };
+use demiurge_dataplane::{AdmitBucket, DataPlaneSnapshot};
 use demiurge_handoff::{parse_prefill_handoff, HandoffRegistry};
 use demiurge_state::default_routing_blocks;
 
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
+pub use demiurge_dataplane::{DataPlaneSnapshot as RcuDataPlaneSnapshot, RcuRoutingTable};
 pub use demiurge_handoff::{
     HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
 };
@@ -256,6 +261,9 @@ pub struct Router {
     bytes_per_token: u64,
     state: Option<StateSnapshot>,
     control: Arc<Mutex<ControlPlane>>,
+    dataplane: Arc<RcuRoutingTable>,
+    admit: Arc<AdmitBucket>,
+    rebalancer_actuation: bool,
 }
 
 /// Shadow control-plane telemetry (rebalancer π*, pairing regret, length predictor).
@@ -266,6 +274,9 @@ pub struct ControlMetrics {
     pub pairing_regret_mean: f64,
     pub pairing_regret_samples: u64,
     pub predictor_p90_tokens: u64,
+    pub dataplane_pi: f64,
+    pub dataplane_age_ms: u64,
+    pub admit_shed_total: u64,
 }
 
 #[derive(Debug)]
@@ -307,6 +318,9 @@ impl Router {
             bytes_per_token: 128,
             state: None,
             control: Self::fresh_control(),
+            dataplane: RcuRoutingTable::new(0.5),
+            admit: Arc::new(AdmitBucket::new(DATAPLANE_ADMIT_BURST)),
+            rebalancer_actuation: rebalancer_actuation_enabled(),
         }
     }
 
@@ -327,6 +341,9 @@ impl Router {
             bytes_per_token,
             state: None,
             control: Self::fresh_control(),
+            dataplane: RcuRoutingTable::new(0.5),
+            admit: Arc::new(AdmitBucket::new(DATAPLANE_ADMIT_BURST)),
+            rebalancer_actuation: rebalancer_actuation_enabled(),
         };
         (router, ledger, handoffs)
     }
@@ -334,6 +351,35 @@ impl Router {
     pub fn with_state(mut self, state: StateSnapshot) -> Self {
         self.state = Some(state);
         self
+    }
+
+    pub fn with_rebalancer_actuation(mut self, enabled: bool) -> Self {
+        self.rebalancer_actuation = enabled;
+        if enabled {
+            let mut cp = self.control.lock().expect("control plane");
+            cp.rebalancer = PoolRebalancer::new(RebalancerMode::CanActuate);
+        }
+        self
+    }
+
+    pub fn rebalancer_actuation(&self) -> bool {
+        self.rebalancer_actuation
+    }
+
+    pub fn dataplane(&self) -> &Arc<RcuRoutingTable> {
+        &self.dataplane
+    }
+
+    pub fn admit_bucket(&self) -> &Arc<AdmitBucket> {
+        &self.admit
+    }
+
+    pub fn dataplane_pi(&self) -> f64 {
+        self.dataplane.read_pi()
+    }
+
+    pub fn dataplane_age_ms(&self) -> u64 {
+        self.dataplane.age_ms()
     }
 
     pub fn state(&self) -> Option<&StateSnapshot> {
@@ -365,6 +411,9 @@ impl Router {
             pairing_regret_mean: regret_mean,
             pairing_regret_samples: cp.regret_samples,
             predictor_p90_tokens: cp.predictor.p90(),
+            dataplane_pi: self.dataplane.read_pi(),
+            dataplane_age_ms: self.dataplane.age_ms(),
+            admit_shed_total: self.admit.shed_total(),
         }
     }
 
@@ -391,7 +440,16 @@ impl Router {
         };
         let signals = pool_pressure(self, fp_share);
         cp.last_pi_star = cp.rebalancer.shadow_pi_star(&signals);
-        let _ = cp.rebalancer.maybe_update(&signals);
+        if self.rebalancer_actuation {
+            if let Some(new_pi) = cp.rebalancer.maybe_update(&signals) {
+                self.dataplane.publish(DataPlaneSnapshot::new(
+                    self.dataplane.generation().saturating_add(1),
+                    new_pi,
+                ));
+            }
+        } else {
+            let _ = cp.rebalancer.maybe_update(&signals);
+        }
 
         if sample_regret {
             if let Some(tokens) = prompt_tokens {
@@ -401,7 +459,7 @@ impl Router {
                         &self.decode,
                         self.state.as_ref(),
                         tokens,
-                        DEFAULT_TRANSFER_PENALTY,
+                        ROUTING_TRANSFER_PENALTY,
                     );
                     cp.regret_sum += regret;
                     cp.regret_samples += 1;
@@ -651,7 +709,7 @@ pub fn on_prefill_complete(
         router.pool(Phase::Decode),
         router.state.as_ref(),
         signals.prompt_tokens,
-        DEFAULT_TRANSFER_PENALTY,
+        ROUTING_TRANSFER_PENALTY,
         &extra,
     )
     .or_else(|| router.pick_with_phi(Phase::Decode, phi))
@@ -745,6 +803,14 @@ impl Drop for InflightGuard<'_> {
     }
 }
 
+struct AdmitGuard(Arc<AdmitBucket>);
+
+impl Drop for AdmitGuard {
+    fn drop(&mut self) {
+        self.0.release(1);
+    }
+}
+
 fn proxy_to_backend(client: &mut TcpStream, head: &[u8], backend: &Backend) -> io::Result<()> {
     backend.incr_inflight();
     let _guard = InflightGuard(backend);
@@ -811,9 +877,24 @@ fn handle_disaggregated(
     result
 }
 
+fn rebalancer_actuation_enabled() -> bool {
+    if let Ok(v) = std::env::var("DEMIURGE_REBALANCER_ACTUATE") {
+        return matches!(v.as_str(), "1" | "true" | "yes");
+    }
+    POOL_ACTUATION_ENABLED
+}
+
 fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
+    if router.admit.try_admit().is_err() {
+        let mut client = client;
+        let _ = client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+        return Ok(());
+    }
+    let _admit_guard = AdmitGuard(Arc::clone(&router.admit));
+
     let mut client = client;
     let head = read_head(&mut client)?;
+    std::hint::black_box(router.dataplane_pi());
 
     match route(&router, &head) {
         Ok(RoutePath::Colocated(b) | RoutePath::DecodeOnly(b)) => {
