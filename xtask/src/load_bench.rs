@@ -1104,8 +1104,12 @@ fn load_bench_inner(
         fs::create_dir_all(&runs)?;
         write_report(&runs.join(format!("{id}.json")), &report)?;
     }
-    write_report(&json_path, &report)?;
-    eprintln!("load-bench: wrote {}", json_path.display());
+    // Isolated `--scenario` subprocesses must not clobber the merged aggregate report
+    // (stress children were leaving `latest.json` at 1800/1800 flood-only totals).
+    if only_scenario.is_none() || ci_only {
+        write_report(&json_path, &report)?;
+        eprintln!("load-bench: wrote {}", json_path.display());
+    }
 
     if strict_failures > 0 {
         Err(format!("{strict_failures} strict gate(s) failed").into())

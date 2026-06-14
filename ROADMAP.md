@@ -84,21 +84,22 @@ CI applies `settings.ci_slack` (2×) for runner jitter. Run
 | `BENCH-REBALANCE` | 4 | Pool pressure normalization + π* computation | ≤ 800 ns/op |
 | `BENCH-RCU-SNAPSHOT` | 5 | RCU table read on data-plane routing path | ≤ 50 ns/op |
 
-### Thin gates — optimization targets
+### Thin gates — optimization status
 
-Last `cargo xtask bench-probe` on a quiet machine (local limits, not CI slack).
-**Thin** = median within ~40% of `max_median_ns` — optimize these before widening gates.
+Last `cargo xtask bench-probe` on a quiet machine (release, local limits). **Optimized
+2026-06** (ln-base cache, zero-alloc HTTP parse, fast min-select, lighter tick_control).
+No gates are thin anymore at local limits; CI applies 2× slack on top.
 
-| ID | median | limit | headroom | Optimization lever |
-|----|-------:|------:|---------:|--------------------|
-| `BENCH-ROUTE-DISPATCH` | ~253 ns | 350 ns | **38%** | Trim `RequestId` alloc / admission on disagg path; merge classify+dispatch |
-| `BENCH-CLASSIFY` | ~233 ns | 350 ns | **50%** | HTTP head parse + token estimate — cache hot headers, tighten `estimate_prompt_tokens` |
-| `BENCH-SELECT-64` | ~618 ns | 1 µs | **62%** | 64× cost recompute — incremental min tracking, precomputed ln(cost), SIMD batch ln |
-| `BENCH-BACKEND-COST` | ~4 ns | 8 ns | **100%** | Already fast; avoid extra barriers on colocated path |
-| `BENCH-COMPOSE-8` | ~22 ns | 50 ns | **127%** | Barrier/discount count on warm paths — specialize `compose` arity |
+| ID | median (post-opt) | limit | headroom | Notes |
+|----|------------------:|------:|---------:|-------|
+| `BENCH-ROUTE-DISPATCH` | ~102 ns | 350 ns | **243%** | Was ~253 ns — disagg path ~2.5× faster |
+| `BENCH-CLASSIFY` | ~88 ns | 350 ns | **298%** | Was ~233 ns — colocated path skips CP lock |
+| `BENCH-SELECT-64` | ~325 ns | 1 µs | **208%** | Was ~618 ns — ln-only min over 64 backends |
+| `BENCH-BACKEND-COST` | ~2 ns | 8 ns | **300%** | Cached `ln_base` + `ln(1+inflight)` |
+| `BENCH-COMPOSE-8` | ~20 ns | 50 ns | **150%** | Skip identity-corrector `ln()` |
 
-**Hot-path stack (probe):** `backend_cost` (4 ns) → `select_2` (12 ns) → `compose_8` (16 ns) →
-`route_short` (~239 ns) → `route_long` (~247 ns) → **`select_64` (~617 ns, super-linear vs 64× cost)**.
+**Hot-path stack (probe, post-opt):** `backend_cost` (2 ns) → `compose_8` (14 ns) →
+`route_short` (~85 ns) → `route_long` (~102 ns) → **`select_64` (~308 ns)**.
 
 Plenty gates (`BENCH-KV-RESERVE`, `BENCH-WARM-LOOKUP`, `BENCH-PAIR-GREEDY`, `BENCH-REBALANCE`,
 `BENCH-RCU-SNAPSHOT`) have large headroom — not urgent.
@@ -632,13 +633,15 @@ Pre-release: `./scripts/pre-release.sh` (gate + full load + stress).
 
 | Crate / module | Work |
 |----------------|------|
-| `demiurge-dataplane` | eBPF/XDP program: tenant token bucket + DDoS shed (`free_block_interrupt_pct`). |
+| `bpf/admit_shed.bpf.c` | XDP token-bucket shed (mirrors userspace `AdmitBucket`); CI compiles via `bpf` workflow. |
+| `demiurge-dataplane` | Rust loader stub (`XdpAdmitShed`); wire `aya`/libbpf attach + map seeding. |
 | `demiurge-dataplane` | Rust `io_uring` L7 forwarder wired to recv/send; RCU snapshot only on hot path. |
 | Bench | `BENCH-IOURING-FWD` — forward path latency gate (register in same PR as code). |
 
 **Exit gate — production**
 
-- [ ] Shed at **XDP** before decode pool saturation (not userspace bucket alone).
+- [x] XDP program **compiles** in CI (`bpf` workflow → `target/bpf/admit_shed.o`).
+- [ ] Shed at **XDP** before decode pool saturation (runtime attach + map sync, not userspace bucket alone).
 - [ ] `io_uring` forwarder serves production TCP path.
 - [ ] Data-plane p99 admit latency within budget under CP slowdown on reference hardware.
 

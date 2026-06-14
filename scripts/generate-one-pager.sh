@@ -20,8 +20,10 @@ read_file() {
 BENCH_GATE="$ARTIFACT_ROOT/validation/bench-gate.log"
 BENCH_PROBE="$ARTIFACT_ROOT/validation/bench-probe.log"
 PRE_RELEASE="$ARTIFACT_ROOT/validation/pre-release.log"
-LOAD_JSON="$ARTIFACT_ROOT/load-bench/latest.json"
+LOAD_JSON="$ARTIFACT_ROOT/load-bench/load-full.json"
+LOAD_JSON_FALLBACK="$ARTIFACT_ROOT/load-bench/latest.json"
 STRESS_JSON="$ARTIFACT_ROOT/load-bench/stress.json"
+LOAD_RUNS="$ARTIFACT_ROOT/load-bench/runs"
 
 PRE_STATUS="UNKNOWN"
 if [[ -f "$PRE_RELEASE" ]]; then
@@ -30,17 +32,19 @@ if [[ -f "$PRE_RELEASE" ]]; then
   elif grep -qE 'ERROR: pre-release failed|strict gate\(s\) failed|isolated scenario run\(s\) failed' "$PRE_RELEASE"; then
     PRE_STATUS="FAILED"
   fi
-elif [[ -f "$LOAD_JSON" && -f "$STRESS_JSON" ]]; then
+elif [[ -f "$LOAD_JSON" || -f "$LOAD_JSON_FALLBACK" ]] && [[ -f "$STRESS_JSON" ]]; then
   PRE_STATUS="INFERRED_OK"
 fi
 
 python3 - "$OUT" "$VERSION" "$COMMIT" "$COMMIT_FULL" "$DATE" "$ARCH" "$PRE_STATUS" \
-  "$BENCH_GATE" "$BENCH_PROBE" "$LOAD_JSON" "$STRESS_JSON" <<'PY'
+  "$BENCH_GATE" "$BENCH_PROBE" "$LOAD_JSON" "$LOAD_JSON_FALLBACK" "$STRESS_JSON" "$LOAD_RUNS" <<'PY'
 import json, re, sys
 from pathlib import Path
 
 out, version, commit, commit_full, date, arch, pre_status = sys.argv[1:8]
-bench_gate, bench_probe, load_json, stress_json = map(Path, sys.argv[8:])
+bench_gate, bench_probe, load_json, load_json_fallback, stress_json, load_runs = map(
+    Path, sys.argv[8:]
+)
 
 def parse_bench_gate(path: Path) -> list[tuple[str, str, str]]:
     rows = []
@@ -66,8 +70,37 @@ def sum_scenarios(path: Path) -> tuple[int, int, int]:
         total += int(s.get("total_requests", 0))
     return ok, err, total
 
+
+def merge_load_from_runs(runs_dir: Path) -> tuple[int, int, int]:
+    if not runs_dir.is_dir():
+        return 0, 0, 0
+    ok = err = total = 0
+    for path in sorted(runs_dir.glob("*.json")):
+        if path.stem.startswith("LOAD-STRESS"):
+            continue
+        for s in json.loads(path.read_text()).get("scenarios", []):
+            ok += int(s.get("ok", 0))
+            err += int(s.get("errors", 0))
+            total += int(s.get("total_requests", 0))
+    return ok, err, total
+
+
+def load_totals(
+    primary: Path, fallback: Path, runs_dir: Path
+) -> tuple[int, int, int, str]:
+    for label, path in (("load-full.json", primary), ("latest.json", fallback)):
+        ok, err, total = sum_scenarios(path)
+        if total > 0:
+            return ok, err, total, label
+    ok, err, total = merge_load_from_runs(runs_dir)
+    if total > 0:
+        return ok, err, total, "runs/*.json"
+    return 0, 0, 0, "none"
+
 gate_rows = parse_bench_gate(bench_gate)
-load_ok, load_err, load_total = sum_scenarios(load_json)
+load_ok, load_err, load_total, load_src = load_totals(
+    load_json, load_json_fallback, load_runs
+)
 stress_ok, stress_err, stress_total = sum_scenarios(stress_json)
 
 probe_lines = []
@@ -91,7 +124,7 @@ lines = [
     f"|-------|--------|",
     f"| Pre-release (`scripts/pre-release.sh`) | **{pre_status.replace('INFERRED_OK', 'PASSED (inferred from load reports)')}** |",
     f"| CPU bench gates | **{len(gate_rows)}/10** recorded |",
-    f"| Load bench (`latest.json`) | **{load_ok}/{load_total}** ok ({load_err} errors) |",
+    f"| Load bench (`{load_src}`) | **{load_ok}/{load_total}** ok ({load_err} errors) |",
     f"| Stress (`stress.json`) | **{stress_ok}/{stress_total}** ok ({stress_err} errors) |",
     "",
     "## CPU hot-path (release median ns/op)",

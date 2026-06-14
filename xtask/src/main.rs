@@ -67,6 +67,17 @@ fn default_status() -> String {
     "intended".to_string()
 }
 
+fn build_bpf() -> Result<(), Box<dyn Error>> {
+    let status = std::process::Command::new("bash")
+        .arg("scripts/build-bpf.sh")
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("build-bpf exited with {status}").into())
+    }
+}
+
 fn main() {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     let res = match cmd.as_str() {
@@ -87,9 +98,10 @@ fn main() {
             let stress = std::env::args().skip(2).any(|a| a == "--stress");
             load_bench::load_report(stress)
         }
+        "build-bpf" => build_bpf(),
         other => {
             eprintln!(
-                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `bench-probe`, `load-bench`, or `load-report`"
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, or `build-bpf`"
             );
             exit(2);
         }

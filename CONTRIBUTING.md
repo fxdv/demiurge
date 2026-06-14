@@ -69,6 +69,7 @@ release) and on demand via the **release** workflow for tagged semver builds.
 | `spec` | the design PDF compiles from regenerated inputs |
 | `publish-linux` | **Weekly** Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) release (Mon 06:00 UTC); manual dispatch |
 | `release` | manual semver tag release (Linux artifact + one-pager) |
+| `bpf` | compile XDP `admit_shed.bpf.c` on Ubuntu (clang `-target bpf`) |
 
 All workflows share [`.github/actions/setup-rust`](.github/actions/setup-rust/) (toolchain + cache).
 Local `./scripts/gate.sh` still mirrors **design-conformance + ci quality + regression**; it does not run pre-release or publish.

@@ -1,0 +1,35 @@
+name: bpf
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bpf/**"
+      - "scripts/build-bpf.sh"
+      - "crates/demiurge-dataplane/src/xdp.rs"
+      - ".github/workflows/bpf.yml"
+  pull_request:
+    paths:
+      - "bpf/**"
+      - "scripts/build-bpf.sh"
+      - "crates/demiurge-dataplane/src/xdp.rs"
+      - ".github/workflows/bpf.yml"
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install BPF toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev
+
+      - name: Compile XDP admit-shed object
+        run: bash ./scripts/build-bpf.sh
+
+      - name: Upload BPF object
+        uses: actions/upload-artifact@v4
+        with:
+          name: demiurge-bpf-${{ github.sha }}
+          path: target/bpf/admit_shed.o
+          if-no-files-found: error

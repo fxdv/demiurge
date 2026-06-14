@@ -104,6 +104,9 @@ PY
 merge_load_json
 cargo run --release -q --package xtask -- load-report 2>/dev/null || true
 cp target/load-bench/latest.json target/load-bench/latest.pseudo "$STAGING/load-bench/"
+if [[ -f target/load-bench/load-full.json ]]; then
+  cp target/load-bench/load-full.json "$STAGING/load-bench/"
+fi
 if [[ -f target/load-bench/stress.json ]]; then
   cargo run --release -q --package xtask -- load-report --stress
   cp target/load-bench/stress.json target/load-bench/stress.pseudo "$STAGING/load-bench/"

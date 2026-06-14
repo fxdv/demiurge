@@ -11,6 +11,7 @@ bold "gate (CI mirror)"
 
 bold "full load bench (includes LOAD-STEP-ACTUATE + isolate_recovery scenarios)"
 ./scripts/load-bench.sh
+cp target/load-bench/latest.json target/load-bench/load-full.json
 
 bold "stress suite (strict zero-error)"
 ./scripts/load-stress.sh
