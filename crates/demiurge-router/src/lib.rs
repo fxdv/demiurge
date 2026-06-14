@@ -21,7 +21,8 @@ use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
 use demiurge_cost::ROUTING_TRANSFER_PENALTY;
 use demiurge_cost::{
     compose, kv_breakdown, warmth_discount, BarrierFactor, Corrector, Cost, TimeCore,
-    DATAPLANE_ADMIT_BURST, DATAPLANE_RCU_STALE_ALERT_MS, POOL_ACTUATION_ENABLED,
+    DATAPLANE_ADMIT_BURST, DATAPLANE_RCU_HEARTBEAT_MS, DATAPLANE_RCU_STALE_ALERT_MS,
+    POOL_ACTUATION_ENABLED,
 };
 use demiurge_dataplane::{AdmitBucket, DataPlaneSnapshot};
 use demiurge_handoff::{parse_prefill_handoff, HandoffRegistry};
@@ -558,6 +559,13 @@ impl Router {
             }
         } else {
             let _ = cp.rebalancer.maybe_update(&signals);
+        }
+
+        if self.dataplane.age_ms() >= DATAPLANE_RCU_HEARTBEAT_MS {
+            self.dataplane.publish(DataPlaneSnapshot::new(
+                self.dataplane.generation().saturating_add(1),
+                cp.rebalancer.pi(),
+            ));
         }
 
         if sample_regret {

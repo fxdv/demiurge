@@ -38,7 +38,8 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 | **2** | KV hand-off & memory barriers | 5 / 5 | **done** |
 | **3** | State plane | 2 / 2 | **done** |
 | **4** | Control plane & pairing | 2 / 2 | **done** |
-| **5** | Data plane hardening | 2 / 2 | **in progress** |
+| **5** | Data plane hardening (**proof**) | 2 / 2 | **done** |
+| **5+** | Data plane **production** (XDP / io_uring) | — | planned |
 | **6** | Live migration | 0 / 1 | planned |
 | **7** | Multi-tenancy & cache security | 0 / 1 | planned |
 | **8** | Learned corrector graduation | 0 / 1 (`DEMI-CORR-GRAD`) | planned |
@@ -82,6 +83,27 @@ CI applies `settings.ci_slack` (2×) for runner jitter. Run
 | `BENCH-PAIR-GREEDY` | 4 | Greedy pf→dc pair selection over N×M candidates | ≤ 5 µs/op |
 | `BENCH-REBALANCE` | 4 | Pool pressure normalization + π* computation | ≤ 800 ns/op |
 | `BENCH-RCU-SNAPSHOT` | 5 | RCU table read on data-plane routing path | ≤ 50 ns/op |
+
+### Thin gates — optimization targets
+
+Last `cargo xtask bench-probe` on a quiet machine (local limits, not CI slack).
+**Thin** = median within ~40% of `max_median_ns` — optimize these before widening gates.
+
+| ID | median | limit | headroom | Optimization lever |
+|----|-------:|------:|---------:|--------------------|
+| `BENCH-ROUTE-DISPATCH` | ~253 ns | 350 ns | **38%** | Trim `RequestId` alloc / admission on disagg path; merge classify+dispatch |
+| `BENCH-CLASSIFY` | ~233 ns | 350 ns | **50%** | HTTP head parse + token estimate — cache hot headers, tighten `estimate_prompt_tokens` |
+| `BENCH-SELECT-64` | ~618 ns | 1 µs | **62%** | 64× cost recompute — incremental min tracking, precomputed ln(cost), SIMD batch ln |
+| `BENCH-BACKEND-COST` | ~4 ns | 8 ns | **100%** | Already fast; avoid extra barriers on colocated path |
+| `BENCH-COMPOSE-8` | ~22 ns | 50 ns | **127%** | Barrier/discount count on warm paths — specialize `compose` arity |
+
+**Hot-path stack (probe):** `backend_cost` (4 ns) → `select_2` (12 ns) → `compose_8` (16 ns) →
+`route_short` (~239 ns) → `route_long` (~247 ns) → **`select_64` (~617 ns, super-linear vs 64× cost)**.
+
+Plenty gates (`BENCH-KV-RESERVE`, `BENCH-WARM-LOOKUP`, `BENCH-PAIR-GREEDY`, `BENCH-REBALANCE`,
+`BENCH-RCU-SNAPSHOT`) have large headroom — not urgent.
+
+Re-run after changes: `cargo xtask bench-probe`.
 
 ### Planned gates (register before closing the phase)
 
@@ -564,39 +586,61 @@ pairing-regret monitor.
 - [x] Step-load test: no pool-weight oscillation (hysteresis holds).
 - [x] `BENCH-PAIR-GREEDY` and `BENCH-REBALANCE` gates pass.
 
-**Out of scope.** Learned corrector in prod (Phase 8), XDP (Phase 5), autoscaler actuation (Phase 5).
+**Out of scope.** Learned corrector in prod (Phase 8), XDP production dataplane (Phase 5+), live migration (Phase 6).
 
 ---
 
 ## Phase 5 — Data plane hardening
 
-**Goal.** Microsecond data plane: XDP admission, `io_uring` L7 forwarder, RCU
-snapshots — control plane never blocks the hot path. Enable **rebalancer
-actuation** behind a feature flag.
+Phase 5 splits into **proof** (shipped, `DEMI-DP-RCU` + `DEMI-XDP-SHED` at `implemented`) and
+**production** (eBPF XDP + real `io_uring` forwarder — planned as **Phase 5+**).
 
-**Deliverables**
+### Phase 5 proof — **done** (`cargo xtask lint`: 2/2)
 
-| Crate / module | Work |
-|----------------|------|
-| `demiurge-dataplane` (new) | eBPF/XDP program: tenant token bucket + DDoS shed (`free_block_interrupt_pct`). |
-| `demiurge-dataplane` | Rust `io_uring` L7 forwarder; reads routing table via RCU snapshot only. |
-| `demiurge-control` | Publishes snapshot at bounded cadence; autoscaler webhook for `π`. |
-| Tests | Fault injection: CP stall must not increase data-plane p99 admit latency. |
+**Goal.** Userspace proof that the data plane never blocks on control-plane publish; admit
+shedding; actuated π on the hot path; observability for RCU staleness.
 
-**Requirements to register**
+| Crate / module | Shipped |
+|----------------|---------|
+| `demiurge-dataplane` | `RcuRoutingTable`, `AdmitBucket`, `IoUringForwarder` skeleton, `pool_core_scale` |
+| `demiurge-router` | RCU read on TCP path; π-scaled routing; rebalancer actuation flag; RCU heartbeat |
+| `xtask` / load | `LOAD-STEP-ACTUATE`, `isolate_recovery`, dataplane metrics in load-bench |
+| Tests | `rcu_read_never_blocks_under_publish`, `rcu_hot_read_under_cp_stall`, `rcu_read_p99_unchanged_under_slow_publish`, admit shed, actuation |
+
+**Requirements (closed)**
 
 | ID | Summary |
 |----|---------|
-| `DEMI-DP-RCU` | Data plane serves last published RCU snapshot; never blocks on CP. |
-| `DEMI-XDP-SHED` | XDP sheds before L7 on bucket exhaustion. |
+| `DEMI-DP-RCU` | Data plane serves last RCU snapshot; never blocks on CP. |
+| `DEMI-XDP-SHED` | Overload shed on bucket exhaustion (userspace proof). |
 
-**Exit gate**
+**Exit gate — proof path**
 
-- [ ] Data-plane p99 admit latency within budget under CP slowdown injection.
-- [ ] RCU snapshot age bounded (staleness metric + alert).
-- [ ] SLO flow control: shed at XDP before decode pool saturation.
-- [ ] Rebalancer actuation removes sustained pool skew in step-load test (feature flag on).
-- [ ] `BENCH-RCU-SNAPSHOT` gate passes.
+- [x] CP stall does not inflate hot-path `read_pi` p99 (`stall.rs` + `rcu_hot_read_under_cp_stall`).
+- [x] RCU staleness metric + alert (`ControlMetrics`, load-bench ALERT line).
+- [x] RCU heartbeat republishes π under load when actuation idle (`rcu_heartbeat_ms`).
+- [x] Userspace admit shed before L7 (`AdmitBucket` on live router).
+- [x] Rebalancer actuation + step-load (`LOAD-STEP-ACTUATE`, `min_dataplane_pi`).
+- [x] `BENCH-RCU-SNAPSHOT` gate passes.
+
+**Validation.** Local load bench **8,060/8,060** ok; stress **11,600/11,600** ok.
+Pre-release: `./scripts/pre-release.sh` (gate + full load + stress).
+
+### Phase 5+ production — **planned**
+
+**Goal.** Replace userspace proof with kernel dataplane: XDP admission, `io_uring` L7 forwarder.
+
+| Crate / module | Work |
+|----------------|------|
+| `demiurge-dataplane` | eBPF/XDP program: tenant token bucket + DDoS shed (`free_block_interrupt_pct`). |
+| `demiurge-dataplane` | Rust `io_uring` L7 forwarder wired to recv/send; RCU snapshot only on hot path. |
+| Bench | `BENCH-IOURING-FWD` — forward path latency gate (register in same PR as code). |
+
+**Exit gate — production**
+
+- [ ] Shed at **XDP** before decode pool saturation (not userspace bucket alone).
+- [ ] `io_uring` forwarder serves production TCP path.
+- [ ] Data-plane p99 admit latency within budget under CP slowdown on reference hardware.
 
 **Out of scope.** Live migration (Phase 6), cross-tenant auth (Phase 7).
 

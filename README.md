@@ -73,7 +73,7 @@ Demiurge is built to exploit exactly those three facts.
 | CPU bench gates (`bench-gates.toml`, `cargo xtask bench-gate`) | **implemented** — in CI |
 | Local load bench (`load-bench.sh`, pseudo report) | **implemented** — CI runs `load-bench --ci` smoke |
 | Real stress suite (`load-stress.sh`, strict zero-error gates) | **implemented** — local only, not in CI |
-| XDP/L4 admission, io_uring data plane, RCU data-plane serving | design intent (P5) — RCU + admit shed proof landed |
+| XDP/L4 admission, io_uring data plane, RCU data-plane serving | **proof shipped (P5)** — userspace RCU + admit shed; **production** XDP/io_uring planned (P5+) |
 | RDMA hand-off production path, live migration | design intent (P6) |
 | Cross-tenant cache sharing, learned corrector graduation | design intent (P7–P8) |
 
@@ -137,7 +137,7 @@ flowchart TB
 | [`crates/demiurge-handoff/`](crates/demiurge-handoff/) | KV hand-off descriptor, registry, TCP transport (RDMA trait later). |
 | [`crates/demiurge-control/`](crates/demiurge-control/) | Reservation ledger, TTL release, admit/reject metrics. |
 | [`xtask/`](xtask/) | `gen`, `lint`, `bench-gate`, `load-bench`, `load-report`. |
-| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh`, `load-bench.sh`, `load-stress.sh`. |
+| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh`, `load-bench.sh`, `load-stress.sh`, `pre-release.sh`. |
 
 ## Quickstart
 
@@ -149,6 +149,7 @@ cargo run --release -q --package xtask -- bench-gate  # CPU hot-path gates
 cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-gate report
 ./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
 ./scripts/load-stress.sh      # strict heavy stress — local only, not in gate.sh
+./scripts/pre-release.sh      # gate + full load bench + stress (nightly / pre-tag)
 cargo test --all              # run the executable invariants (C>0, ±α)
 ./scripts/gate.sh             # run the full local gate (mirrors CI)
 ```

@@ -53,7 +53,9 @@ suite, CPU bench gates, load regression smoke (`load-bench --ci`), and (if
 `latexmk` is installed) compiles the spec.
 
 For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
-(strict zero-error gates; not part of `gate.sh` or CI).
+(strict zero-error gates; not part of `gate.sh` or CI). Before a release tag,
+run `./scripts/pre-release.sh` (full gate + load bench incl. `LOAD-STEP-ACTUATE`
++ stress).
 
 ## CI gates
 

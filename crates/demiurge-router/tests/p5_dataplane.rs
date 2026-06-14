@@ -1,5 +1,22 @@
+use std::thread;
+use std::time::Duration;
+
+use demiurge_cost::DATAPLANE_RCU_HEARTBEAT_MS;
 use demiurge_dataplane::pool_core_scale;
-use demiurge_router::{Backend, Router};
+use demiurge_router::{route, Backend, Router};
+
+// [DEMI-DP-RCU] — RCU heartbeat keeps snapshot fresh when actuation is idle.
+#[test]
+fn rcu_heartbeat_refreshes_snapshot_under_shadow_mode() {
+    let pf = Backend::new("pf0", "127.0.0.1:1".parse().unwrap(), 0.01);
+    let dc = Backend::new("dc0", "127.0.0.1:2".parse().unwrap(), 0.02);
+    let router = Router::new(vec![pf], vec![dc]);
+    thread::sleep(Duration::from_millis(DATAPLANE_RCU_HEARTBEAT_MS + 100));
+    let head = b"GET / HTTP/1.1\r\nhost: x\r\n\r\n";
+    let _ = route(&router, head);
+    let metrics = router.control_metrics();
+    assert!(!metrics.rcu_stale, "age {}ms", metrics.dataplane_age_ms);
+}
 
 // [DEMI-DP-RCU] — live TCP path reads RCU π without blocking.
 #[test]
