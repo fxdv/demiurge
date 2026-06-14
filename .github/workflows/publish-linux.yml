@@ -62,12 +62,7 @@ jobs:
               --notes "Rolling pre-release: latest green Linux build from \`main\`."
           fi
 
-          gh release upload "$TAG" \
-            "$TARBALL" \
-            "$STAGING/RELEASE-one-pager.md" \
-            "$STAGING/load-bench/latest.pseudo" \
-            "$STAGING/load-bench/stress.pseudo" \
-            --clobber
+          bash ./scripts/gh-release-upload.sh "$TAG"
 
           gh release edit "$TAG" \
             --title "Linux nightly · ${VERSION} · ${DATE} (${COMMIT})" \

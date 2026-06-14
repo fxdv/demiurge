@@ -43,9 +43,6 @@ jobs:
           VERSION="$(grep '^version' crates/demiurge-router/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
           COMMIT="$(git rev-parse --short HEAD)"
           gh release create "${{ inputs.tag }}" \
-            "$TARBALL" \
-            "$STAGING/RELEASE-one-pager.md" \
-            "$STAGING/load-bench/latest.pseudo" \
-            "$STAGING/load-bench/stress.pseudo" \
             --title "Demiurge ${VERSION} — P5 proof (${COMMIT})" \
             --notes-file "$STAGING/RELEASE-one-pager.md"
+          bash ./scripts/gh-release-upload.sh "${{ inputs.tag }}"

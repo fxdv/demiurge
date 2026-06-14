@@ -105,7 +105,7 @@ merge_load_json
 cargo run --release -q --package xtask -- load-report 2>/dev/null || true
 cp target/load-bench/latest.json target/load-bench/latest.pseudo "$STAGING/load-bench/"
 if [[ -f target/load-bench/stress.json ]]; then
-  cargo run --release -q --package xtask -- load-report --stress 2>/dev/null || true
+  cargo run --release -q --package xtask -- load-report --stress
   cp target/load-bench/stress.json target/load-bench/stress.pseudo "$STAGING/load-bench/"
 fi
 if [[ -d target/load-bench/runs ]]; then
@@ -160,12 +160,9 @@ if [[ -n "$GITHUB_TAG" ]]; then
   git tag -a "$GITHUB_TAG" -m "Demiurge $VERSION ($COMMIT)" 2>/dev/null || true
   git push origin "$GITHUB_TAG"
   gh release create "$GITHUB_TAG" \
-    "$TARBALL" \
-    "$STAGING/RELEASE-one-pager.md" \
-    "$STAGING/load-bench/latest.pseudo" \
-    "$STAGING/load-bench/stress.pseudo" \
     --title "Demiurge ${VERSION} — P5 proof (${COMMIT})" \
     --notes-file "$STAGING/RELEASE-one-pager.md"
+  bash ./scripts/gh-release-upload.sh "$GITHUB_TAG"
   echo "GitHub release published for $GITHUB_TAG"
 fi
 
