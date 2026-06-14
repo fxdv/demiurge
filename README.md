@@ -137,7 +137,7 @@ flowchart TB
 | [`crates/demiurge-handoff/`](crates/demiurge-handoff/) | KV hand-off descriptor, registry, TCP transport (RDMA trait later). |
 | [`crates/demiurge-control/`](crates/demiurge-control/) | Reservation ledger, TTL release, admit/reject metrics. |
 | [`xtask/`](xtask/) | `gen`, `lint`, `bench-gate`, `load-bench`, `load-report`. |
-| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh`, `load-bench.sh`, `load-stress.sh`, `pre-release.sh`, `publish.sh`. |
+| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh`, `load-bench.sh`, `load-stress.sh`, `pre-release.sh`, `publish.sh`, `track-a-verify.sh`. |
 
 ## Quickstart
 
@@ -150,6 +150,7 @@ cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-
 ./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
 ./scripts/load-stress.sh      # strict heavy stress — local only, not in gate.sh
 ./scripts/pre-release.sh      # gate + full load bench + stress (nightly / pre-tag)
+./scripts/track-a-verify.sh   # optional Track A observability (~5 min; report.md + soft spots)
 ./scripts/publish.sh          # pre-release + tarball (binaries, validation, one-pager)
 ./scripts/publish.sh --github v0.1.0-p6   # local macOS/Linux + GitHub Release tag
 cargo test --all              # run the executable invariants (C>0, ±α)

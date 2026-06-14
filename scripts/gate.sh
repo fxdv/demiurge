@@ -50,3 +50,6 @@ else
 fi
 
 printf '\n\033[1;32mALL GATES PASSED\033[0m\n'
+echo ""
+echo "Optional Track A total verification (full metrics + soft spots, ~5 min):"
+echo "  ./scripts/track-a-verify.sh  →  target/track-a-verify/report.md"

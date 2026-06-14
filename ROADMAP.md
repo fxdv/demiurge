@@ -15,6 +15,7 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 | `cargo xtask bench-probe` | Extended sampling (floor/median/p95), thin-gate flags, hot-path stack. |
 | `spec/generated/conformance_matrix.tex` | Generated snapshot of requirement status (never hand-edited). |
 | `./scripts/gate.sh` | Local mirror of CI; must pass before every merge. |
+| `./scripts/track-a-verify.sh` | Optional Track A total verification — metrics + soft spots (~5 min). |
 
 **Rules of the road**
 
@@ -685,6 +686,16 @@ Pre-release: `./scripts/pre-release.sh` (gate + full load + stress).
 | Fast-path telemetry | `fast_path_ratio` + near-threshold mis-route regret | `ControlMetrics` + `track_a` tests | **done** |
 
 Run: `cargo xtask fleet-pilot` (also in `./scripts/gate.sh`).
+
+**Optional — full Track A observability** (~5 min, not in CI):
+
+```bash
+./scripts/track-a-verify.sh
+```
+
+Writes `target/track-a-verify/report.md` (CPU headroom, fleet-pilot, control metrics
+per scenario, soft-spot summary) plus `summary.json` and copied pseudo reports.
+Run after `./scripts/gate.sh` or `./scripts/pre-release.sh` when tuning or before a tag.
 
 ---
 
