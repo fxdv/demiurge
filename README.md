@@ -2,7 +2,9 @@
 
 # Demiurge
 
-**A phase-aware, cache-locality-first load balancer for inference fleets** *(Phases 0–4 shipped; Phase 5 data plane started).*
+**A phase-aware, cache-locality-first load balancer for inference fleets** *(Phases 0–5 shipped locally; production economics TBD).*
+
+*We're building the missing control/dataplane layer for disaggregated LLM serving — early proof is green; disruption depends on production economics.*
 
 *Target: route prefill and decode as independent phases across two pools, with the KV cache as the explicit hand-off artifact — because an inference request is a lease on stateful accelerator memory, not a packet.*
 
