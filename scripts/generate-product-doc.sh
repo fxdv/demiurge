@@ -66,7 +66,7 @@ def parse_bench_gate(path: Path) -> list[tuple[str, str, str]]:
             line,
         )
         if m:
-            rows.append((m.group(1), m.group(2), m.group(5)))
+            rows.append((m.group(1), m.group(2), m.group(3)))
     return rows
 
 def sum_scenarios(path: Path) -> tuple[int, int, int]:
