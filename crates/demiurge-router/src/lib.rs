@@ -1395,12 +1395,6 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
         None
     };
 
-    let _admit_guard = if router.admit_mode.uses_userspace_admit(kernel_attached) {
-        Some(AdmitGuard(Arc::clone(&router.admit)))
-    } else {
-        None
-    };
-
     let mut client = client;
     #[cfg(target_os = "linux")]
     let mut io_uring_session = router

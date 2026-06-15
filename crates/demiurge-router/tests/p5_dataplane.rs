@@ -82,6 +82,61 @@ fn admit_bucket_sheds_on_live_router() {
     assert!(bucket.shed_total() >= 1);
 }
 
+// [DEMI-XDP-SHED] — in-flight TCP holds its admit token until the connection ends.
+#[test]
+fn userspace_admit_limits_concurrent_connections() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    use demiurge_dataplane::AdmitMode;
+
+    let (backend_addr, latch) = demiurge_router::spawn_latch_prefill_backend();
+    let pf = vec![Backend::new("pf", backend_addr, 0.01)];
+    let router = Arc::new(Router::new(pf, vec![]).with_admit_mode(AdmitMode::Userspace));
+    router.sync_admit_capacity(1);
+    let admit = Arc::clone(router.admit_bucket());
+    assert_eq!(admit.available(), 1);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let front = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let _ = demiurge_router::serve(listener, router);
+    });
+    thread::sleep(Duration::from_millis(50));
+
+    let front2 = front;
+    let hold = thread::spawn(move || {
+        let mut c = TcpStream::connect(front2).unwrap();
+        c.write_all(b"GET /prefill HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+            .unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut buf = [0u8; 256];
+        let _ = c.read(&mut buf);
+    });
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        admit.available(),
+        0,
+        "active connection must hold its admit token"
+    );
+    assert!(
+        admit.try_admit().is_err(),
+        "second admit must shed while first connection is in flight"
+    );
+
+    latch.release();
+    let _ = hold.join();
+    thread::sleep(Duration::from_millis(50));
+    assert!(
+        admit.try_admit().is_ok(),
+        "token must return after the connection completes"
+    );
+    admit.release(1);
+}
+
 #[test]
 fn rebalancer_actuation_publishes_pi() {
     let pf = Backend::new("pf0", "127.0.0.1:1".parse().unwrap(), 0.01);
