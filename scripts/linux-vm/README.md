@@ -153,6 +153,9 @@ multipass shell demiurge-track-b
 - `./scripts/ensure-rust-toolchain.sh` — Rust **stable ≥ 1.83** (Cargo.lock v4)
 - `./scripts/build-bpf.sh` → `target/bpf/admit_shed.o`
 - `./scripts/gate.sh` — full CI mirror **+ required Track B gate** (XDP veth smoke as root)
+- `./scripts/track-b-verify.sh` — gate + **bench-probe** + full **load-bench** + **stress** + report
+- `./scripts/track-b-verify.sh --quick` — gate + CPU benches + p5 tests (skip load/stress)
+- `./scripts/track-b-bench.sh` — CPU probe/gate + Track B gate only (~1 min)
 
 ## Env overrides
 

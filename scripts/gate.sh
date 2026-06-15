@@ -65,6 +65,8 @@ echo ""
 echo "Optional Track A total verification (full metrics + soft spots, ~5 min):"
 echo "  ./scripts/track-a-verify.sh  →  target/track-a-verify/report.md"
 if [[ "$(uname -s)" == "Linux" ]]; then
-  echo "Track B report (gate log + summary):"
-  echo "  ./scripts/track-b-verify.sh  →  target/track-b-verify/report.md"
+  echo "Track B verification (gate + bench-probe + load + stress on Linux):"
+  echo "  ./scripts/track-b-verify.sh           →  target/track-b-verify/report.md"
+  echo "  ./scripts/track-b-verify.sh --quick   →  gate + CPU benches only"
+  echo "  ./scripts/track-b-bench.sh            →  CPU probe/gate + XDP smoke"
 fi
