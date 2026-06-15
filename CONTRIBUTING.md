@@ -43,14 +43,14 @@ remain under the repository license.
 ## Before you push
 
 ```bash
-./scripts/bootstrap.sh   # once: installs components + a pre-push gate hook
-./scripts/gate.sh        # runs the same checks CI runs
+./scripts/bootstrap.sh   # once: installs components + a pre-push gate hook (full gate)
+./scripts/gate.sh --quick   # inner loop while hacking
+./scripts/gate.sh        # full CI mirror before merge
 ```
 
-`scripts/gate.sh` regenerates artifacts, fails on drift, runs the traceability
-lint, `cargo fmt --check`, release build, `cargo clippy -D warnings`, the test
-suite, CPU bench gates, load regression smoke (`load-bench --ci`), and (if
-`latexmk` is installed) compiles the spec.
+`scripts/gate.sh --quick` runs gen, drift check, lint, fmt, clippy, and tests only.
+The full gate adds release build, CPU bench gates, load smoke, fleet-pilot, Track B
+(Linux), and optional spec PDF — same as CI.
 
 For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
 (strict zero-error gates; not part of `gate.sh` or CI). Before a release tag,
@@ -68,8 +68,9 @@ run `./scripts/pre-release.sh` (full gate + load bench incl. `LOAD-STEP-ACTUATE`
 See [`scripts/linux-vm/README.md`](scripts/linux-vm/README.md) for Vagrant/Docker setup.
 
 To ship a local release artifact (binaries, validation logs, technical
-one-pager, **product & design PDF**), run `./scripts/publish.sh`; CI publishes
-**Linux** weekly via the
+one-pager, **product & design PDF**), run `./scripts/publish.sh`. Render the
+product brief locally with `cargo xtask product-doc` (needs `pandoc` + TeX).
+CI publishes **Linux** weekly via the
 `publish-linux` workflow (rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly)
 release) and on demand via the **release** workflow for tagged semver builds.
 
