@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use demiurge_cost::kv_breakdown;
 use demiurge_router::{
-    admit_disaggregated, serve, spawn_delay_backend, Backend, KvHandoffRegistry,
+    admit_disaggregated, serve, spawn_delay_backend, AdmitMode, Backend, KvHandoffRegistry,
     KvReservationLedger, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -107,6 +107,18 @@ struct Scenario {
     /// Pause `stress_recovery_ms` before this scenario's isolated subprocess (port recovery).
     #[serde(default)]
     isolate_recovery: bool,
+    /// Enable io_uring production TCP proxy (`Router::with_io_uring(true)`).
+    #[serde(default)]
+    io_uring: bool,
+    /// Linux+root: veth + kernel XDP admit + io_uring (implies io_uring when unset).
+    #[serde(default)]
+    track_b_kernel: bool,
+    /// `userspace` | `kernel_xdp` | `hybrid` — overrides env for this scenario.
+    #[serde(default)]
+    admit_mode: Option<String>,
+    /// Skip on non-Linux hosts (Track B kernel dataplane scenarios).
+    #[serde(default)]
+    linux_only: bool,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -212,6 +224,34 @@ struct RouterStack {
     router: Arc<Router>,
     ledger: Option<Arc<KvReservationLedger>>,
     handoffs: Option<Arc<KvHandoffRegistry>>,
+    #[cfg(target_os = "linux")]
+    _track_b_veth: Option<crate::track_b_load::TrackBVeth>,
+}
+
+fn apply_scenario_router_flags(mut router: Router, sc: &Scenario) -> Router {
+    if sc.io_uring || sc.track_b_kernel {
+        router = router.with_io_uring(true);
+    }
+    if let Some(ref mode) = sc.admit_mode {
+        if let Some(m) = AdmitMode::parse(mode) {
+            router = router.with_admit_mode(m);
+        }
+    } else if sc.track_b_kernel {
+        router = router.with_admit_mode(AdmitMode::KernelXdp);
+    }
+    router
+}
+
+fn scenario_skip_reason(sc: &Scenario) -> Option<String> {
+    #[cfg(not(target_os = "linux"))]
+    if sc.linux_only || sc.track_b_kernel {
+        return Some("Linux only".into());
+    }
+    #[cfg(target_os = "linux")]
+    if sc.track_b_kernel && !crate::track_b_load::is_root() {
+        return Some("track_b_kernel requires root".into());
+    }
+    None
 }
 
 fn spawn_mock_backend(delay_us: u64, kv_bytes: Option<u64>) -> SocketAddr {
@@ -247,7 +287,21 @@ fn spawn_router_stack(
     sc: &Scenario,
     prefill: &[Arc<Backend>],
     decode: &[Arc<Backend>],
-) -> RouterStack {
+) -> Result<RouterStack, String> {
+    #[cfg(not(target_os = "linux"))]
+    if sc.track_b_kernel {
+        return Err(format!("{}: track_b_kernel requires Linux", sc.id));
+    }
+
+    #[cfg(target_os = "linux")]
+    let track_b_veth = if sc.track_b_kernel {
+        Some(crate::track_b_load::TrackBVeth::create()?)
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _track_b_veth: Option<()> = None;
+
     if sc.use_kv_pool {
         let capacity = if sc.decode_capacity_bytes > 0 {
             sc.decode_capacity_bytes
@@ -255,48 +309,78 @@ fn spawn_router_stack(
             let per = kv_breakdown(sc.long_prompt_tokens, sc.bytes_per_token).kv_reserved;
             per.saturating_mul(10)
         };
-        let (router, ledger, handoffs) = Router::with_kv_pool(
+        let (mut router, ledger, handoffs) = Router::with_kv_pool(
             prefill.to_vec(),
             decode.to_vec(),
             capacity,
             sc.bytes_per_token,
         );
-        let router = if sc.rebalancer_actuation {
-            router.with_rebalancer_actuation(true)
-        } else {
-            router
+        if sc.rebalancer_actuation {
+            router = router.with_rebalancer_actuation(true);
+        }
+        router = apply_scenario_router_flags(router, sc);
+        #[cfg(target_os = "linux")]
+        if let Some(ref veth) = track_b_veth {
+            router = veth.attach_router(router)?;
+        }
+        let listener = {
+            #[cfg(target_os = "linux")]
+            {
+                crate::track_b_load::bind_router_listener(&track_b_veth)?
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind router: {e}"))?
+            }
         };
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind router");
-        let addr = listener.local_addr().expect("router addr");
+        let addr = listener.local_addr().map_err(|e| e.to_string())?;
         let router = Arc::new(router);
         let serve_router = Arc::clone(&router);
         thread::spawn(move || {
             let _ = serve(listener, serve_router);
         });
-        RouterStack {
+        Ok(RouterStack {
             addr,
             router,
             ledger: Some(ledger),
             handoffs: Some(handoffs),
-        }
+            #[cfg(target_os = "linux")]
+            _track_b_veth: track_b_veth,
+        })
     } else {
         let mut router = Router::new(prefill.to_vec(), decode.to_vec());
         if sc.rebalancer_actuation {
             router = router.with_rebalancer_actuation(true);
         }
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind router");
-        let addr = listener.local_addr().expect("router addr");
+        router = apply_scenario_router_flags(router, sc);
+        #[cfg(target_os = "linux")]
+        if let Some(ref veth) = track_b_veth {
+            router = veth.attach_router(router)?;
+        }
+        let listener = {
+            #[cfg(target_os = "linux")]
+            {
+                crate::track_b_load::bind_router_listener(&track_b_veth)?
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind router: {e}"))?
+            }
+        };
+        let addr = listener.local_addr().map_err(|e| e.to_string())?;
         let router = Arc::new(router);
         let serve_router = Arc::clone(&router);
         thread::spawn(move || {
             let _ = serve(listener, serve_router);
         });
-        RouterStack {
+        Ok(RouterStack {
             addr,
             router,
             ledger: None,
             handoffs: None,
-        }
+            #[cfg(target_os = "linux")]
+            _track_b_veth: track_b_veth,
+        })
     }
 }
 
@@ -609,7 +693,7 @@ fn run_e2e_scenario(
     };
     let prefill = build_pool(sc.backends, "pf", sc, kv_bytes);
     let decode = build_pool(sc.decode_backends, "dc", sc, None);
-    let stack = spawn_router_stack(sc, &prefill, &decode);
+    let stack = spawn_router_stack(sc, &prefill, &decode)?;
     let peak_guard = stack.ledger.as_ref().map(|_| PeakGuard::new());
 
     thread::sleep(Duration::from_millis(50));
@@ -984,6 +1068,13 @@ fn load_bench_inner(
             );
         }
         eprintln!("load-bench: running {} …", sc.id);
+        if let Some(reason) = scenario_skip_reason(sc) {
+            eprintln!("load-bench: {} SKIP — {reason}", sc.id);
+            if only_scenario.is_some() {
+                return Err(format!("{}: {reason}", sc.id).into());
+            }
+            continue;
+        }
         let result = run_scenario(sc, file.settings.warmup_requests)?;
         let failures_before = gate_failures;
         if result.errors > 0 {

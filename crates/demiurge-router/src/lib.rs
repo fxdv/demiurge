@@ -32,6 +32,8 @@ use demiurge_handoff::{
 use demiurge_state::default_routing_blocks;
 
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
+#[cfg(target_os = "linux")]
+pub use demiurge_dataplane::IoUringProxySession;
 pub use demiurge_dataplane::{
     pool_core_scale, AdmitMode, DataPlaneSnapshot as RcuDataPlaneSnapshot, ForwardDecision,
     IoUringForwarder, RcuRoutingTable, XdpAdmitShed, XdpAttachError,
@@ -1276,7 +1278,7 @@ fn proxy_to_backend(
     client: &mut TcpStream,
     head: &[u8],
     backend: &Backend,
-    io_uring: Option<&IoUringForwarder>,
+    #[cfg(target_os = "linux")] io_uring_session: Option<&mut IoUringProxySession>,
 ) -> io::Result<()> {
     backend.incr_inflight();
     let _guard = InflightGuard(backend);
@@ -1284,21 +1286,23 @@ fn proxy_to_backend(
     let mut upstream = TcpStream::connect(backend.addr)?;
     upstream.write_all(head)?;
 
-    #[cfg(not(target_os = "linux"))]
-    let _ = io_uring;
-
     #[cfg(target_os = "linux")]
-    if let Some(fwd) = io_uring {
+    if let Some(session) = io_uring_session {
         use std::os::fd::AsRawFd;
         let up_read = upstream.try_clone()?;
         let client_write = client.try_clone()?;
-        let fwd_up = fwd.clone();
+        let client_read = client.try_clone()?;
         let pump = thread::spawn(move || {
-            let _ = fwd_up.copy_between(up_read.as_raw_fd(), client_write.as_raw_fd(), 256 * 1024);
+            if let Ok(mut pump_session) = IoUringProxySession::new() {
+                let _ = pump_session.copy_stream(
+                    up_read.as_raw_fd(),
+                    client_write.as_raw_fd(),
+                    256 * 1024,
+                );
+            }
             let _ = client_write.shutdown(Shutdown::Write);
         });
-        let client_read = client.try_clone()?;
-        let _ = fwd.copy_between(client_read.as_raw_fd(), upstream.as_raw_fd(), 256 * 1024);
+        session.copy_stream(client_read.as_raw_fd(), upstream.as_raw_fd(), 256 * 1024)?;
         let _ = upstream.shutdown(Shutdown::Write);
         let _ = pump.join();
         return Ok(());
@@ -1324,6 +1328,7 @@ fn handle_disaggregated(
     prefill: Arc<Backend>,
     request_id: RequestId,
     prompt_tokens: u64,
+    #[cfg(target_os = "linux")] io_uring_session: Option<&mut IoUringProxySession>,
 ) -> io::Result<()> {
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     let router2 = Arc::clone(&router);
@@ -1358,8 +1363,13 @@ fn handle_disaggregated(
         }
     };
 
-    let io_uring = router.io_uring.as_ref();
-    let result = proxy_to_backend(&mut client, &head, placement.backend.as_ref(), io_uring);
+    let result = proxy_to_backend(
+        &mut client,
+        &head,
+        placement.backend.as_ref(),
+        #[cfg(target_os = "linux")]
+        io_uring_session,
+    );
     drop(placement.reservation);
     result
 }
@@ -1385,20 +1395,58 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
         None
     };
 
-    let io_uring = router.io_uring.as_ref();
+    let _admit_guard = if router.admit_mode.uses_userspace_admit(kernel_attached) {
+        Some(AdmitGuard(Arc::clone(&router.admit)))
+    } else {
+        None
+    };
+
     let mut client = client;
-    let head = read_head(&mut client)?;
+    #[cfg(target_os = "linux")]
+    let mut io_uring_session = router
+        .io_uring
+        .as_ref()
+        .and_then(|fwd| fwd.open_proxy_session().ok());
+
+    let head = {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(ref mut session) = io_uring_session {
+                use std::os::fd::AsRawFd;
+                session.read_http_head(client.as_raw_fd(), MAX_HEAD)?
+            } else {
+                read_head(&mut client)?
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            read_head(&mut client)?
+        }
+    };
     std::hint::black_box(router.dataplane_pi());
 
     match route(&router, &head) {
-        Ok(RoutePath::Colocated(b) | RoutePath::DecodeOnly(b)) => {
-            proxy_to_backend(&mut client, &head, b.as_ref(), io_uring)
-        }
+        Ok(RoutePath::Colocated(b) | RoutePath::DecodeOnly(b)) => proxy_to_backend(
+            &mut client,
+            &head,
+            b.as_ref(),
+            #[cfg(target_os = "linux")]
+            io_uring_session.as_mut(),
+        ),
         Ok(RoutePath::Disaggregated {
             prefill,
             request_id,
             prompt_tokens,
-        }) => handle_disaggregated(client, head, router, prefill, request_id, prompt_tokens),
+        }) => handle_disaggregated(
+            client,
+            head,
+            router,
+            prefill,
+            request_id,
+            prompt_tokens,
+            #[cfg(target_os = "linux")]
+            io_uring_session.as_mut(),
+        ),
         Err(RouteError::NoBackend)
         | Err(RouteError::HandoffMissing)
         | Err(RouteError::KvAdmitRejected) => {
