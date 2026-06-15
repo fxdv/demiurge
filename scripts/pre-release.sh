@@ -4,6 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+mkdir -p target/release-artifacts
+
 bold() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
 bold "gate (CI mirror + required Track B on Linux)"
@@ -15,5 +17,8 @@ cp target/load-bench/latest.json target/load-bench/load-full.json
 
 bold "stress suite (strict zero-error)"
 ./scripts/load-stress.sh
+
+bold "die-hard verify (Tiers 1–4 observable report)"
+./scripts/verify/harden-all.sh --skip-load --with-stress
 
 printf '\n\033[1;32mPRE-RELEASE PASSED\033[0m\n'

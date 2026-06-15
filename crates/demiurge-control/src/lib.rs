@@ -4,6 +4,7 @@
 
 mod corrector_shadow;
 mod fleet_pilot;
+mod fleet_sim;
 mod pairing;
 mod predictor;
 mod pressure;
@@ -14,7 +15,13 @@ pub use corrector_shadow::{
     delta_within_envelope, eval_goodput_improvement, train_bounded_delta, CorrectorShadowLog,
     CorrectorShadowSample,
 };
-pub use fleet_pilot::{replay_fleet_pilot, FleetPilotReport, TraceWindow, WindowReplay};
+pub use fleet_pilot::{
+    point_biserial_corr, replay_fleet_pilot, FleetPilotReport, TraceWindow, WindowReplay,
+};
+pub use fleet_sim::{
+    eval_fleet_sim_gate, jitter_delay_us, load_fleet_trace, shadow_pilot_for_trace, tier_delay_us,
+    window_knobs, FleetSimReport, FleetWindowResult, SimBaseKnobs, WindowKnobs,
+};
 pub use pairing::{
     greedy_pair, oracle_pair, pairing_regret, pairing_regret_targets, select_decode,
     select_decode_target, select_prefill, select_prefill_target, PairingTarget,

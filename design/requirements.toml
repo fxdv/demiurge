@@ -79,7 +79,11 @@ phase = 2
 section = "8.3"
 summary = "Decode placement never proceeds without a valid KV hand-off handle."
 requires_test = true
-tests = ["decode_waits_for_handoff", "disaggregated_decode_requires_handoff"]
+tests = [
+    "decode_waits_for_handoff",
+    "disaggregated_decode_requires_handoff",
+    "harden_kv_admit_rejected_returns_503",
+]
 
 [[requirement]]
 id = "DEMI-KV-OVERHEAD"
@@ -194,7 +198,13 @@ phase = 5
 section = "dataplane"
 summary = "XDP sheds overload before L7 on bucket exhaustion."
 requires_test = true
-tests = ["admit_bucket_sheds_when_exhausted", "admit_bucket_sheds_on_live_router"]
+tests = [
+    "admit_bucket_sheds_when_exhausted",
+    "admit_bucket_sheds_on_live_router",
+    "userspace_admit_limits_concurrent_connections",
+    "harden_tcp_503_on_admit_exhaust",
+    "harden_admit_conn_single_guard_path",
+]
 
 # --- Track A (macOS portable) — shadow tooling --------------------------------
 
@@ -207,6 +217,16 @@ section = "control"
 summary = "Shadow fleet replay: held-out π* correlates with prefill-heavy windows."
 requires_test = true
 tests = ["fleet_pilot_heldout_correlates", "bundled_trace_passes_gate"]
+
+[[requirement]]
+id = "DEMI-FLEET-SIM"
+kind = "normative"
+status = "implemented"
+phase = 4
+section = "control"
+summary = "'sim spinoff: trace windows drive live load; held-out live π correlates with prefill-heavy phases."
+requires_test = true
+tests = ["window_knobs_prefill_heavy_raises_fraction", "tier_delay_increases_with_index"]
 
 [[requirement]]
 id = "DEMI-CORR-SHADOW"

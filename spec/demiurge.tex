@@ -54,7 +54,8 @@ Linux today with mock TCP backends, userspace dataplane proofs, and CI gates.
         (\req{DEMI-WARM-DISCOUNT}, \req{DEMI-STATE-AP}); fast-path warmth override.
   \item \textbf{Phase~4} --- Greedy pf$\to$dc pairing (\req{DEMI-PAIR-GREEDY});
         shadow pool rebalancer (\req{DEMI-POOL-RATIO}); fleet shadow replay
-        (\req{DEMI-FLEET-SHADOW}); fast-path telemetry export
+        (\req{DEMI-FLEET-SHADOW}); trace-driven fleet simulation spinoff
+        (\req{DEMI-FLEET-SIM}); fast-path telemetry export
         (\req{DEMI-FASTPATH-TELEM}); corrector shadow logging
         (\req{DEMI-CORR-SHADOW}).
   \item \textbf{Phase~5 (proof)} --- RCU routing snapshot on the live TCP path
@@ -275,7 +276,9 @@ The pool-ratio controller adjusts prefill vs decode capacity share
 $\pi$ using queue, KV, and SLO pressure with hysteresis and cooldown
 (\texttt{pool.*}) \req{DEMI-POOL-RATIO}. Shadow mode is default until Phase~5
 actuation. Shadow fleet replay on a held-out trace must show $\pi^*$ tracking
-prefill-heavy windows \req{DEMI-FLEET-SHADOW}. The router exports
+prefill-heavy windows \req{DEMI-FLEET-SHADOW}. The \emph{'sim} spinoff replays
+the same trace windows as live TCP load against mock backends, with per-window
+knobs and fleet gates \req{DEMI-FLEET-SIM}. The router exports
 \texttt{fast\_path\_ratio} and near-threshold mis-route regret
 \req{DEMI-FASTPATH-TELEM}.
 
@@ -314,6 +317,7 @@ Design conformance is enforced in CI and locally via \texttt{./scripts/gate.sh}:
   \item \texttt{cargo xtask spec} --- \texttt{gen} + \LaTeX{} build $\to$ \texttt{spec/demiurge.pdf}.
   \item \texttt{./scripts/load-bench.sh} / \texttt{load-stress.sh} --- TCP load scenarios (stress local-only).
   \item \texttt{cargo xtask fleet-pilot} --- shadow fleet replay (Track~A+).
+  \item \texttt{cargo xtask apostrophe-sim} --- trace $\to$ live load fleet simulation \req{DEMI-FLEET-SIM}.
 \end{itemize}
 
 \textbf{Operational posture.} The data plane is fail-closed on admit exhaustion

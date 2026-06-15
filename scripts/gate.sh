@@ -110,13 +110,17 @@ run_spec_optional() {
 print_footer() {
   demiurge_pass "ALL GATES PASSED"
   echo ""
+  echo "Optional verification suites (rerunnable):"
+  echo "  ./scripts/verify.sh list              all suites + artifact paths"
+  echo "  ./scripts/verify.sh harden            Tiers 1–4 die-hard (+ report.pseudo)"
+  echo "  ./scripts/verify.sh full              gate + load + stress + harden report"
   echo "Optional Track A total verification (full metrics + soft spots, ~5 min):"
-  echo "  ./scripts/track-a-verify.sh  →  target/track-a-verify/report.md"
+  echo "  ./scripts/verify.sh track-a           →  target/track-a-verify/report.md"
   if [[ "$(uname -s)" == "Linux" ]]; then
     echo "Track B verification (gate + bench-probe + load + stress on Linux):"
-    echo "  ./scripts/track-b-verify.sh           →  target/track-b-verify/report.md"
-    echo "  ./scripts/track-b-verify.sh --quick   →  gate + CPU benches only"
-    echo "  ./scripts/track-b-bench.sh            →  CPU probe/gate + XDP smoke"
+    echo "  ./scripts/verify.sh track-b             →  target/track-b-verify/report.md"
+    echo "  ./scripts/verify.sh track-b --quick     →  gate + CPU benches only"
+    echo "  ./scripts/track-b-bench.sh              →  CPU probe/gate + XDP smoke"
   else
     echo "Track B on macOS (Docker CI mirror):"
     echo "  ./scripts/linux-vm/docker-track-b.sh gate"

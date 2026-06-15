@@ -42,8 +42,30 @@ jobs:
       - name: Pre-release validation
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_pre_release }}
         run: |
-          mkdir -p target/release-artifacts
+          mkdir -p target/release-artifacts target/harden-verify
           bash ./scripts/pre-release.sh 2>&1 | tee target/release-artifacts/pre-release.log
+          cp target/load-bench/latest.pseudo target/release-artifacts/load-full.pseudo 2>/dev/null || true
+          cp target/load-bench/stress.pseudo target/release-artifacts/stress.pseudo 2>/dev/null || true
+          cp target/harden-verify/report.pseudo target/release-artifacts/harden.pseudo 2>/dev/null || true
+          cp target/harden-verify/report.md target/release-artifacts/harden.md 2>/dev/null || true
+
+      - name: Upload bench + harden reports
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_pre_release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: demiurge-linux-reports-${{ github.run_id }}
+          path: |
+            target/release-artifacts/pre-release.log
+            target/release-artifacts/gate.log
+            target/release-artifacts/load-full.pseudo
+            target/release-artifacts/stress.pseudo
+            target/release-artifacts/harden.pseudo
+            target/release-artifacts/harden.md
+            target/load-bench/latest.json
+            target/load-bench/stress.json
+            target/load-bench/harden.json
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Build publish artifact
         run: bash ./scripts/publish.sh --skip-pre-release

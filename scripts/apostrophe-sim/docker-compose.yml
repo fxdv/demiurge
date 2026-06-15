@@ -1,0 +1,26 @@
+# 'sim L3 — Linux fleet simulation container (Track B compatible).
+#
+#   docker compose -f scripts/apostrophe-sim/docker-compose.yml run --rm sim
+#
+services:
+  sim:
+    image: ubuntu:24.04
+    platform: linux/amd64
+    privileged: true
+    working_dir: /work
+    volumes:
+      - ../..:/work
+      - sim-target:/work/target
+      - sim-cargo:/root/.cargo
+    command: >
+      bash -lc '
+        if [ ! -f /work/target/.apostrophe-sim-bootstrapped ]; then
+          /work/scripts/linux-vm/bootstrap-guest.sh /work &&
+          touch /work/target/.apostrophe-sim-bootstrapped
+        fi &&
+        /work/scripts/apostrophe-sim.sh
+      '
+
+volumes:
+  sim-target:
+  sim-cargo:

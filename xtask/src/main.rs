@@ -4,8 +4,9 @@
 //! `lint` enforces the spec/code/test traceability join, and
 //! `bench-gate` runs release-mode CPU gates from `design/bench-gates.toml`,
 //! `bench-probe` samples floor/median/p95 to tune limits and find thin gates,
-//! `load-bench` runs local TCP load scenarios, and `load-report` renders the
-//! pseudo-graphical report from the last run.
+//! `load-bench` runs local TCP load scenarios, `load-report` renders the
+//! pseudo-graphical report from the last run, `'sim` runs the fleet simulation
+//! spinoff, and `harden-verify` runs Tiers 1–4 die-hard checks with an aggregate observable report.
 //!
 //! ```text
 //! design/demiurge.params.toml -> crates/demiurge-cost/src/generated_params.rs
@@ -25,8 +26,11 @@ use std::process::exit;
 use regex::Regex;
 use serde::Deserialize;
 
+mod apostrophe_sim;
 mod bench_gate;
 mod fleet_pilot;
+mod harden_report;
+mod harden_verify;
 mod load_bench;
 mod pseudo_report;
 #[cfg(target_os = "linux")]
@@ -93,14 +97,26 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             let ci_only = args.iter().any(|a| a == "--ci");
             let stress = args.iter().any(|a| a == "--stress");
+            let harden = args.iter().any(|a| a == "--harden");
+            let sim = args.iter().any(|a| a == "--sim");
             let scenario = args
                 .windows(2)
                 .find_map(|w| (w[0] == "--scenario").then_some(w[1].as_str()));
-            load_bench::load_bench(ci_only, scenario, stress)
+            load_bench::load_bench(ci_only, scenario, stress, harden, sim)
         }
         "load-report" => {
-            let stress = std::env::args().skip(2).any(|a| a == "--stress");
-            load_bench::load_report(stress)
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let stress = args.iter().any(|a| a == "--stress");
+            let harden = args.iter().any(|a| a == "--harden");
+            let sim = args.iter().any(|a| a == "--sim");
+            load_bench::load_report(stress, harden, sim)
+        }
+        "'sim" | "apostrophe-sim" => apostrophe_sim::apostrophe_sim(),
+        "harden-verify" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let skip_load = args.iter().any(|a| a == "--skip-load");
+            let skip_tests = args.iter().any(|a| a == "--skip-tests");
+            harden_verify::harden_verify(skip_load, skip_tests)
         }
         "build-bpf" => build_bpf(),
         "fleet-pilot" => fleet_pilot::fleet_pilot(),
@@ -108,7 +124,7 @@ fn main() {
         "product-doc" => build_product_doc(),
         other => {
             eprintln!(
-                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, `build-bpf`, or `fleet-pilot`"
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, `harden-verify`, `build-bpf`, `fleet-pilot`, or `'sim`"
             );
             exit(2);
         }

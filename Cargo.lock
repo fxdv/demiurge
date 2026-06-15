@@ -132,6 +132,9 @@ version = "0.1.0"
 dependencies = [
  "demiurge-cost",
  "demiurge-state",
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -149,6 +152,7 @@ dependencies = [
  "aya",
  "demiurge-cost",
  "io-uring",
+ "proptest",
 ]
 
 [[package]]
@@ -164,6 +168,7 @@ dependencies = [
  "demiurge-dataplane",
  "demiurge-handoff",
  "demiurge-state",
+ "tempfile",
 ]
 
 [[package]]

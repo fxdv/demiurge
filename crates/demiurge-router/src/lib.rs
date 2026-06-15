@@ -1278,6 +1278,23 @@ impl Drop for AdmitGuard {
     }
 }
 
+/// Userspace admit for one TCP connection — at most one guard per `handle_conn`.
+enum AdmitConn {
+    Shed,
+    Proceed(Option<AdmitGuard>),
+}
+
+fn admit_conn(router: &Router) -> AdmitConn {
+    let kernel_attached = router.kernel_admit_attached();
+    if !router.admit_mode.uses_userspace_admit(kernel_attached) {
+        return AdmitConn::Proceed(None);
+    }
+    if router.admit.try_admit().is_err() {
+        return AdmitConn::Shed;
+    }
+    AdmitConn::Proceed(Some(AdmitGuard(Arc::clone(&router.admit))))
+}
+
 fn proxy_to_backend(
     client: &mut TcpStream,
     head: &[u8],
@@ -1386,17 +1403,14 @@ fn rebalancer_actuation_enabled() -> bool {
 }
 
 fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
-    let kernel_attached = router.kernel_admit_attached();
-    if router.admit_mode.uses_userspace_admit(kernel_attached) && router.admit.try_admit().is_err()
-    {
-        let mut client = client;
-        let _ = client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
-        return Ok(());
-    }
-    let _admit_guard = if router.admit_mode.uses_userspace_admit(kernel_attached) {
-        Some(AdmitGuard(Arc::clone(&router.admit)))
-    } else {
-        None
+    let _admit_guard = match admit_conn(&router) {
+        AdmitConn::Shed => {
+            let mut client = client;
+            let _ =
+                client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+            return Ok(());
+        }
+        AdmitConn::Proceed(guard) => guard,
     };
 
     let mut client = client;
@@ -1517,6 +1531,47 @@ pub fn spawn_marker_backend(marker: u8) -> SocketAddr {
                 marker as char
             );
             let _ = s.write_all(resp.as_bytes());
+            let _ = s.shutdown(Shutdown::Write);
+        }
+    });
+    addr
+}
+
+/// Backend that accepts then resets without sending HTTP (proxy fault injection).
+pub fn spawn_rst_backend() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(s) = conn else { continue };
+            drop(s);
+        }
+    });
+    addr
+}
+
+/// Backend returning a fixed-size HTTP body (io_uring / large-response tests).
+pub fn spawn_large_body_backend(body_bytes: usize) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut s) = conn else { continue };
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {body_bytes}\r\nconnection: close\r\n\r\n"
+            );
+            let _ = s.write_all(head.as_bytes());
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut sent = 0usize;
+            while sent < body_bytes {
+                let n = chunk.len().min(body_bytes - sent);
+                if s.write_all(&chunk[..n]).is_err() {
+                    break;
+                }
+                sent += n;
+            }
             let _ = s.shutdown(Shutdown::Write);
         }
     });

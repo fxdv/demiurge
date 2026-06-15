@@ -10,6 +10,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use demiurge_control::{
+    eval_fleet_sim_gate, jitter_delay_us, load_fleet_trace, shadow_pilot_for_trace, tier_delay_us,
+    window_knobs, FleetWindowResult, SimBaseKnobs,
+};
 use demiurge_cost::kv_breakdown;
 use demiurge_router::{
     admit_disaggregated, serve, spawn_delay_backend, AdmitMode, Backend, KvHandoffRegistry,
@@ -47,6 +51,9 @@ struct Scenario {
     /// Real stress scenarios: run via `load-bench --stress` only (excluded from default suite).
     #[serde(default)]
     stress: bool,
+    /// Harden-only scenarios (`load-bench --harden` / harden-verify).
+    #[serde(default)]
+    harden: bool,
     backends: u32,
     base_cost_seconds: f64,
     cost_step_seconds: f64,
@@ -122,6 +129,45 @@ struct Scenario {
     /// Skip without failing the suite when prerequisites are missing (e.g. root for kernel XDP load).
     #[serde(default)]
     optional: bool,
+    /// Fixed userspace admit bucket capacity (0 = default burst).
+    #[serde(default)]
+    admit_capacity: u64,
+    /// Fail when max/p99 latency ratio exceeds this (tail widening gate).
+    #[serde(default)]
+    max_p99_tail_ratio: Option<f64>,
+    /// Fail when fast-path misroute mean exceeds this.
+    #[serde(default)]
+    max_misroute_mean: Option<f64>,
+    /// Require at least this many KV admit rejects (harden exhaust scenarios).
+    #[serde(default)]
+    min_kv_admit_rejects: Option<u64>,
+    /// Require at least this many client errors (e.g. userspace admit 503 sheds).
+    #[serde(default)]
+    min_errors: Option<u64>,
+    /// Fail when hard errors (non-graceful) exceed this cap (`'sim` default: 0).
+    #[serde(default)]
+    max_hard_errors: Option<u64>,
+    /// Response body size for `large_response` request style.
+    #[serde(default)]
+    large_body_bytes: u64,
+    /// **'sim** spinoff — trace-driven fleet replay (`load-bench --sim`).
+    #[serde(default)]
+    sim: bool,
+    /// JSONL fleet trace for `measure = "fleet_replay"`.
+    #[serde(default)]
+    trace_path: Option<String>,
+    /// Gate: held-out π* / live π correlation vs prefill-heavy windows.
+    #[serde(default)]
+    min_fleet_correlation: Option<f64>,
+    /// L2: symmetric delay jitter on mock backend responses (µs).
+    #[serde(default)]
+    backend_delay_jitter_us: u64,
+    /// L2: tier-skewed backend delays emulating heterogeneous fleet nodes.
+    #[serde(default)]
+    heterogeneous_backends: bool,
+    /// L3: extra delay on upper backend tiers (simulated cross-node netem, µs).
+    #[serde(default)]
+    sim_netem_us: u64,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -161,6 +207,10 @@ pub struct ScenarioResult {
     pub total_requests: u64,
     pub ok: u64,
     pub errors: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors_graceful: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errors_hard: Option<u64>,
     pub duration_secs: f64,
     pub req_per_sec: f64,
     pub min_us: u64,
@@ -213,6 +263,13 @@ pub struct ScenarioResult {
     pub fastpath_misroute_samples: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corrector_shadow_samples: Option<u64>,
+    /// **'sim** per-trace-window live results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet_windows: Vec<FleetWindowResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fleet_live_pi_correlation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fleet_sim_gate_pass: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -220,6 +277,224 @@ pub struct LoadBenchReport {
     pub generated_at: String,
     pub hostname: String,
     pub scenarios: Vec<ScenarioResult>,
+}
+
+/// Gate thresholds from `load-bench.toml` for pseudo-report evaluation.
+#[derive(Debug, Clone)]
+pub struct ScenarioGateConfig {
+    pub use_kv_pool: bool,
+    pub decode_capacity_bytes: u64,
+    pub max_kv_admit_rejects: Option<u64>,
+    pub min_kv_admit_rejects: Option<u64>,
+    pub min_errors: Option<u64>,
+    pub max_hard_errors: Option<u64>,
+    pub max_accept_p99_ratio: Option<f64>,
+    pub min_dataplane_pi: Option<f64>,
+    pub max_p99_tail_ratio: Option<f64>,
+    pub max_misroute_mean: Option<f64>,
+    pub min_fleet_correlation: Option<f64>,
+}
+
+impl From<&Scenario> for ScenarioGateConfig {
+    fn from(sc: &Scenario) -> Self {
+        Self {
+            use_kv_pool: sc.use_kv_pool,
+            decode_capacity_bytes: sc.decode_capacity_bytes,
+            max_kv_admit_rejects: sc.max_kv_admit_rejects,
+            min_kv_admit_rejects: sc.min_kv_admit_rejects,
+            min_errors: sc.min_errors,
+            max_hard_errors: sc.max_hard_errors,
+            max_accept_p99_ratio: sc.max_accept_p99_ratio,
+            min_dataplane_pi: sc.min_dataplane_pi,
+            max_p99_tail_ratio: sc.max_p99_tail_ratio,
+            max_misroute_mean: sc.max_misroute_mean,
+            min_fleet_correlation: sc.min_fleet_correlation,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GateVerdict {
+    pub name: &'static str,
+    pub pass: bool,
+    pub detail: String,
+}
+
+pub fn gate_configs_by_id(
+) -> Result<std::collections::HashMap<String, ScenarioGateConfig>, Box<dyn std::error::Error>> {
+    let file: LoadBenchFile = toml::from_str(&fs::read_to_string(LOAD_BENCH)?)?;
+    Ok(file
+        .scenario
+        .iter()
+        .map(|sc| (sc.id.clone(), ScenarioGateConfig::from(sc)))
+        .collect())
+}
+
+pub fn evaluate_scenario_gates(
+    cfg: &ScenarioGateConfig,
+    result: &ScenarioResult,
+) -> Vec<GateVerdict> {
+    let mut gates = Vec::new();
+
+    if cfg.max_kv_admit_rejects.is_some()
+        || cfg.min_kv_admit_rejects.is_some()
+        || cfg.min_errors.is_some()
+        || cfg.max_hard_errors.is_some()
+        || result.errors > 0
+    {
+        let rejects = result.kv_admit_rejects.unwrap_or(0);
+        let graceful = result.errors_graceful.unwrap_or(0);
+        let hard = result
+            .errors_hard
+            .unwrap_or_else(|| result.errors.saturating_sub(graceful));
+
+        if let Some(max_hard) = cfg.max_hard_errors {
+            gates.push(GateVerdict {
+                name: "hard errors",
+                pass: hard <= max_hard,
+                detail: format!("{hard} hard (cap {max_hard})"),
+            });
+        }
+
+        if let Some(cap) = cfg.max_kv_admit_rejects {
+            let pass = if result.errors_graceful.is_some() {
+                graceful <= cap && rejects <= cap && hard <= cfg.max_hard_errors.unwrap_or(cap)
+            } else {
+                result.errors <= cap && rejects <= cap
+            };
+            gates.push(GateVerdict {
+                name: "errors",
+                pass,
+                detail: if result.errors_graceful.is_some() {
+                    format!("{graceful} 503 / {hard} hard / {rejects} kv rejects (cap {cap})")
+                } else {
+                    format!("{} err / {} kv rejects (cap {cap})", result.errors, rejects)
+                },
+            });
+        } else if result.errors > 0 && cfg.max_hard_errors.is_none() {
+            gates.push(GateVerdict {
+                name: "errors",
+                pass: false,
+                detail: format!(
+                    "{} err / {} req (zero required)",
+                    result.errors, result.total_requests
+                ),
+            });
+        } else if cfg.max_hard_errors.is_none() {
+            gates.push(GateVerdict {
+                name: "errors",
+                pass: true,
+                detail: if graceful > 0 || hard > 0 {
+                    format!("{graceful} 503 / {hard} hard")
+                } else {
+                    "0 err".into()
+                },
+            });
+        } else if graceful > 0 {
+            gates.push(GateVerdict {
+                name: "graceful 503",
+                pass: true,
+                detail: format!("{graceful} shed"),
+            });
+        }
+        if let Some(min_rejects) = cfg.min_kv_admit_rejects {
+            gates.push(GateVerdict {
+                name: "kv rejects min",
+                pass: rejects >= min_rejects,
+                detail: format!("{rejects} rejects (min {min_rejects})"),
+            });
+        }
+        if let Some(min_err) = cfg.min_errors {
+            gates.push(GateVerdict {
+                name: "errors min",
+                pass: result.errors >= min_err,
+                detail: format!("{} err (min {min_err})", result.errors),
+            });
+        }
+    }
+
+    if cfg.use_kv_pool && cfg.decode_capacity_bytes > 0 {
+        if let Some(peak) = result.kv_bytes_reserved_peak {
+            gates.push(GateVerdict {
+                name: "kv peak",
+                pass: peak <= cfg.decode_capacity_bytes,
+                detail: format!("{peak} bytes (cap {})", cfg.decode_capacity_bytes),
+            });
+        }
+    }
+
+    if let Some(limit) = result.max_p99_ms {
+        let p99_ms = result.p99_us as f64 / 1000.0;
+        let pass = result.ok > 0 && p99_ms <= limit;
+        gates.push(GateVerdict {
+            name: "p99",
+            pass,
+            detail: if result.ok == 0 {
+                "no successful requests".into()
+            } else {
+                format!("{p99_ms:.2}ms (≤ {limit:.1}ms)")
+            },
+        });
+    }
+
+    if let (Some(ratio), Some(limit)) = (result.accept_p99_ratio, cfg.max_accept_p99_ratio) {
+        gates.push(GateVerdict {
+            name: "accept p99 ratio",
+            pass: ratio <= limit,
+            detail: format!(
+                "{ratio:.2} (≤ {limit:.1}) — {}µs / {}µs",
+                result.accept_p99_us_low.unwrap_or(0),
+                result.accept_p99_us_high.unwrap_or(0),
+            ),
+        });
+    }
+
+    if let Some(min_pi) = cfg.min_dataplane_pi {
+        if let Some(observed) = result.dataplane_pi {
+            gates.push(GateVerdict {
+                name: "dataplane π",
+                pass: observed >= min_pi,
+                detail: format!("{observed:.3} (min {min_pi:.3})"),
+            });
+        }
+    }
+
+    if let Some(limit) = cfg.max_p99_tail_ratio {
+        if result.p99_us > 0 {
+            let ratio = result.max_us as f64 / result.p99_us as f64;
+            gates.push(GateVerdict {
+                name: "tail max/p99",
+                pass: ratio <= limit,
+                detail: format!(
+                    "{ratio:.2} (≤ {limit:.1}) — max {}µs / p99 {}µs",
+                    result.max_us, result.p99_us
+                ),
+            });
+        }
+    }
+
+    if let Some(limit) = cfg.max_misroute_mean {
+        if let Some(m) = result.fastpath_misroute_mean {
+            gates.push(GateVerdict {
+                name: "misroute mean",
+                pass: m <= limit,
+                detail: format!("{m:.3} (≤ {limit:.3})"),
+            });
+        }
+    }
+
+    if cfg.min_fleet_correlation.is_some() || result.fleet_sim_gate_pass.is_some() {
+        let pass = result.fleet_sim_gate_pass.unwrap_or(false);
+        let corr = result.fleet_live_pi_correlation.unwrap_or(0.0);
+        let min = cfg.min_fleet_correlation.unwrap_or(0.45);
+        gates.push(GateVerdict {
+            name: "fleet replay",
+            pass,
+            detail: format!("live_pi_corr {corr:.3} (min {min:.2})"),
+        });
+    }
+
+    gates
 }
 
 struct RouterStack {
@@ -261,17 +536,54 @@ fn scenario_skip_reason(sc: &Scenario) -> Option<String> {
     None
 }
 
-fn spawn_mock_backend(delay_us: u64, kv_bytes: Option<u64>) -> SocketAddr {
+fn spawn_large_body_backend(delay_us: u64, body_bytes: usize) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend");
     let addr = listener.local_addr().expect("backend addr");
     thread::spawn(move || {
-        static HANDLE: AtomicU64 = AtomicU64::new(1);
         for conn in listener.incoming() {
             let Ok(mut s) = conn else { continue };
             let mut buf = [0u8; 2048];
             let _ = s.read(&mut buf);
             if delay_us > 0 {
                 thread::sleep(Duration::from_micros(delay_us));
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {body_bytes}\r\nconnection: close\r\n\r\n"
+            );
+            let _ = s.write_all(head.as_bytes());
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut sent = 0usize;
+            while sent < body_bytes {
+                let n = chunk.len().min(body_bytes - sent);
+                if s.write_all(&chunk[..n]).is_err() {
+                    break;
+                }
+                sent += n;
+            }
+            let _ = s.shutdown(Shutdown::Write);
+        }
+    });
+    addr
+}
+
+fn spawn_mock_backend(delay_us: u64, jitter_us: u64, kv_bytes: Option<u64>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend");
+    let addr = listener.local_addr().expect("backend addr");
+    thread::spawn(move || {
+        static REQ: AtomicU64 = AtomicU64::new(0);
+        static HANDLE: AtomicU64 = AtomicU64::new(1);
+        for conn in listener.incoming() {
+            let Ok(mut s) = conn else { continue };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let salt = REQ.fetch_add(1, Ordering::Relaxed);
+            let sleep_us = if jitter_us > 0 {
+                jitter_delay_us(delay_us, jitter_us, salt)
+            } else {
+                delay_us
+            };
+            if sleep_us > 0 {
+                thread::sleep(Duration::from_micros(sleep_us));
             }
             if let Some(bytes) = kv_bytes {
                 let handle = HANDLE.fetch_add(1, Ordering::Relaxed);
@@ -330,6 +642,9 @@ fn spawn_router_stack(
         if let Some(ref veth) = track_b_veth {
             router = veth.attach_router(router)?;
         }
+        if sc.admit_capacity > 0 {
+            router.sync_admit_capacity(sc.admit_capacity);
+        }
         let listener = {
             #[cfg(target_os = "linux")]
             {
@@ -364,6 +679,9 @@ fn spawn_router_stack(
         if let Some(ref veth) = track_b_veth {
             router = veth.attach_router(router)?;
         }
+        if sc.admit_capacity > 0 {
+            router.sync_admit_capacity(sc.admit_capacity);
+        }
         let listener = {
             #[cfg(target_os = "linux")]
             {
@@ -392,9 +710,33 @@ fn spawn_router_stack(
 }
 
 fn build_pool(count: u32, prefix: &str, sc: &Scenario, kv_bytes: Option<u64>) -> Vec<Arc<Backend>> {
+    build_pool_calibrated(count, prefix, sc, kv_bytes, sc.backend_delay_us, 1.0)
+}
+
+fn build_pool_calibrated(
+    count: u32,
+    prefix: &str,
+    sc: &Scenario,
+    kv_bytes: Option<u64>,
+    base_delay_us: u64,
+    window_mult: f64,
+) -> Vec<Arc<Backend>> {
+    let remote_cutoff = count.saturating_sub(count / 3).max(1);
     (0..count)
         .map(|i| {
-            let addr = spawn_mock_backend(sc.backend_delay_us, kv_bytes);
+            let mut delay_us = if sc.heterogeneous_backends {
+                tier_delay_us(i, count, base_delay_us, window_mult)
+            } else {
+                base_delay_us
+            };
+            if sc.sim_netem_us > 0 && i >= remote_cutoff {
+                delay_us = delay_us.saturating_add(sc.sim_netem_us);
+            }
+            let addr = if sc.request_style == "large_response" && sc.large_body_bytes > 0 {
+                spawn_large_body_backend(delay_us, sc.large_body_bytes as usize)
+            } else {
+                spawn_mock_backend(delay_us, sc.backend_delay_jitter_us, kv_bytes)
+            };
             let cost = sc.base_cost_seconds + sc.cost_step_seconds * f64::from(i);
             let label = if sc.paired_labels {
                 format!("node{i}")
@@ -439,6 +781,9 @@ fn request_line(
                 )
             }
         }
+        "large_response" => {
+            "GET /large HTTP/1.1\r\nhost: load-bench\r\nconnection: close\r\n\r\n".to_string()
+        }
         _ => format!(
             "GET /prefill/{seq} HTTP/1.1\r\nhost: load-bench\r\nconnection: close\r\n\r\n"
         ),
@@ -460,30 +805,64 @@ fn connect_router(router: SocketAddr) -> Result<TcpStream, ()> {
     Err(())
 }
 
+fn parse_http_status(head: &[u8]) -> Option<u16> {
+    let line_end = head.iter().position(|&b| b == b'\n')?;
+    let line = &head[..line_end];
+    let parts: Vec<&[u8]> = line.split(|&b| b == b' ').collect();
+    if parts.len() < 2 || parts[0] != b"HTTP/1.1" {
+        return None;
+    }
+    std::str::from_utf8(parts[1])
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestOutcome {
+    Ok(u64),
+    Graceful503,
+    HardError,
+}
+
 fn one_request(
     router: SocketAddr,
     request_style: &str,
     long_prompt_tokens: u64,
     prefill: bool,
     seq: u64,
-) -> Result<u64, ()> {
+) -> RequestOutcome {
     let start = Instant::now();
-    let mut s = connect_router(router)?;
+    let mut s = match connect_router(router) {
+        Ok(s) => s,
+        Err(()) => return RequestOutcome::HardError,
+    };
     s.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    s.write_all(&request_line(
+    if s.write_all(&request_line(
         request_style,
         long_prompt_tokens,
         prefill,
         seq,
     ))
-    .map_err(|_| ())?;
-    s.shutdown(Shutdown::Write).map_err(|_| ())?;
-    let mut buf = [0u8; 512];
-    let n = s.read(&mut buf).map_err(|_| ())?;
-    if n == 0 || !buf[..n].windows(12).any(|w| w == b"HTTP/1.1 200") {
-        return Err(());
+    .is_err()
+    {
+        return RequestOutcome::HardError;
     }
-    Ok(start.elapsed().as_micros() as u64)
+    if s.shutdown(Shutdown::Write).is_err() {
+        return RequestOutcome::HardError;
+    }
+    let mut buf = [0u8; 512];
+    let n = match s.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return RequestOutcome::HardError,
+    };
+    if n == 0 {
+        return RequestOutcome::HardError;
+    }
+    match parse_http_status(&buf[..n]) {
+        Some(200) => RequestOutcome::Ok(start.elapsed().as_micros() as u64),
+        Some(503) => RequestOutcome::Graceful503,
+        _ => RequestOutcome::HardError,
+    }
 }
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {
@@ -550,6 +929,9 @@ impl PeakGuard {
 }
 
 fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
+    if sc.measure == "fleet_replay" {
+        return run_fleet_replay_scenario(sc, warmup);
+    }
     if sc.measure == "admit_decouple" {
         return run_admit_decouple_scenario(sc, warmup);
     }
@@ -610,6 +992,8 @@ fn run_admit_decouple_scenario(
         total_requests: total,
         ok: total,
         errors: 0,
+        errors_graceful: None,
+        errors_hard: None,
         duration_secs,
         req_per_sec: if duration_secs > 0.0 {
             total as f64 / duration_secs
@@ -644,6 +1028,9 @@ fn run_admit_decouple_scenario(
         fastpath_misroute_mean: None,
         fastpath_misroute_samples: None,
         corrector_shadow_samples: None,
+        fleet_windows: Vec::new(),
+        fleet_live_pi_correlation: None,
+        fleet_sim_gate_pass: None,
     })
 }
 
@@ -693,6 +1080,324 @@ fn run_admit_workers(
     }
     let samples = latencies.lock().expect("lat").clone();
     samples
+}
+
+fn trace_path(sc: &Scenario) -> Result<PathBuf, String> {
+    let rel = sc
+        .trace_path
+        .as_ref()
+        .ok_or_else(|| format!("{}: trace_path required for fleet_replay", sc.id))?;
+    let path = PathBuf::from(rel);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(repo_root().join(path))
+    }
+}
+
+struct WindowWorkerConfig {
+    router_addr: SocketAddr,
+    concurrency: u32,
+    requests_per_worker: u32,
+    request_style: String,
+    long_prompt_tokens: u64,
+    prefill_fraction: f64,
+    seq_base: u64,
+    inflight: Option<Arc<InflightGate>>,
+    peak_sampler: Option<Arc<KvReservationLedger>>,
+    peak_atomic: Option<Arc<AtomicU64>>,
+}
+
+fn run_window_workers(cfg: &WindowWorkerConfig) -> (u64, u64, u64, Vec<u64>) {
+    let ok = Arc::new(AtomicU64::new(0));
+    let graceful = Arc::new(AtomicU64::new(0));
+    let hard = Arc::new(AtomicU64::new(0));
+    let latencies = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::new();
+    for w in 0..cfg.concurrency {
+        let ok = Arc::clone(&ok);
+        let graceful = Arc::clone(&graceful);
+        let hard = Arc::clone(&hard);
+        let latencies = Arc::clone(&latencies);
+        let inflight = cfg.inflight.clone();
+        let peak_sampler = cfg.peak_sampler.clone();
+        let peak_atomic = cfg.peak_atomic.clone();
+        let request_style = cfg.request_style.clone();
+        let requests_per_worker = cfg.requests_per_worker;
+        let router_addr = cfg.router_addr;
+        let long_prompt_tokens = cfg.long_prompt_tokens;
+        let prefill_fraction = cfg.prefill_fraction;
+        let seq_base = cfg.seq_base;
+        handles.push(thread::spawn(move || {
+            for r in 0..requests_per_worker {
+                let seq = seq_base + u64::from(w) * u64::from(requests_per_worker) + u64::from(r);
+                let prefill = if request_style == "mixed_tokens"
+                    || request_style == "short_tokens"
+                    || request_style == "long_tokens"
+                {
+                    true
+                } else {
+                    (seq % 100) as f64 / 100.0 < prefill_fraction
+                };
+                let _slot = inflight.as_ref().map(|g| g.enter());
+                match one_request(
+                    router_addr,
+                    &request_style,
+                    long_prompt_tokens,
+                    prefill,
+                    seq,
+                ) {
+                    RequestOutcome::Ok(us) => {
+                        ok.fetch_add(1, Ordering::Relaxed);
+                        latencies.lock().expect("lat").push(us);
+                        if let (Some(ledger), Some(peak)) = (&peak_sampler, &peak_atomic) {
+                            let cur = ledger.fleet_reserved();
+                            peak.fetch_max(cur, Ordering::Relaxed);
+                        }
+                    }
+                    RequestOutcome::Graceful503 => {
+                        graceful.fetch_add(1, Ordering::Relaxed);
+                    }
+                    RequestOutcome::HardError => {
+                        hard.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.join().expect("worker");
+    }
+    let samples = latencies.lock().expect("lat").clone();
+    let ok_n = ok.load(Ordering::Relaxed);
+    let graceful_n = graceful.load(Ordering::Relaxed);
+    let hard_n = hard.load(Ordering::Relaxed);
+    (ok_n, graceful_n, hard_n, samples)
+}
+
+fn run_fleet_replay_scenario(
+    sc: &Scenario,
+    warmup: u32,
+) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
+    let path = trace_path(sc)?;
+    let windows =
+        load_fleet_trace(&path).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let min_corr = sc.min_fleet_correlation.unwrap_or(0.45);
+    let pilot = shadow_pilot_for_trace(&windows, min_corr);
+
+    let base = SimBaseKnobs {
+        concurrency: sc.concurrency,
+        requests_per_worker: sc.requests_per_worker,
+        base_prefill_delay_us: sc.backend_delay_us.max(1),
+        base_decode_delay_us: sc.backend_delay_us.max(1) / 2,
+        long_prompt_tokens: sc.long_prompt_tokens,
+        long_prompt_tokens_heavy: sc.long_prompt_tokens.max(2048),
+    };
+    let avg_mult = windows
+        .iter()
+        .map(|w| window_knobs(w, &base).delay_window_mult)
+        .sum::<f64>()
+        / windows.len().max(1) as f64;
+
+    let kv_bytes = if sc.prefill_kv_headers {
+        Some(kv_breakdown(base.long_prompt_tokens_heavy, sc.bytes_per_token).kv_reserved)
+    } else {
+        None
+    };
+    let prefill = build_pool_calibrated(
+        sc.backends,
+        "pf",
+        sc,
+        kv_bytes,
+        base.base_prefill_delay_us,
+        avg_mult,
+    );
+    let decode = build_pool_calibrated(
+        sc.decode_backends,
+        "dc",
+        sc,
+        None,
+        base.base_decode_delay_us,
+        avg_mult,
+    );
+    let stack = spawn_router_stack(sc, &prefill, &decode)?;
+    let peak_guard = stack.ledger.as_ref().map(|_| PeakGuard::new());
+
+    thread::sleep(Duration::from_millis(50));
+    for i in 0..warmup {
+        let _ = one_request(
+            stack.addr,
+            &sc.request_style,
+            sc.long_prompt_tokens,
+            true,
+            u64::from(i),
+        );
+    }
+
+    let inflight = if sc.max_inflight > 0 {
+        Some(InflightGate::new(sc.max_inflight as usize))
+    } else {
+        None
+    };
+    let peak_sampler = stack.ledger.clone();
+    let peak_atomic = peak_guard.as_ref().map(|g| Arc::clone(&g.peak));
+
+    let start_wall = Instant::now();
+    let mut window_results = Vec::with_capacity(windows.len());
+    let mut all_latencies = Vec::new();
+    let mut total_ok = 0u64;
+    let mut total_graceful = 0u64;
+    let mut total_hard = 0u64;
+    let mut total_err = 0u64;
+    let mut seq_base = 0u64;
+    let mut min_pi_sampled = f64::MAX;
+
+    eprintln!(
+        "load-bench: {} 'sim fleet replay — {} windows from {}",
+        sc.id,
+        windows.len(),
+        path.display()
+    );
+
+    for (i, w) in windows.iter().enumerate() {
+        let knobs = window_knobs(w, &base);
+        let pi_star = pilot.replays.get(i).map(|r| r.pi_star).unwrap_or(0.5);
+        eprintln!(
+            "load-bench: {} window ts={} heavy={} conc={} style={} pf_frac={:.2}",
+            sc.id,
+            w.ts_ms,
+            w.prefill_heavy,
+            knobs.concurrency,
+            knobs.request_style,
+            knobs.prefill_fraction
+        );
+        let (ok, graceful, hard, mut lats) = run_window_workers(&WindowWorkerConfig {
+            router_addr: stack.addr,
+            concurrency: knobs.concurrency,
+            requests_per_worker: knobs.requests_per_worker,
+            request_style: knobs.request_style.clone(),
+            long_prompt_tokens: knobs.long_prompt_tokens,
+            prefill_fraction: knobs.prefill_fraction,
+            seq_base,
+            inflight: inflight.clone(),
+            peak_sampler: peak_sampler.clone(),
+            peak_atomic: peak_atomic.clone(),
+        });
+        let err = graceful + hard;
+        lats.sort_unstable();
+        let p99 = percentile(&lats, 0.99);
+        let pi = stack.router.control_metrics().dataplane_pi;
+        min_pi_sampled = min_pi_sampled.min(pi);
+        window_results.push(FleetWindowResult {
+            ts_ms: w.ts_ms,
+            prefill_heavy: w.prefill_heavy,
+            held_out: w.held_out,
+            ok,
+            errors: err,
+            errors_graceful: graceful,
+            errors_hard: hard,
+            p99_us: p99,
+            dataplane_pi: pi,
+            pi_star,
+        });
+        total_ok += ok;
+        total_graceful += graceful;
+        total_hard += hard;
+        total_err += err;
+        all_latencies.extend(lats);
+        seq_base = seq_base
+            .saturating_add(u64::from(knobs.concurrency) * u64::from(knobs.requests_per_worker));
+    }
+
+    let duration_secs = start_wall.elapsed().as_secs_f64();
+    all_latencies.sort_unstable();
+    let sim_gate = eval_fleet_sim_gate(&pilot, &window_results, min_corr);
+    eprintln!(
+        "'sim: {} shadow_corr={:.3} live_pi_corr={:.3} gate={}",
+        sc.id,
+        sim_gate.heldout_correlation,
+        sim_gate.live_pi_correlation,
+        if sim_gate.gate_pass { "PASS" } else { "FAIL" }
+    );
+
+    let (kv_peak, kv_rejects) = match (&stack.ledger, &peak_guard) {
+        (Some(ledger), Some(guard)) => (guard.peak(), ledger.metrics().kv_admit_rejects_total),
+        (Some(ledger), None) => (
+            ledger.fleet_reserved(),
+            ledger.metrics().kv_admit_rejects_total,
+        ),
+        _ => (0, 0),
+    };
+    let transfer = stack
+        .handoffs
+        .as_ref()
+        .map(|h| h.transfer_metrics())
+        .filter(|m| m.count > 0);
+    let control = stack.router.control_metrics();
+    let min_pi = if min_pi_sampled.is_finite() {
+        Some(min_pi_sampled)
+    } else {
+        None
+    };
+    let total = total_ok + total_err;
+
+    Ok(ScenarioResult {
+        id: sc.id.clone(),
+        summary: sc.summary.clone(),
+        backends: sc.backends,
+        decode_backends: sc.decode_backends,
+        concurrency: sc.concurrency,
+        requests_per_worker: sc.requests_per_worker,
+        backend_delay_us: sc.backend_delay_us,
+        request_style: sc.request_style.clone(),
+        use_kv_pool: sc.use_kv_pool,
+        total_requests: total,
+        ok: total_ok,
+        errors: total_err,
+        errors_graceful: Some(total_graceful),
+        errors_hard: Some(total_hard),
+        duration_secs,
+        req_per_sec: if duration_secs > 0.0 {
+            total_ok as f64 / duration_secs
+        } else {
+            0.0
+        },
+        min_us: all_latencies.first().copied().unwrap_or(0),
+        p50_us: percentile(&all_latencies, 0.50),
+        p90_us: percentile(&all_latencies, 0.90),
+        p99_us: percentile(&all_latencies, 0.99),
+        max_us: all_latencies.last().copied().unwrap_or(0),
+        max_p99_ms: sc.max_p99_ms,
+        kv_bytes_reserved_peak: if sc.use_kv_pool { Some(kv_peak) } else { None },
+        kv_admit_rejects: if sc.use_kv_pool {
+            Some(kv_rejects)
+        } else {
+            None
+        },
+        handoff_transfer_count: transfer.map(|m| m.count),
+        handoff_bytes_p50: transfer.map(|m| m.bytes_p50),
+        handoff_bytes_p99: transfer.map(|m| m.bytes_p99),
+        handoff_wall_us_p50: transfer.map(|m| m.wall_us_p50),
+        handoff_wall_us_p99: transfer.map(|m| m.wall_us_p99),
+        accept_p99_us_low: None,
+        accept_p99_us_high: None,
+        accept_p99_ratio: None,
+        latencies_us: all_latencies,
+        dataplane_pi: Some(control.dataplane_pi),
+        dataplane_age_ms: Some(control.dataplane_age_ms),
+        rcu_stale: Some(control.rcu_stale),
+        pi_star: None,
+        min_dataplane_pi_sampled: min_pi,
+        fast_path_ratio: Some(control.fast_path_ratio),
+        colocated_routes: Some(control.colocated_routes),
+        disagg_routes: Some(control.disagg_routes),
+        fastpath_misroute_mean: Some(control.fastpath_misroute_mean),
+        fastpath_misroute_samples: Some(control.fastpath_misroute_samples),
+        corrector_shadow_samples: Some(control.corrector_shadow_samples),
+        fleet_windows: window_results,
+        fleet_live_pi_correlation: Some(sim_gate.live_pi_correlation),
+        fleet_sim_gate_pass: Some(sim_gate.gate_pass),
+    })
 }
 
 fn run_e2e_scenario(
@@ -772,13 +1477,10 @@ fn run_e2e_scenario(
                 for r in 0..requests_per_worker {
                     let seq =
                         seq_base + u64::from(w) * u64::from(requests_per_worker) + u64::from(r);
-                    let prefill = if request_style == "mixed_tokens"
-                        || request_style == "short_tokens"
-                        || request_style == "long_tokens"
-                    {
-                        true
-                    } else {
-                        (seq % 100) as f64 / 100.0 < prefill_fraction
+                    let prefill = match request_style.as_str() {
+                        "long_tokens" => true,
+                        "short_tokens" => false,
+                        _ => (seq % 100) as f64 / 100.0 < prefill_fraction,
                     };
                     let _slot = inflight.as_ref().map(|g| g.enter());
                     match one_request(
@@ -788,7 +1490,7 @@ fn run_e2e_scenario(
                         prefill,
                         seq,
                     ) {
-                        Ok(us) => {
+                        RequestOutcome::Ok(us) => {
                             ok.fetch_add(1, Ordering::Relaxed);
                             latencies.lock().expect("lat").push(us);
                             if let (Some(ledger), Some(peak)) = (&peak_sampler, &peak_atomic) {
@@ -796,7 +1498,7 @@ fn run_e2e_scenario(
                                 peak.fetch_max(cur, Ordering::Relaxed);
                             }
                         }
-                        Err(()) => {
+                        RequestOutcome::Graceful503 | RequestOutcome::HardError => {
                             err.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -853,6 +1555,8 @@ fn run_e2e_scenario(
         total_requests: total,
         ok: ok_n,
         errors: err_n,
+        errors_graceful: None,
+        errors_hard: None,
         duration_secs,
         req_per_sec: if duration_secs > 0.0 {
             ok_n as f64 / duration_secs
@@ -891,6 +1595,9 @@ fn run_e2e_scenario(
         fastpath_misroute_mean: Some(control.fastpath_misroute_mean),
         fastpath_misroute_samples: Some(control.fastpath_misroute_samples),
         corrector_shadow_samples: Some(control.corrector_shadow_samples),
+        fleet_windows: Vec::new(),
+        fleet_live_pi_correlation: None,
+        fleet_sim_gate_pass: None,
     })
 }
 
@@ -918,36 +1625,60 @@ pub fn load_bench(
     ci_only: bool,
     only_scenario: Option<&str>,
     stress: bool,
+    harden: bool,
+    sim: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if stress && harden {
+        return Err("load-bench: --stress and --harden are mutually exclusive".into());
+    }
+    if sim && (stress || harden || ci_only) {
+        return Err("load-bench: --sim is mutually exclusive with --stress, --harden, --ci".into());
+    }
     if only_scenario.is_none() && !ci_only {
+        if harden {
+            return load_bench_isolated(IsolatedMode::Harden);
+        }
         if stress {
             return load_bench_isolated(IsolatedMode::Stress);
         }
+        if sim {
+            return load_bench_isolated(IsolatedMode::Sim);
+        }
         return load_bench_isolated(IsolatedMode::Local);
     }
-    load_bench_inner(ci_only, only_scenario, stress)
+    load_bench_inner(ci_only, only_scenario, stress, harden, sim)
 }
 
 enum IsolatedMode {
     Local,
     Stress,
+    Harden,
+    Sim,
 }
 
 fn load_bench_isolated(mode: IsolatedMode) -> Result<(), Box<dyn std::error::Error>> {
     let file: LoadBenchFile = toml::from_str(&fs::read_to_string(LOAD_BENCH)?)?;
     let stress_run = matches!(mode, IsolatedMode::Stress);
+    let harden_run = matches!(mode, IsolatedMode::Harden);
+    let sim_run = matches!(mode, IsolatedMode::Sim);
     let ids: Vec<String> = file
         .scenario
         .iter()
         .filter(|s| match mode {
-            IsolatedMode::Local => !s.stress,
+            IsolatedMode::Local => !s.stress && !s.harden && !s.sim,
             IsolatedMode::Stress => s.stress,
+            IsolatedMode::Harden => s.harden && !s.stress,
+            IsolatedMode::Sim => s.sim,
         })
         .map(|s| s.id.clone())
         .collect();
     if ids.is_empty() {
         return Err(if stress_run {
             "no scenarios with stress=true in load-bench.toml".into()
+        } else if harden_run {
+            "no scenarios with harden=true in load-bench.toml".into()
+        } else if sim_run {
+            "no scenarios with sim=true in load-bench.toml".into()
         } else {
             "no scenarios in load-bench.toml".into()
         });
@@ -968,6 +1699,9 @@ fn load_bench_isolated(mode: IsolatedMode) -> Result<(), Box<dyn std::error::Err
             if let Some(reason) = scenario_skip_reason(sc) {
                 if sc.optional {
                     eprintln!("load-bench: {id} SKIP (optional) — {reason}");
+                    if harden_run {
+                        eprintln!("HARDEN_REPORT tier=4 id={id} status=SKIP detail={reason}");
+                    }
                     continue;
                 }
             }
@@ -987,6 +1721,10 @@ fn load_bench_isolated(mode: IsolatedMode) -> Result<(), Box<dyn std::error::Err
             .args(["load-bench", "--scenario", id]);
         if stress_run {
             cmd.arg("--stress");
+        } else if harden_run {
+            cmd.arg("--harden");
+        } else if sim_run {
+            cmd.arg("--sim");
         }
         let status = cmd.status()?;
         if !status.success() {
@@ -1017,6 +1755,10 @@ fn load_bench_isolated(mode: IsolatedMode) -> Result<(), Box<dyn std::error::Err
     };
     let report_name = if stress_run {
         "stress.json"
+    } else if harden_run {
+        "harden.json"
+    } else if sim_run {
+        "sim.json"
     } else {
         "latest.json"
     };
@@ -1039,6 +1781,8 @@ fn load_bench_inner(
     ci_only: bool,
     only_scenario: Option<&str>,
     stress: bool,
+    harden: bool,
+    sim: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file: LoadBenchFile = toml::from_str(&fs::read_to_string(LOAD_BENCH)?)?;
 
@@ -1047,6 +1791,15 @@ fn load_bench_inner(
         .iter()
         .filter(|s| {
             if ci_only && !s.ci {
+                return false;
+            }
+            if stress && !s.stress {
+                return false;
+            }
+            if harden && (!s.harden || s.stress) {
+                return false;
+            }
+            if sim && !s.sim {
                 return false;
             }
             if let Some(want) = only_scenario {
@@ -1073,13 +1826,19 @@ fn load_bench_inner(
     if stress {
         eprintln!("load-bench: STRESS — zero errors required; all soft gates enforced");
     }
+    if sim {
+        eprintln!("load-bench: 'sim — trace-driven fleet replay; strict gates enforced");
+    }
 
     for sc in selected {
         let strict = ci_only
             || file.settings.gate_strict
             || stress
+            || harden
+            || sim
             || sc.rebalancer_actuation
-            || sc.isolate_recovery;
+            || sc.isolate_recovery
+            || sc.sim;
         if sc.isolate_recovery && only_scenario.is_some() {
             eprintln!(
                 "load-bench: strict gates — zero errors required for {}",
@@ -1090,6 +1849,12 @@ fn load_bench_inner(
         if let Some(reason) = scenario_skip_reason(sc) {
             if sc.optional {
                 eprintln!("load-bench: {} SKIP (optional) — {reason}", sc.id);
+                if sc.harden {
+                    eprintln!(
+                        "HARDEN_REPORT tier=4 id={} status=SKIP detail={reason}",
+                        sc.id
+                    );
+                }
                 if only_scenario.is_some() {
                     eprintln!("load-bench: done — skipped optional scenario {}", sc.id);
                     return Ok(());
@@ -1104,7 +1869,31 @@ fn load_bench_inner(
         }
         let result = run_scenario(sc, file.settings.warmup_requests)?;
         let failures_before = gate_failures;
-        if result.errors > 0 {
+        let hard_errors = result.errors_hard.unwrap_or(result.errors);
+        let graceful_errors = result.errors_graceful.unwrap_or(0);
+        if let Some(max_hard) = sc.max_hard_errors {
+            if hard_errors > max_hard {
+                eprintln!(
+                    "load-bench: {} FAIL — {hard_errors} hard errors (cap {max_hard})",
+                    result.id
+                );
+                gate_failures += 1;
+            } else if graceful_errors > 0
+                && sc.max_kv_admit_rejects.is_none()
+                && sc.min_errors.is_none()
+            {
+                eprintln!(
+                    "load-bench: {} FAIL — {graceful_errors} graceful 503 (zero required)",
+                    result.id
+                );
+                gate_failures += 1;
+            } else if result.errors > 0 {
+                eprintln!(
+                    "load-bench: {} errors — {graceful_errors} graceful 503 / {hard_errors} hard",
+                    result.id
+                );
+            }
+        } else if result.errors > 0 {
             let rejects = result.kv_admit_rejects.unwrap_or(0);
             if let Some(cap) = sc.max_kv_admit_rejects {
                 if result.errors <= cap && rejects <= cap {
@@ -1239,6 +2028,118 @@ fn load_bench_inner(
                 }
             }
         }
+        if let Some(limit) = sc.max_p99_tail_ratio {
+            if result.p99_us > 0 {
+                let ratio = result.max_us as f64 / result.p99_us as f64;
+                if ratio > limit {
+                    eprintln!(
+                        "load-bench: {} FAIL — tail ratio {ratio:.2} > {limit:.1} (max {}µs / p99 {}µs)",
+                        result.id, result.max_us, result.p99_us
+                    );
+                    gate_failures += 1;
+                } else {
+                    eprintln!(
+                        "load-bench: {} tail gate OK — max/p99 {ratio:.2} ≤ {limit:.1}",
+                        result.id
+                    );
+                }
+            }
+        }
+        if let Some(limit) = sc.max_misroute_mean {
+            if let Some(m) = result.fastpath_misroute_mean {
+                if m > limit {
+                    eprintln!(
+                        "load-bench: {} FAIL — misroute_mean {m:.3} > {limit:.3}",
+                        result.id
+                    );
+                    gate_failures += 1;
+                } else {
+                    eprintln!(
+                        "load-bench: {} misroute OK — mean {m:.3} ≤ {limit:.3}",
+                        result.id
+                    );
+                }
+            }
+        }
+        if let Some(min_rejects) = sc.min_kv_admit_rejects {
+            let rejects = result.kv_admit_rejects.unwrap_or(0);
+            if rejects < min_rejects {
+                eprintln!(
+                    "load-bench: {} FAIL — kv rejects {rejects} < min {min_rejects}",
+                    result.id
+                );
+                gate_failures += 1;
+            } else {
+                eprintln!(
+                    "load-bench: {} KV exhaust OK — rejects {rejects} ≥ {min_rejects}",
+                    result.id
+                );
+            }
+        }
+        if let Some(min_err) = sc.min_errors {
+            if result.errors < min_err {
+                eprintln!(
+                    "load-bench: {} FAIL — errors {} < min {min_err}",
+                    result.id, result.errors
+                );
+                gate_failures += 1;
+            } else {
+                eprintln!(
+                    "load-bench: {} admit shed OK — errors {} ≥ {min_err}",
+                    result.id, result.errors
+                );
+            }
+        }
+        if sc.min_fleet_correlation.is_some() || result.fleet_sim_gate_pass.is_some() {
+            if result.fleet_sim_gate_pass == Some(true) {
+                eprintln!(
+                    "'sim: {} fleet gate OK — live_pi_corr {:.3}",
+                    result.id,
+                    result.fleet_live_pi_correlation.unwrap_or(0.0)
+                );
+            } else {
+                eprintln!(
+                    "'sim: {} FAIL — fleet replay gate (live_pi_corr {:.3})",
+                    result.id,
+                    result.fleet_live_pi_correlation.unwrap_or(0.0)
+                );
+                gate_failures += 1;
+            }
+        }
+        if (sc.harden || sc.stress || sc.sim) && gate_failures == failures_before {
+            let detail = if sc.min_kv_admit_rejects.is_some() || sc.min_errors.is_some() {
+                format!(
+                    "graceful_rejects={}/{} kv_rejects={}",
+                    result.errors,
+                    result.total_requests,
+                    result.kv_admit_rejects.unwrap_or(0)
+                )
+            } else if result.errors_graceful.is_some() {
+                format!(
+                    "ok={}/{} p99={}us errs={} (503={} hard={})",
+                    result.ok,
+                    result.total_requests,
+                    result.p99_us,
+                    result.errors,
+                    result.errors_graceful.unwrap_or(0),
+                    result.errors_hard.unwrap_or(0),
+                )
+            } else {
+                format!(
+                    "ok={}/{} p99={}us max={}us errs={}",
+                    result.ok, result.total_requests, result.p99_us, result.max_us, result.errors
+                )
+            };
+            eprintln!(
+                "HARDEN_REPORT tier=4 id={} status=PASS detail={detail}",
+                result.id
+            );
+        } else if (sc.harden || sc.stress) && gate_failures > failures_before {
+            eprintln!(
+                "HARDEN_REPORT tier=4 id={} status=FAIL detail=gate_miss errs={}",
+                result.id, result.errors
+            );
+        }
         scenarios.push(result);
         if strict && gate_failures > failures_before {
             strict_failures += gate_failures - failures_before;
@@ -1280,11 +2181,19 @@ fn load_bench_inner(
     }
 }
 
-pub fn load_report(stress: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn load_report(
+    stress: bool,
+    harden: bool,
+    sim: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let file: LoadBenchFile = toml::from_str(&fs::read_to_string(LOAD_BENCH)?)?;
     let dir = PathBuf::from(&file.settings.report_dir);
     let (json_path, pseudo_path) = if stress {
         (dir.join("stress.json"), dir.join("stress.pseudo"))
+    } else if harden {
+        (dir.join("harden.json"), dir.join("harden.pseudo"))
+    } else if sim {
+        (dir.join("sim.json"), dir.join("sim.pseudo"))
     } else {
         report_paths(&file.settings.report_dir)
     };
@@ -1299,7 +2208,8 @@ pub fn load_report(stress: bool) -> Result<(), Box<dyn std::error::Error>> {
 
     let raw = fs::read_to_string(&json_path)?;
     let report: LoadBenchReport = serde_json::from_str(&raw)?;
-    let pseudo = crate::pseudo_report::render(&report);
+    let gate_configs = gate_configs_by_id()?;
+    let pseudo = crate::pseudo_report::render(&report, &gate_configs, sim);
 
     if let Some(parent) = pseudo_path.parent() {
         fs::create_dir_all(parent)?;
@@ -1351,4 +2261,28 @@ fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "local".into())
+}
+
+#[cfg(test)]
+mod request_outcome_tests {
+    use super::{parse_http_status, RequestOutcome};
+
+    #[test]
+    fn parse_http_status_codes() {
+        assert_eq!(
+            parse_http_status(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"),
+            Some(200)
+        );
+        assert_eq!(
+            parse_http_status(b"HTTP/1.1 503 Service Unavailable\r\n\r\n"),
+            Some(503)
+        );
+        assert_eq!(parse_http_status(b"HTTP/1.0 200 OK\r\n"), None);
+    }
+
+    #[test]
+    fn request_outcome_variants_distinct() {
+        assert_ne!(RequestOutcome::Graceful503, RequestOutcome::HardError);
+        assert_ne!(RequestOutcome::Ok(1), RequestOutcome::Graceful503);
+    }
 }

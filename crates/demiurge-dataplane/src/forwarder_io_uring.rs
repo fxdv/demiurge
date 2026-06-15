@@ -102,9 +102,6 @@ impl IoUringProxySession {
                 return Err(io::Error::from_raw_os_error(-w));
             }
             total += n as u64;
-            if n < chunk {
-                break;
-            }
         }
         Ok(total)
     }

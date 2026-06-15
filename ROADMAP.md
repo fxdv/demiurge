@@ -19,6 +19,8 @@ deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 | `cargo xtask bench-probe` | Extended sampling (floor/median/p95), thin-gate flags, hot-path stack. |
 | `spec/generated/conformance_matrix.tex` | Generated snapshot of requirement status (never hand-edited). |
 | `./scripts/gate.sh` | Local mirror of CI; must pass before every merge. |
+| `./scripts/verify.sh` | Unified entry: gate, harden (Tiers 1–4), load, stress, **'sim**, track-a/b. |
+| `./scripts/apostrophe-sim.sh` | **'sim** fleet simulation — trace → live TCP load (`DEMI-FLEET-SIM`). |
 | `./scripts/track-a-verify.sh` | Optional Track A total verification — metrics + soft spots (~5 min). |
 
 **Rules of the road**
@@ -679,6 +681,8 @@ Pre-release: `./scripts/pre-release.sh` (gate + full load + stress).
 | Item | Goal | Gate | Status |
 |------|------|------|--------|
 | Fleet pilot (shadow) | Replay production trace; `π*` vs prefill-heavy windows | `cargo xtask fleet-pilot` held-out corr ≥ 0.45 | **done** |
+| **'sim** fleet simulation | Trace windows → live load; mock pf/dc fleet; L1/L2 gates | `./scripts/apostrophe-sim.sh` · `DEMI-FLEET-SIM` | **done** |
+| Die-hard verify | Tiers 1–4 hardening + observable pseudo report | `./scripts/verify.sh harden` | **done** |
 | Corrector shadow | Log `(features, analytic_cost, observed_latency)`; train bounded δ | shadow log + offline train/eval in `fleet-pilot` | **done** |
 | RDMA trait | `HandoffTransport` + mock RDMA; TCP default on Mac | `mock_rdma_*` tests | **done** |
 | Fast-path telemetry | `fast_path_ratio` + near-threshold mis-route regret | `ControlMetrics` + `track_a` tests | **done** |

@@ -1,10 +1,13 @@
 //! Pseudo-graphical ASCII report for load-bench results.
 
+use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 
-use crate::load_bench::LoadBenchReport;
+use crate::load_bench::{
+    evaluate_scenario_gates, GateVerdict, LoadBenchReport, ScenarioGateConfig,
+};
 
-const W: usize = 72;
+const W: usize = 96;
 
 fn pad_line(inner: &str) -> String {
     let max_len = W - 4;
@@ -27,7 +30,7 @@ fn bar(f: &mut String, label: &str, value: f64, max: f64, width: usize) {
     let empty = width - filled;
     let _ = write!(
         f,
-        "{label:<14} {}{} {:>6.0}",
+        "{label:<16} {}{} {:>6.0}",
         "█".repeat(filled),
         "░".repeat(empty),
         value
@@ -48,11 +51,11 @@ fn histogram(f: &mut String, latencies_us: &[u64], buckets: usize) {
         counts[b.min(buckets - 1)] += 1;
     }
     let peak = *counts.iter().max().unwrap_or(&1).max(&1);
-    let bar_w = 18usize;
+    let bar_w = 32usize;
     for (i, &c) in counts.iter().enumerate() {
         let lo = min + span * i as u64 / buckets as u64;
         let hi = min + span * (i + 1) as u64 / buckets as u64;
-        let label = format!("{:>4}-{:>4}µs", lo, hi);
+        let label = format!("{:>5}-{:>5}µs", lo, hi);
         bar(f, &label, c as f64, peak as f64, bar_w);
     }
 }
@@ -61,15 +64,62 @@ fn fmt_ms(us: u64) -> String {
     format!("{:.2}", us as f64 / 1000.0)
 }
 
-pub fn render(report: &LoadBenchReport) -> String {
-    let mut out = String::new();
+fn gate_status(pass: bool) -> &'static str {
+    if pass {
+        "PASS ✓"
+    } else {
+        "FAIL ✗"
+    }
+}
 
-    let _ = writeln!(out, "╔{}╗", "═".repeat(W - 2));
+fn write_gates(out: &mut String, gates: &[GateVerdict]) {
+    if gates.is_empty() {
+        return;
+    }
+    let passed = gates.iter().filter(|g| g.pass).count();
+    let all_pass = passed == gates.len();
+    let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+    let _ = writeln!(out, "{}", pad_line("GATES (strict + soft)"));
+    for gate in gates {
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(&format!(
+                "  {:<18} → {}  {}",
+                gate.name,
+                gate_status(gate.pass),
+                gate.detail
+            ))
+        );
+    }
     let _ = writeln!(
         out,
         "{}",
-        pad_line("DEMIURGE · LOCAL LOAD BENCH · PSEUDO REPORT")
+        pad_line(&format!(
+            "  scenario summary .... → {}  ({passed}/{} gates)",
+            gate_status(all_pass),
+            gates.len()
+        ))
     );
+}
+
+pub fn render(
+    report: &LoadBenchReport,
+    gate_configs: &HashMap<String, ScenarioGateConfig>,
+    sim_brand: bool,
+) -> String {
+    let mut out = String::new();
+    let mut suite_gates = 0usize;
+    let mut suite_pass = 0usize;
+    let mut scenario_fail = 0usize;
+
+    let _ = writeln!(out, "╔{}╗", "═".repeat(W - 2));
+    let title = if sim_brand {
+        "DEMIURGE · 'sim · FLEET SIMULATION · PSEUDO REPORT"
+    } else {
+        "DEMIURGE · LOCAL LOAD BENCH · PSEUDO REPORT"
+    };
+    let _ = writeln!(out, "{}", pad_line(title));
     let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
     let _ = writeln!(
         out,
@@ -117,6 +167,17 @@ pub fn render(report: &LoadBenchReport) -> String {
                 s.ok, s.errors
             ))
         );
+        if s.errors_graceful.is_some() || s.errors_hard.is_some() {
+            let _ = writeln!(
+                out,
+                "{}",
+                pad_line(&format!(
+                    "  503 / hard ......... {:>8} / {}",
+                    s.errors_graceful.unwrap_or(0),
+                    s.errors_hard.unwrap_or(0),
+                ))
+            );
+        }
         let _ = writeln!(
             out,
             "{}",
@@ -213,24 +274,77 @@ pub fn render(report: &LoadBenchReport) -> String {
                 ))
             );
         }
-        if let Some(limit) = s.max_p99_ms {
-            let gate = if s.ok == 0 {
-                "FAIL ✗ (no ok)"
-            } else if s.p99_us as f64 / 1000.0 <= limit {
-                "PASS ✓"
-            } else {
-                "FAIL ✗"
-            };
+        if let Some(pi) = s.dataplane_pi {
             let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+            let _ = writeln!(out, "{}", pad_line("DATAPLANE"));
             let _ = writeln!(
                 out,
                 "{}",
                 pad_line(&format!(
-                    "soft gate p99 ≤ {limit:.1}ms → {gate} ({:.2}ms)",
-                    s.p99_us as f64 / 1000.0
+                    "  π / π* / age ......... {:>5.3} / {:.3} / {}ms",
+                    pi,
+                    s.pi_star.unwrap_or(0.0),
+                    s.dataplane_age_ms.unwrap_or(0)
                 ))
             );
         }
+        if !s.fleet_windows.is_empty() {
+            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+            let _ = writeln!(out, "{}", pad_line("'sim FLEET WINDOWS (live replay)"));
+            let _ = writeln!(
+                out,
+                "{}",
+                pad_line("  ts(ms)  heavy  ok  503  hard  p99(ms)  π_live  π*_shadow")
+            );
+            for w in &s.fleet_windows {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    pad_line(&format!(
+                        "  {:>7}  {:>5}  {:>3}  {:>3}  {:>4}  {:>7}  {:>6.3}  {:>6.3}",
+                        w.ts_ms,
+                        if w.prefill_heavy { "yes" } else { "no" },
+                        w.ok,
+                        w.errors_graceful,
+                        w.errors_hard,
+                        w.p99_us as f64 / 1000.0,
+                        w.dataplane_pi,
+                        w.pi_star,
+                    ))
+                );
+            }
+            if let Some(corr) = s.fleet_live_pi_correlation {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    pad_line(&format!("  held-out live π corr .. {:>6.3}", corr))
+                );
+            }
+        }
+        if let Some(cfg) = gate_configs.get(&s.id) {
+            let gates = evaluate_scenario_gates(cfg, s);
+            suite_gates += gates.len();
+            suite_pass += gates.iter().filter(|g| g.pass).count();
+            if !gates.is_empty() && gates.iter().any(|g| !g.pass) {
+                scenario_fail += 1;
+            }
+            write_gates(&mut out, &gates);
+        }
+    }
+
+    if suite_gates > 0 {
+        let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
+        let suite_ok = scenario_fail == 0;
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(&format!(
+                "SUITE GATES → {}  {suite_pass}/{suite_gates} gates · {}/{} scenarios",
+                gate_status(suite_ok),
+                report.scenarios.len() - scenario_fail,
+                report.scenarios.len()
+            ))
+        );
     }
 
     let _ = writeln!(out, "╚{}╝", "═".repeat(W - 2));

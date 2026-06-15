@@ -20,3 +20,6 @@ demiurge-control = { path = "../demiurge-control" }
 demiurge-dataplane = { path = "../demiurge-dataplane" }
 demiurge-handoff = { path = "../demiurge-handoff" }
 demiurge-state = { path = "../demiurge-state" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -9,3 +9,8 @@ description = "KV reservation ledger, pairing, and pool rebalancing for Demiurge
 [dependencies]
 demiurge-cost = { path = "../demiurge-cost" }
 demiurge-state = { path = "../demiurge-state" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"
