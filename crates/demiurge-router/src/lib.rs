@@ -25,7 +25,7 @@ use demiurge_cost::{
     DATAPLANE_ADMIT_BURST, DATAPLANE_RCU_HEARTBEAT_MS, DATAPLANE_RCU_STALE_ALERT_MS,
     POOL_ACTUATION_ENABLED,
 };
-use demiurge_dataplane::{AdmitBucket, DataPlaneSnapshot};
+use demiurge_dataplane::{admit_capacity_for_pi, AdmitBucket, DataPlaneSnapshot};
 use demiurge_handoff::{
     parse_prefill_handoff, HandoffRegistry, HandoffTransport, HeaderPassthroughTransport,
 };
@@ -33,8 +33,8 @@ use demiurge_state::default_routing_blocks;
 
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
 pub use demiurge_dataplane::{
-    pool_core_scale, DataPlaneSnapshot as RcuDataPlaneSnapshot, ForwardDecision, IoUringForwarder,
-    RcuRoutingTable,
+    pool_core_scale, AdmitMode, DataPlaneSnapshot as RcuDataPlaneSnapshot, ForwardDecision,
+    IoUringForwarder, RcuRoutingTable, XdpAdmitShed, XdpAttachError,
 };
 pub use demiurge_handoff::{
     HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
@@ -404,6 +404,10 @@ pub struct Router {
     control: Arc<Mutex<ControlPlane>>,
     dataplane: Arc<RcuRoutingTable>,
     admit: Arc<AdmitBucket>,
+    admit_mode: AdmitMode,
+    kernel_admit: Arc<Mutex<Option<XdpAdmitShed>>>,
+    last_admit_capacity: AtomicU64,
+    io_uring: Option<IoUringForwarder>,
     rebalancer_actuation: bool,
     colocated_routes: AtomicU64,
     disagg_routes: AtomicU64,
@@ -422,6 +426,10 @@ impl Clone for Router {
             control: Arc::clone(&self.control),
             dataplane: Arc::clone(&self.dataplane),
             admit: Arc::clone(&self.admit),
+            admit_mode: self.admit_mode,
+            kernel_admit: Arc::clone(&self.kernel_admit),
+            last_admit_capacity: AtomicU64::new(self.last_admit_capacity.load(Ordering::Relaxed)),
+            io_uring: self.io_uring.clone(),
             rebalancer_actuation: self.rebalancer_actuation,
             colocated_routes: AtomicU64::new(self.colocated_routes.load(Ordering::Relaxed)),
             disagg_routes: AtomicU64::new(self.disagg_routes.load(Ordering::Relaxed)),
@@ -487,6 +495,7 @@ impl Router {
     }
 
     pub fn new(prefill: Vec<Arc<Backend>>, decode: Vec<Arc<Backend>>) -> Self {
+        let dataplane = RcuRoutingTable::new(0.5);
         Self {
             prefill,
             decode,
@@ -495,12 +504,24 @@ impl Router {
             bytes_per_token: 128,
             state: None,
             control: Self::fresh_control(),
-            dataplane: RcuRoutingTable::new(0.5),
+            dataplane: Arc::clone(&dataplane),
             admit: Arc::new(AdmitBucket::new(DATAPLANE_ADMIT_BURST)),
+            admit_mode: AdmitMode::from_env(),
+            kernel_admit: Arc::new(Mutex::new(None)),
+            last_admit_capacity: AtomicU64::new(DATAPLANE_ADMIT_BURST),
+            io_uring: Self::io_uring_from_env(&dataplane),
             rebalancer_actuation: rebalancer_actuation_enabled(),
             colocated_routes: AtomicU64::new(0),
             disagg_routes: AtomicU64::new(0),
             handoff_transport: None,
+        }
+    }
+
+    fn io_uring_from_env(dataplane: &Arc<RcuRoutingTable>) -> Option<IoUringForwarder> {
+        if IoUringForwarder::io_uring_enabled_from_env() {
+            Some(IoUringForwarder::from_router_dataplane(dataplane))
+        } else {
+            None
         }
     }
 
@@ -517,6 +538,7 @@ impl Router {
     ) -> (Self, Arc<ReservationLedger>, Arc<HandoffRegistry>) {
         let ledger = ReservationLedger::new(decode_capacity_bytes);
         let handoffs = HandoffRegistry::new();
+        let dataplane = RcuRoutingTable::new(0.5);
         let router = Self {
             prefill,
             decode,
@@ -525,8 +547,12 @@ impl Router {
             bytes_per_token,
             state: None,
             control: Self::fresh_control(),
-            dataplane: RcuRoutingTable::new(0.5),
+            dataplane: Arc::clone(&dataplane),
             admit: Arc::new(AdmitBucket::new(DATAPLANE_ADMIT_BURST)),
+            admit_mode: AdmitMode::from_env(),
+            kernel_admit: Arc::new(Mutex::new(None)),
+            last_admit_capacity: AtomicU64::new(DATAPLANE_ADMIT_BURST),
+            io_uring: Self::io_uring_from_env(&dataplane),
             rebalancer_actuation: rebalancer_actuation_enabled(),
             colocated_routes: AtomicU64::new(0),
             disagg_routes: AtomicU64::new(0),
@@ -552,6 +578,75 @@ impl Router {
     pub fn with_handoff_transport(mut self, transport: Arc<dyn HandoffTransport>) -> Self {
         self.handoff_transport = Some(transport);
         self
+    }
+
+    pub fn with_admit_mode(mut self, mode: AdmitMode) -> Self {
+        self.admit_mode = mode;
+        self
+    }
+
+    /// Attach kernel XDP admit-shed on `iface` (Linux + built BPF object).
+    pub fn with_kernel_admit(mut self, iface: &str) -> Result<Self, XdpAttachError> {
+        if !self.admit_mode.wants_kernel() {
+            self.admit_mode = AdmitMode::Hybrid;
+        }
+        let cap = admit_capacity_for_pi(DATAPLANE_ADMIT_BURST, self.dataplane.read_pi());
+        let shed = XdpAdmitShed::attach(iface, cap)?;
+        *self.kernel_admit.lock().expect("kernel admit") = Some(shed);
+        self.sync_admit_capacity(cap);
+        Ok(self)
+    }
+
+    pub fn with_io_uring(mut self, enabled: bool) -> Self {
+        self.io_uring = if enabled {
+            Some(IoUringForwarder::from_router_dataplane(&self.dataplane))
+        } else {
+            None
+        };
+        self
+    }
+
+    pub fn admit_mode(&self) -> AdmitMode {
+        self.admit_mode
+    }
+
+    pub fn kernel_admit_attached(&self) -> bool {
+        self.kernel_admit.lock().expect("kernel admit").is_some()
+    }
+
+    pub fn io_uring_enabled(&self) -> bool {
+        self.io_uring.is_some()
+    }
+
+    pub fn sync_admit_capacity(&self, capacity: u64) {
+        let cap = capacity.max(1);
+        self.admit.reseed(cap);
+        if let Ok(mut guard) = self.kernel_admit.lock() {
+            if let Some(shed) = guard.as_mut() {
+                let _ = shed.reseed(cap);
+            }
+        }
+    }
+
+    fn maybe_sync_admit_for_pi(&self, pi: f64) {
+        let cap = admit_capacity_for_pi(DATAPLANE_ADMIT_BURST, pi);
+        let prev = self.last_admit_capacity.load(Ordering::Relaxed);
+        if cap != prev {
+            self.last_admit_capacity.store(cap, Ordering::Relaxed);
+            self.sync_admit_capacity(cap);
+        }
+    }
+
+    fn total_admit_shed(&self) -> u64 {
+        let userspace = self.admit.shed_total();
+        let kernel = self
+            .kernel_admit
+            .lock()
+            .expect("kernel admit")
+            .as_ref()
+            .and_then(|s| s.shed_total().ok())
+            .unwrap_or(0);
+        userspace.saturating_add(kernel)
     }
 
     pub fn rebalancer_actuation(&self) -> bool {
@@ -620,7 +715,7 @@ impl Router {
             dataplane_age_ms: self.dataplane.age_ms(),
             rcu_stale: self.dataplane.is_stale(DATAPLANE_RCU_STALE_ALERT_MS),
             rcu_stale_alert_ms: DATAPLANE_RCU_STALE_ALERT_MS,
-            admit_shed_total: self.admit.shed_total(),
+            admit_shed_total: self.total_admit_shed(),
             fast_path_ratio,
             colocated_routes: colocated,
             disagg_routes: disagg,
@@ -699,15 +794,20 @@ impl Router {
                     new_pi,
                 ));
             }
+            self.maybe_sync_admit_for_pi(cp.rebalancer.pi());
         } else {
             let _ = cp.rebalancer.maybe_update(&signals);
         }
 
         if self.dataplane.age_ms() >= DATAPLANE_RCU_HEARTBEAT_MS {
+            let pi = cp.rebalancer.pi();
             self.dataplane.publish(DataPlaneSnapshot::new(
                 self.dataplane.generation().saturating_add(1),
-                cp.rebalancer.pi(),
+                pi,
             ));
+            if self.rebalancer_actuation || self.kernel_admit_attached() {
+                self.maybe_sync_admit_for_pi(pi);
+            }
         }
 
         if sample_regret {
@@ -1172,12 +1272,37 @@ impl Drop for AdmitGuard {
     }
 }
 
-fn proxy_to_backend(client: &mut TcpStream, head: &[u8], backend: &Backend) -> io::Result<()> {
+fn proxy_to_backend(
+    client: &mut TcpStream,
+    head: &[u8],
+    backend: &Backend,
+    io_uring: Option<&IoUringForwarder>,
+) -> io::Result<()> {
     backend.incr_inflight();
     let _guard = InflightGuard(backend);
 
     let mut upstream = TcpStream::connect(backend.addr)?;
     upstream.write_all(head)?;
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = io_uring;
+
+    #[cfg(target_os = "linux")]
+    if let Some(fwd) = io_uring {
+        use std::os::fd::AsRawFd;
+        let up_read = upstream.try_clone()?;
+        let client_write = client.try_clone()?;
+        let fwd_up = fwd.clone();
+        let pump = thread::spawn(move || {
+            let _ = fwd_up.copy_between(up_read.as_raw_fd(), client_write.as_raw_fd(), 256 * 1024);
+            let _ = client_write.shutdown(Shutdown::Write);
+        });
+        let client_read = client.try_clone()?;
+        let _ = fwd.copy_between(client_read.as_raw_fd(), upstream.as_raw_fd(), 256 * 1024);
+        let _ = upstream.shutdown(Shutdown::Write);
+        let _ = pump.join();
+        return Ok(());
+    }
 
     let mut up_read = upstream.try_clone()?;
     let mut client_write = client.try_clone()?;
@@ -1233,7 +1358,8 @@ fn handle_disaggregated(
         }
     };
 
-    let result = proxy_to_backend(&mut client, &head, placement.backend.as_ref());
+    let io_uring = router.io_uring.as_ref();
+    let result = proxy_to_backend(&mut client, &head, placement.backend.as_ref(), io_uring);
     drop(placement.reservation);
     result
 }
@@ -1246,20 +1372,27 @@ fn rebalancer_actuation_enabled() -> bool {
 }
 
 fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
-    if router.admit.try_admit().is_err() {
+    let kernel_attached = router.kernel_admit_attached();
+    if router.admit_mode.uses_userspace_admit(kernel_attached) && router.admit.try_admit().is_err()
+    {
         let mut client = client;
         let _ = client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
         return Ok(());
     }
-    let _admit_guard = AdmitGuard(Arc::clone(&router.admit));
+    let _admit_guard = if router.admit_mode.uses_userspace_admit(kernel_attached) {
+        Some(AdmitGuard(Arc::clone(&router.admit)))
+    } else {
+        None
+    };
 
+    let io_uring = router.io_uring.as_ref();
     let mut client = client;
     let head = read_head(&mut client)?;
     std::hint::black_box(router.dataplane_pi());
 
     match route(&router, &head) {
         Ok(RoutePath::Colocated(b) | RoutePath::DecodeOnly(b)) => {
-            proxy_to_backend(&mut client, &head, b.as_ref())
+            proxy_to_backend(&mut client, &head, b.as_ref(), io_uring)
         }
         Ok(RoutePath::Disaggregated {
             prefill,

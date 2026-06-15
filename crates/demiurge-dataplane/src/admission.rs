@@ -22,7 +22,7 @@ impl std::error::Error for ShedReason {}
 #[derive(Debug)]
 pub struct AdmitBucket {
     tokens: AtomicU64,
-    capacity: u64,
+    capacity: AtomicU64,
     shed_total: AtomicU64,
 }
 
@@ -31,13 +31,13 @@ impl AdmitBucket {
         let cap = capacity.max(1);
         Self {
             tokens: AtomicU64::new(cap),
-            capacity: cap,
+            capacity: AtomicU64::new(cap),
             shed_total: AtomicU64::new(0),
         }
     }
 
     pub fn capacity(&self) -> u64 {
-        self.capacity
+        self.capacity.load(Ordering::Relaxed)
     }
 
     pub fn available(&self) -> u64 {
@@ -73,7 +73,8 @@ impl AdmitBucket {
         }
         loop {
             let cur = self.tokens.load(Ordering::Relaxed);
-            let next = (cur + count).min(self.capacity);
+            let cap = self.capacity.load(Ordering::Relaxed);
+            let next = (cur + count).min(cap);
             if self
                 .tokens
                 .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Relaxed)
@@ -82,5 +83,12 @@ impl AdmitBucket {
                 return;
             }
         }
+    }
+
+    /// Reset tokens to `capacity` and update capacity (control-plane / XDP map sync).
+    pub fn reseed(&self, capacity: u64) {
+        let cap = capacity.max(1);
+        self.capacity.store(cap, Ordering::Relaxed);
+        self.tokens.store(cap, Ordering::Relaxed);
     }
 }

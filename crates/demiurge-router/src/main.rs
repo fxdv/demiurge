@@ -1,14 +1,18 @@
 //! `demiurge-router` binary: a minimal phase-aware, cost-based forwarder.
 //!
 //! Configuration via environment:
-//!   DEMIURGE_LISTEN   listen address           (default 127.0.0.1:8080)
-//!   DEMIURGE_PREFILL  prefill pool spec         label@host:port@seconds,...
-//!   DEMIURGE_DECODE   decode pool spec          label@host:port@seconds,...
+//!   DEMIURGE_LISTEN        listen address           (default 127.0.0.1:8080)
+//!   DEMIURGE_PREFILL       prefill pool spec         label@host:port@seconds,...
+//!   DEMIURGE_DECODE        decode pool spec          label@host:port@seconds,...
+//!   DEMIURGE_ADMIT_MODE    userspace | xdp | hybrid  (default userspace)
+//!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux)
+//!   DEMIURGE_IOURING       1 to proxy via io_uring copy (Linux)
 
 use std::net::TcpListener;
 use std::process::exit;
 use std::sync::Arc;
 
+use demiurge_dataplane::AdmitMode;
 use demiurge_router::{parse_pool, serve, Router};
 
 fn main() {
@@ -31,11 +35,22 @@ fn run() -> Result<(), String> {
     }
 
     let listener = TcpListener::bind(&listen).map_err(|e| format!("bind {listen}: {e}"))?;
+
+    let admit_mode = AdmitMode::from_env();
+    let mut router = Router::new(prefill.clone(), decode.clone()).with_admit_mode(admit_mode);
+    if let Ok(iface) = std::env::var("DEMIURGE_XDP_IFACE") {
+        router = router
+            .with_kernel_admit(&iface)
+            .map_err(|e| format!("XDP attach on {iface}: {e}"))?;
+    }
+
     eprintln!(
-        "demiurge-router listening on {listen} (prefill={}, decode={})",
+        "demiurge-router listening on {listen} (prefill={}, decode={}, admit={admit_mode:?}, xdp={}, io_uring={})",
         prefill.len(),
-        decode.len()
+        decode.len(),
+        router.kernel_admit_attached(),
+        router.io_uring_enabled(),
     );
-    let router = Arc::new(Router::new(prefill, decode));
+    let router = Arc::new(router);
     serve(listener, router).map_err(|e| e.to_string())
 }

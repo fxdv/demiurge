@@ -1,3 +1,5 @@
 [toolchain]
+# Cargo.lock version 4 — do not use rustc older than this on host or Track B VM.
 channel = "stable"
 components = ["rustfmt", "clippy"]
+# Minimum enforced by scripts/ensure-rust-toolchain.sh (DEMIURGE_MIN_RUST_VERSION).

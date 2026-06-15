@@ -7,12 +7,15 @@
 \usepackage{algpseudocode}
 \usepackage{enumitem}
 \usepackage[hidelinks]{hyperref}
+\usepackage{longtable}
 \input{preamble-req.tex}
 
 \newcommand{\intent}[1]{\textit{Design intent (not yet implemented):} #1}
+\newcommand{\proof}[1]{\textbf{Proof shipped (Track~A):} #1}
+\newcommand{\trackb}[1]{\textbf{Track~B (Linux production):} #1}
 
 \title{Demiurge: A Phase-Aware, Cache-Locality-First Load Balancer\\for Inference Fleets\\[4pt]
-  \large Technical Design Specification v1.4}
+  \large Technical Design Specification v1.5}
 \author{Demiurge Architecture Group}
 \date{}
 
@@ -24,13 +27,16 @@ An inference request is a \textbf{lease on stateful accelerator memory}, not a
 packet. Demiurge targets fleets that disaggregate \emph{prefill} (compute-bound,
 cache-producing) from \emph{decode} (bandwidth-bound, cache-consuming), with the
 KV cache as the explicit hand-off artifact. This document is the \textbf{target
-design}; shipped scope is enumerated in \S\ref{sec:status}. Unmarked
-\intent{...} paragraphs describe behavior planned in \texttt{ROADMAP.md}, not
-code that exists today.
+design}; shipped scope is enumerated in \S\ref{sec:status}. Paragraphs marked
+\intent{...} describe behavior planned in \texttt{ROADMAP.md}, not code that
+exists today. Per-requirement \emph{implemented} vs \emph{intended} status lives
+only in the generated conformance matrix (Table~\ref{tab:conformance}); normative
+prose uses status-neutral requirement tags (the \texttt{\textbackslash req\{...\}} macro).
 \end{abstract}
 
 \section{Implementation Status}\label{sec:status}
-\textbf{Shipped today (Phases~0--2).}
+\textbf{Track~A proof shipped (Phases~0--5).} Everything below runs on macOS and
+Linux today with mock TCP backends, userspace dataplane proofs, and CI gates.
 \begin{itemize}[nosep]
   \item \textbf{Phase~0} --- Cost-factor algebra: log-space composition, fail-expensive
         clamping, bounded corrector (\req{DEMI-COST-POS}, \req{DEMI-CORR-CLAMP},
@@ -40,28 +46,96 @@ code that exists today.
         decode continuation on \texttt{OnPrefillComplete} (\req{ALG-ROUTE});
         short-context colocated fast path (\req{DEMI-SHORT-FASTPATH}).
   \item \textbf{Phase~2} --- KV hand-off over a TCP proof transport
-        (\req{DEMI-KV-HANDOFF}); overhead-aware reservation and fleet $\Phi$ barrier
-        (\req{DEMI-KV-OVERHEAD}, \req{DEMI-BARRIER-PHI}, \req{DEMI-KV-RELEASE});
-        hand-off transfer telemetry (\req{DEMI-KV-TRANSFER-TELEM}).
+        (\req{DEMI-KV-HANDOFF}, \req{DEMI-HANDOFF-XPORT}); overhead-aware reservation
+        and fleet $\Phi$ barrier (\req{DEMI-KV-OVERHEAD}, \req{DEMI-BARRIER-PHI},
+        \req{DEMI-KV-RELEASE}); hand-off transfer telemetry
+        (\req{DEMI-KV-TRANSFER-TELEM}).
   \item \textbf{Phase~3} --- AP state plane with warmth maps and gossip merge
         (\req{DEMI-WARM-DISCOUNT}, \req{DEMI-STATE-AP}); fast-path warmth override.
-  \item \textbf{Phase~4 (control)} --- Greedy pf$\to$dc pairing
-        (\req{DEMI-PAIR-GREEDY}) and shadow pool rebalancer (\req{DEMI-POOL-RATIO}).
-  \item \textbf{Phase~5 (start)} --- RCU routing snapshot on the live TCP path
-        (\req{DEMI-DP-RCU}); userspace admit-bucket shed proof (\req{DEMI-XDP-SHED}).
+  \item \textbf{Phase~4} --- Greedy pf$\to$dc pairing (\req{DEMI-PAIR-GREEDY});
+        shadow pool rebalancer (\req{DEMI-POOL-RATIO}); fleet shadow replay
+        (\req{DEMI-FLEET-SHADOW}); fast-path telemetry export
+        (\req{DEMI-FASTPATH-TELEM}); corrector shadow logging
+        (\req{DEMI-CORR-SHADOW}).
+  \item \textbf{Phase~5 (proof)} --- RCU routing snapshot on the live TCP path
+        (\req{DEMI-DP-RCU}); userspace admit-bucket shed before L7
+        (\req{DEMI-XDP-SHED}).
 \end{itemize}
-\textbf{Not shipped.} Production eBPF/XDP and \texttt{io\_uring} forwarder, pool
-rebalancing actuation in production fleets, cross-tenant sharing
-(\S\ref{sec:sharing}), live migration (\S\ref{sec:migration}), and corrector
-graduation (\S\ref{sec:corrector}) remain \textbf{design intent} tracked in
+
+\textbf{Not shipped (Track~B/C).} Production kernel eBPF/XDP attach and
+\texttt{io\_uring} L7 forwarder, pool rebalancing \emph{actuation} in production
+fleets, RDMA production hand-off, cross-tenant sharing (\S\ref{sec:sharing}),
+live migration (\S\ref{sec:migration}), and corrector graduation
+(\S\ref{sec:corrector}) remain \textbf{design intent} tracked in
 \texttt{design/requirements.toml} and \texttt{ROADMAP.md}.
 
 \begin{table}[h]
   \centering
   \input{generated/conformance_matrix.tex}
-  \caption{Conformance matrix (generated). \emph{Implemented} rows are backed by
-  named tests in CI; \emph{intended} rows are design targets.}
+  \caption{Conformance matrix (generated from \texttt{design/requirements.toml}).
+  \emph{Implemented} rows are backed by named tests in CI; \emph{intended} rows
+  are design targets only. Never hand-edit this table.}
+  \label{tab:conformance}
 \end{table}
+
+\section{Document Model and Traceability}\label{sec:docmodel}
+Three artifacts stay strictly separated so target design never blurs with
+shipped scope:
+\begin{enumerate}[nosep]
+  \item \textbf{This spec} (\texttt{spec/demiurge.tex}) --- \emph{what} the system
+        should do. Normative claims carry requirement IDs via \texttt{\textbackslash req\{...\}};
+        unimplemented behavior
+        is wrapped in \intent{...}.
+  \item \textbf{Requirements registry} (\texttt{design/requirements.toml}) ---
+        \emph{whether} each registered ID is \texttt{implemented} (code + named tests)
+        or \texttt{intended} (design only), plus development phase.
+  \item \textbf{Generated tables} (\texttt{spec/generated/}) --- read-only
+        projections of canonical inputs; CI fails on drift.
+\end{enumerate}
+
+\textbf{Blur guard.} \texttt{cargo xtask lint} enforces a three-way join
+(spec~$\leftrightarrow$~code~$\leftrightarrow$~tests) \emph{and} placement rules:
+\begin{itemize}[nosep]
+  \item \texttt{intended} requirements: every tagged ID in this document must appear
+        \emph{only} inside \intent{...} paragraphs.
+  \item \texttt{implemented} requirements: every tagged ID must appear at least once
+        \emph{outside} \intent{...} (normative or status summary prose).
+\end{itemize}
+Status strings never appear in hand-authored spec prose; only the generated matrix
+carries \texttt{implemented}/\texttt{intended} columns.
+
+\textbf{Parameters.} Tunable constants live in \texttt{design/demiurge.params.toml};
+\texttt{cargo xtask gen} projects them into Rust constants and
+Table~\ref{tab:params}. CPU hot-path gates use the same pattern via
+\texttt{design/bench-gates.toml}.
+
+\section{Development Tracks}\label{sec:tracks}
+Phases (0--8) order \emph{dependencies}; tracks order \emph{where code runs}.
+Requirement phase numbers are stable; burndown is reported by
+\texttt{cargo xtask lint} (\texttt{P0: 4/4}, \ldots).
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{lllp{6.5cm}}
+    \toprule
+    Track & Platform & Phases & Scope \\
+    \midrule
+    A & macOS / portable Rust & 0--5 proof & Mock TCP, userspace RCU/admit, full CI \\
+    A+ & macOS + trace replay & 4, 8 shadow & Fleet pilot, corrector shadow, HandoffTransport \\
+    B & Linux x86\_64 & 5+ prod & XDP compile/attach, \texttt{io\_uring} forwarder \\
+    C & Linux + GPU fleet & 6--8 & Migration, sharing auth, corrector graduation \\
+    \bottomrule
+  \end{tabular}
+  \caption{Development tracks (see \texttt{ROADMAP.md} for gates and CI wiring).}
+  \label{tab:tracks}
+\end{table}
+
+\proof{\texttt{DEMI-XDP-SHED} and \texttt{DEMI-DP-RCU} at \emph{implemented} mean
+the userspace proof on the live TCP router path --- not kernel XDP drop or
+production \texttt{io\_uring} splice yet.}
+\trackb{Runtime XDP shed before decode saturation and \texttt{io\_uring}-backed
+proxying are the next dataplane deliverables; BPF objects compile in CI today.}
 
 \section{Architecture}\label{sec:arch}
 Three planes, three consistency models:
@@ -97,13 +171,14 @@ Rewards enter only as multiplicative discounts $D_c\in(0,1]$, never as
 subtractions. Invalid or non-finite hot-path signals saturate \emph{toward
 expensive} \req{DEMI-FAIL-EXPENSIVE}, so a broken metric cannot cheapen a
 target. Canonical $\alpha$ and related constants are generated from
-\texttt{design/demiurge.params.toml} (Table below).
+\texttt{design/demiurge.params.toml} (Table~\ref{tab:params}).
 
 \begin{table}[h]
   \centering
   \input{generated/params_table.tex}
   \caption{Canonical parameters (generated). Groups for future phases are
   placeholders until their roadmap phase lands.}
+  \label{tab:params}
 \end{table}
 
 \section{KV Cache Overhead Accounting}\label{sec:kv}
@@ -187,7 +262,7 @@ otherwise the original placement is restored.}
 The pool-ratio controller adjusts prefill vs decode capacity share
 $\pi$ using queue, KV, and SLO pressure with hysteresis and cooldown
 (\texttt{pool.*}) \req{DEMI-POOL-RATIO}. Shadow mode is default until Phase~5
-actuation. Shadow fleet replay on a held-out trace must show $\pi^\*$ tracking
+actuation. Shadow fleet replay on a held-out trace must show $\pi^*$ tracking
 prefill-heavy windows \req{DEMI-FLEET-SHADOW}. The router exports
 \texttt{fast\_path\_ratio} and near-threshold mis-route regret
 \req{DEMI-FASTPATH-TELEM}.
@@ -195,7 +270,59 @@ prefill-heavy windows \req{DEMI-FLEET-SHADOW}. The router exports
 \section{Data Plane}\label{sec:dataplane}
 The live TCP forwarder reads the last published RCU routing snapshot and never
 blocks on control-plane publish \req{DEMI-DP-RCU}. Overload shedding uses a
-token-bucket admit gate before L7 (XDP proof in userspace) \req{DEMI-XDP-SHED}.
-Production eBPF/XDP and \texttt{io\_uring} wiring follow in later Phase~5 work.
+token-bucket admit gate before L7 \req{DEMI-XDP-SHED}.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{lll}
+    \toprule
+    Capability & Track~A proof & Track~B production \\
+    \midrule
+    RCU snapshot read & Userspace \texttt{DataPlaneSnapshot} & Same + pinned reader threads \\
+    Admit / shed & \texttt{AdmitBucket} in router & eBPF/XDP map + token bucket \\
+    L7 proxy & \texttt{TcpStream} copy & \texttt{io\_uring} registered buffers \\
+    \bottomrule
+  \end{tabular}
+  \caption{Dataplane proof vs production (honest scope for Phase~5).}
+  \label{tab:dataplane}
+\end{table}
+
+\trackb{Production wiring attaches compiled BPF to netdev, programs bucket
+capacity from control-plane $\pi$, and routes bulk bytes through
+\texttt{io\_uring} when available.}
+
+\section{Tooling, Gates, and Operations}\label{sec:ops}
+Design conformance is enforced in CI and locally via \texttt{./scripts/gate.sh}:
+\begin{itemize}[nosep]
+  \item \texttt{cargo xtask gen} --- regenerate params, conformance matrix, Rust constants.
+  \item \texttt{cargo xtask lint} --- traceability join, phase burndown, blur guard.
+  \item \texttt{cargo xtask bench-gate} --- release-mode CPU gates (\texttt{bench-gates.toml}).
+  \item \texttt{cargo xtask spec} --- \texttt{gen} + \LaTeX{} build $\to$ \texttt{spec/demiurge.pdf}.
+  \item \texttt{./scripts/load-bench.sh} / \texttt{load-stress.sh} --- TCP load scenarios (stress local-only).
+  \item \texttt{cargo xtask fleet-pilot} --- shadow fleet replay (Track~A+).
+\end{itemize}
+
+\textbf{Operational posture.} The data plane is fail-closed on admit exhaustion
+(503 before backend work). Invalid cost signals fail expensive, never cheap.
+Warmth and occupancy are AP: stale state causes cache miss, not policy violation.
+\intent{Cross-tenant cache authorization remains CP-strong (\S\ref{sec:sharing}).}
+
+\textbf{Release artifacts.} Tagged macOS releases via \texttt{scripts/publish.sh};
+Linux \texttt{linux-nightly} binaries include BPF objects. Spec PDF is built on
+every \texttt{spec/**} change in CI and uploaded as an artifact.
+
+\section{Requirement Lifecycle}\label{sec:lifecycle}
+New normative behavior follows the same PR pattern:
+\begin{enumerate}[nosep]
+  \item Add a requirement ID to spec prose with \texttt{\textbackslash req\{DEMI-...\}}
+        (\intent{...} if not shipping yet).
+  \item Register in \texttt{design/requirements.toml} with \texttt{status},
+        \texttt{phase}, and backing \texttt{tests} when implemented.
+  \item Reference the same ID in Rust doc comments and name \texttt{\#[test]} functions in the registry.
+  \item Run \texttt{cargo xtask gen \&\& cargo xtask lint}; commit generated files.
+\end{enumerate}
+Phases close only by flipping \texttt{intended} $\to$ \texttt{implemented} with
+named tests --- never the reverse (ratchet only tighter).
 
 \end{document}

@@ -6,8 +6,8 @@ cd "$(dirname "$0")/.."
 
 bold() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
-bold "gate (CI mirror)"
-./scripts/gate.sh
+bold "gate (CI mirror + required Track B on Linux)"
+./scripts/gate.sh 2>&1 | tee target/release-artifacts/gate.log
 
 bold "full load bench (includes LOAD-STEP-ACTUATE + isolate_recovery scenarios)"
 ./scripts/load-bench.sh

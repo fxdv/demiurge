@@ -13,7 +13,7 @@ use demiurge_control::{greedy_pair, PoolPressure, PoolRebalancer, RebalancerMode
 use demiurge_cost::{
     compose, kv_breakdown, phi_barrier_marginal, BarrierFactor, Corrector, Discount, TimeCore,
 };
-use demiurge_dataplane::RcuRoutingTable;
+use demiurge_dataplane::{IoUringForwardBench, RcuRoutingTable};
 use demiurge_router::{
     estimate_prompt_tokens, parse_prompt_tokens, route, select, Backend, Router,
 };
@@ -300,6 +300,7 @@ fn run_gate(gate: &Gate, settings: &Settings) -> Result<(SampleStats, u64), Box<
     let pair_greedy = PairGreedyBench::new();
     let mut rebalance = RebalanceBench::new();
     let rcu_snapshot = RcuSnapshotBench::new();
+    let mut uring_fwd = IoUringForwardBench::new().expect("IoUringForwardBench");
 
     let stats = match gate.id.as_str() {
         "BENCH-COMPOSE-8" => sample_ns_per_op(
@@ -361,6 +362,12 @@ fn run_gate(gate: &Gate, settings: &Settings) -> Result<(SampleStats, u64), Box<
             gate.bench_iters,
             settings.samples,
             || rcu_snapshot.run(),
+        ),
+        "BENCH-IOURING-FWD" => sample_ns_per_op(
+            gate.warmup_iters,
+            gate.bench_iters,
+            settings.samples,
+            || uring_fwd.run().expect("BENCH-IOURING-FWD"),
         ),
         other => return Err(format!("unknown bench gate id {other:?}").into()),
     };

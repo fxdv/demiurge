@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a release artifact: binaries + pre-release validation + technical one-pager.
+# Build a release artifact: binaries + pre-release validation + one-pager + product PDF.
 #
 # Usage:
 #   ./scripts/publish.sh                    # full pre-release + pack
@@ -124,6 +124,11 @@ fi
 bold "generate one-pager"
 ARTIFACT_DIR="$STAGING" bash ./scripts/generate-one-pager.sh "$STAGING/RELEASE-one-pager.md"
 
+bold "generate product & design document"
+mkdir -p "$STAGING/docs"
+ARTIFACT_DIR="$STAGING" bash ./scripts/generate-product-doc.sh "$STAGING/docs/PRODUCT-AND-DESIGN.md"
+bash ./scripts/compile-product-doc.sh "$STAGING/docs/PRODUCT-AND-DESIGN.md" "$STAGING/docs/PRODUCT-AND-DESIGN.pdf"
+
 bold "manifest + checksums"
 {
   echo "Demiurge release artifact"
@@ -152,6 +157,7 @@ bold "artifact ready"
 echo "  dir:     $STAGING"
 echo "  tarball: $TARBALL"
 echo "  one-pager: $STAGING/RELEASE-one-pager.md"
+echo "  product doc: $STAGING/docs/PRODUCT-AND-DESIGN.pdf"
 ls -lh "$STAGING/bin/"* "$TARBALL"
 
 if [[ -n "$GITHUB_TAG" ]]; then

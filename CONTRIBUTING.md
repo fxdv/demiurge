@@ -56,7 +56,8 @@ For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
 (strict zero-error gates; not part of `gate.sh` or CI). Before a release tag,
 run `./scripts/pre-release.sh` (full gate + load bench incl. `LOAD-STEP-ACTUATE`
 + stress). To ship a local release artifact (binaries, validation logs, technical
-one-pager), run `./scripts/publish.sh`; CI publishes **Linux** weekly via the
+one-pager, **product & design PDF**), run `./scripts/publish.sh`; CI publishes
+**Linux** weekly via the
 `publish-linux` workflow (rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly)
 release) and on demand via the **release** workflow for tagged semver builds.
 

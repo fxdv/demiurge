@@ -5,6 +5,10 @@ This document is the **concrete build plan** for turning the design spec
 deliverables, requirement IDs, exit gates, and explicit non-goals. Phases are
 **dependency-ordered gates**, not calendar commitments.
 
+> **External readers** (partners, investors, YC): start with the narrative
+> [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md). This file is the
+> contributor build plan; the LaTeX spec is the implementer's contract.
+
 **How progress is tracked**
 
 | Mechanism | What it measures |

@@ -54,7 +54,8 @@ fn repo_root() -> PathBuf {
 }
 
 fn load_config() -> Result<FleetPilotConfig, Box<dyn Error>> {
-    let raw = fs::read_to_string(repo_root().join("design/fleet-pilot.toml"))?;
+    let path = repo_root().join("design/fleet-pilot.toml");
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     Ok(toml::from_str(&raw)?)
 }
 
@@ -65,7 +66,8 @@ fn load_trace(path: &Path) -> Result<Vec<TraceWindow>, Box<dyn Error>> {
         path.to_path_buf()
     };
     let mut windows = Vec::new();
-    for line in fs::read_to_string(path)?.lines() {
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -118,9 +120,10 @@ pub fn fleet_pilot() -> Result<(), Box<dyn Error>> {
     }
 
     let out_dir = repo_root().join("target/fleet-pilot");
-    fs::create_dir_all(&out_dir)?;
+    fs::create_dir_all(&out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
+    let out_file = out_dir.join("latest.json");
     fs::write(
-        out_dir.join("latest.json"),
+        &out_file,
         serde_json::to_string_pretty(&serde_json::json!({
             "trace": cfg.trace_path,
             "fleet_pilot": {
@@ -136,7 +139,8 @@ pub fn fleet_pilot() -> Result<(), Box<dyn Error>> {
                 "goodput_improvement": goodput,
             },
         }))?,
-    )?;
+    )
+    .map_err(|e| format!("write {}: {e}", out_file.display()))?;
     Ok(())
 }
 

@@ -106,3 +106,13 @@ summary = "RcuRoutingTable::read_pi hot path (lock-free Arc clone)"
 warmup_iters = 5_000
 bench_iters = 50_000
 max_median_ns = 50
+
+# --- Phase 5+ (Track B): io_uring forward path -------------------------------
+
+[[gate]]
+id = "BENCH-IOURING-FWD"
+phase = 5
+summary = "IoUringForwarder RCU read + io_uring NOP submit/wait (reused ring; Linux)"
+warmup_iters = 2_000
+bench_iters = 20_000
+max_median_ns = 1_500

@@ -6,7 +6,7 @@ TAG="${1:?usage: gh-release-upload.sh <tag>}"
 # shellcheck disable=SC1091
 source "${PUBLISH_ENV:-target/release-artifacts/publish.env}"
 
-files=("$TARBALL" "$STAGING/RELEASE-one-pager.md" "$STAGING/load-bench/latest.pseudo")
+files=("$TARBALL" "$STAGING/RELEASE-one-pager.md" "$STAGING/docs/PRODUCT-AND-DESIGN.pdf" "$STAGING/docs/PRODUCT-AND-DESIGN.md" "$STAGING/load-bench/latest.pseudo")
 optional=("$STAGING/load-bench/stress.pseudo")
 for f in "${optional[@]}"; do
   if [[ -f "$f" ]]; then

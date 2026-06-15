@@ -1,0 +1,17 @@
+#cloud-config
+package_update: true
+packages:
+  - build-essential
+  - ca-certificates
+  - clang
+  - curl
+  - git
+  - iproute2
+  - libbpf-dev
+  - libssl-dev
+  - llvm
+  - pkg-config
+runcmd:
+  # Host `multipass mount` needs this snap inside the guest.
+  - snap install multipass-sshfs || true
+  - test -x /mnt/demiurge/scripts/linux-vm/bootstrap-guest.sh && sudo -u ubuntu /mnt/demiurge/scripts/linux-vm/bootstrap-guest.sh /mnt/demiurge || true

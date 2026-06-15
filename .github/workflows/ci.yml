@@ -48,3 +48,9 @@ jobs:
 
       - name: Track A fleet pilot (shadow π* + corrector shadow)
         run: cargo run --release -q --package xtask -- fleet-pilot
+
+      - name: Track B gate (BPF + XDP veth smoke)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iputils-ping iproute2 clang llvm libbpf-dev
+          ./scripts/track-b-gate.sh

@@ -9,3 +9,7 @@ description = "RCU routing table and L4 admission shed for the Demiurge data pla
 [dependencies]
 arc-swap = "1"
 demiurge-cost = { path = "../demiurge-cost" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.13.1"
+io-uring = "0.7.8"

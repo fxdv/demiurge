@@ -1,0 +1,38 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# Headless Track B VM — VirtualBox on macOS/Linux.
+#
+#   brew install vagrant virtualbox
+#   cd scripts/linux-vm && vagrant up
+#   vagrant ssh
+#   vagrant provision   # re-run bootstrap
+#   vagrant destroy -f
+#
+REPO_ROOT = File.expand_path("../..", __dir__)
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "bento/ubuntu-24.04"
+  config.vm.box_version = "202510.26.0"
+  config.vm.hostname = "demiurge-track-b"
+
+  # rsync → guest local disk (avoids vboxsf exec/hard-link issues + stale/missing files).
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.synced_folder REPO_ROOT, "/demiurge",
+    type: "rsync",
+    rsync__auto: true,
+    rsync__exclude: [".git/", "target/", ".vagrant/", "scripts/linux-vm/.vagrant/"]
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "demiurge-track-b"
+    vb.gui = false
+    vb.memory = ENV.fetch("VM_MEM_MB", "8192").to_i
+    vb.cpus = ENV.fetch("VM_CPUS", "4").to_i
+    # ARM64 vs amd64 is determined by the bento box variant Vagrant imports —
+    # do not pass --platform-architecture to modifyvm (not supported on VBox 7.2).
+  end
+
+  config.vm.provision "shell", path: "vagrant-provision.sh", env: {
+    "DEMIURGE_REPO" => "/demiurge",
+  }
+end

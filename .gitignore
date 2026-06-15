@@ -18,3 +18,6 @@ spec/**/*.pdf
 .idea/
 .vscode/
 *.swp
+
+# Vagrant (Track B VM)
+scripts/linux-vm/.vagrant/

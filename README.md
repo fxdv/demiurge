@@ -32,6 +32,7 @@
 ## Table of contents
 
 - [Why Demiurge](#why-demiurge)
+- [Product & design brief (YC / partners)](#product--design-brief-yc--partners)
 - [The bet](#the-bet)
 - [Architecture at a glance](#architecture-at-a-glance)
 - [Repository layout](#repository-layout)
@@ -57,6 +58,13 @@ inference that's wrong on three counts, all at once:
 - occupancy is a **random variable**, not a constant.
 
 Demiurge is built to exploit exactly those three facts.
+
+## Product & design brief (YC / partners)
+
+The LaTeX spec PDF is the **implementer's contract** — precise, but not a pleasant
+read for partners or investors. For a narrative product and technical design
+document (problem, solution, traction, roadmap, honest scope), see
+**[`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md)**.
 
 ## Status: what exists
 
@@ -130,6 +138,7 @@ flowchart TB
 | [`design/load-bench.toml`](design/load-bench.toml) | Local TCP load scenarios + optional p99 soft gates. |
 | [`design/requirements.toml`](design/requirements.toml) | Registry of normative/structural requirement IDs + phase tags. |
 | [`ROADMAP.md`](ROADMAP.md) | **Concrete build plan** — phased deliverables, gates, burndown. |
+| [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md) | **Human-readable product & design brief** (partners, YC, investors). |
 | [`spec/demiurge.tex`](spec/) | Full target design; §1 lists shipped vs intended scope |
 | `spec/generated/` | `@generated` parameter & conformance tables — never hand-edited. |
 | [`crates/demiurge-cost/`](crates/demiurge-cost/) | The cost-function factor algebra and its property tests. |
@@ -151,7 +160,7 @@ cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-
 ./scripts/load-stress.sh      # strict heavy stress — local only, not in gate.sh
 ./scripts/pre-release.sh      # gate + full load bench + stress (nightly / pre-tag)
 ./scripts/track-a-verify.sh   # optional Track A observability (~5 min; report.md + soft spots)
-./scripts/publish.sh          # pre-release + tarball (binaries, validation, one-pager)
+./scripts/publish.sh          # pre-release + tarball (binaries, one-pager, product PDF)
 ./scripts/publish.sh --github v0.1.0-p6   # local macOS/Linux + GitHub Release tag
 cargo test --all              # run the executable invariants (C>0, ±α)
 ./scripts/gate.sh             # run the full local gate (mirrors CI)
@@ -262,5 +271,5 @@ and [`LICENSE-MIT`](LICENSE-MIT).
 ---
 
 <div align="center">
-<sub>Demiurge — design spec v1.4 · the spec is the contract, the code is the proof.</sub>
+<sub>Demiurge — design spec v1.5 · the spec is the contract, the code is the proof · human brief: [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md).</sub>
 </div>

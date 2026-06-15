@@ -35,6 +35,7 @@ const REQS: &str = "design/requirements.toml";
 const RS_OUT: &str = "crates/demiurge-cost/src/generated_params.rs";
 const PARAMS_TEX: &str = "spec/generated/params_table.tex";
 const MATRIX_TEX: &str = "spec/generated/conformance_matrix.tex";
+const SPEC_TEX: &str = "spec/demiurge.tex";
 
 const SCAN_RS_DIRS: &[&str] = &["crates", "xtask"];
 const SCAN_TEX_DIRS: &[&str] = &["spec"];
@@ -101,9 +102,10 @@ fn main() {
         }
         "build-bpf" => build_bpf(),
         "fleet-pilot" => fleet_pilot::fleet_pilot(),
+        "spec" => build_spec(),
         other => {
             eprintln!(
-                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, `build-bpf`, or `fleet-pilot`"
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, `build-bpf`, or `fleet-pilot`"
             );
             exit(2);
         }
@@ -111,6 +113,25 @@ fn main() {
     if let Err(e) = res {
         eprintln!("xtask {cmd}: {e}");
         exit(1);
+    }
+}
+
+fn build_spec() -> Result<(), Box<dyn Error>> {
+    gen()?;
+    let status = std::process::Command::new("latexmk")
+        .args([
+            "-pdf",
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+            "demiurge.tex",
+        ])
+        .current_dir("spec")
+        .status()?;
+    if status.success() {
+        println!("spec: wrote spec/demiurge.pdf");
+        Ok(())
+    } else {
+        Err(format!("latexmk exited with {status}").into())
     }
 }
 
@@ -239,6 +260,103 @@ fn strip_tex_comments(s: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Byte range `(start, end)` of the *content* inside `\name{...}` (excluding the
+/// delimiting braces). Nested `{`/`}` inside the argument are balanced.
+fn find_macro_content_ranges(tex: &str, name: &str) -> Vec<(usize, usize)> {
+    let needle = format!("\\{name}{{");
+    let mut regions = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(rel) = tex[search_from..].find(&needle) {
+        let macro_start = search_from + rel;
+        let open_brace = macro_start + needle.len() - 1;
+        let Some(close_brace) = find_matching_brace(tex, open_brace) else {
+            break;
+        };
+        regions.push((open_brace + 1, close_brace));
+        search_from = close_brace + 1;
+    }
+    regions
+}
+
+fn find_matching_brace(tex: &str, open: usize) -> Option<usize> {
+    tex.as_bytes().get(open).filter(|&&b| b == b'{')?;
+    let mut depth = 0u32;
+    for (i, ch) in tex[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn position_in_ranges(pos: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges.iter().any(|&(s, e)| pos >= s && pos < e)
+}
+
+/// Map each `\req{ID}` in the hand-authored spec to whether it sits inside
+/// `\intent{...}`. Used by the blur guard so target-design prose never reads
+/// like shipped code (and vice versa).
+fn spec_req_placement(tex: &str) -> BTreeMap<String, (bool, bool)> {
+    let tex = strip_tex_comments(tex);
+    let intent_ranges = find_macro_content_ranges(&tex, "intent");
+    let req_re = match Regex::new(r"\\req\{([^}]+)\}") {
+        Ok(r) => r,
+        Err(_) => return BTreeMap::new(),
+    };
+    let mut out: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for cap in req_re.captures_iter(&tex) {
+        let id = cap[1].to_string();
+        let pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
+        let inside = position_in_ranges(pos, &intent_ranges);
+        let entry = out.entry(id).or_insert((false, false));
+        if inside {
+            entry.1 = true;
+        } else {
+            entry.0 = true;
+        }
+    }
+    out
+}
+
+fn lint_blur_guard(reqs: &Requirements, spec_tex: &str) -> Vec<String> {
+    let placement = spec_req_placement(spec_tex);
+    let mut errors = Vec::new();
+    for req in &reqs.requirement {
+        let (outside, inside) = placement.get(&req.id).copied().unwrap_or((false, false));
+        match req.status.as_str() {
+            "intended" => {
+                if outside {
+                    errors.push(format!(
+                        "blur: requirement `{}` is intended but \\req{{}} appears outside \\intent{{}} in {SPEC_TEX} (spec must not read as shipped)",
+                        req.id
+                    ));
+                }
+                if !inside && !outside {
+                    errors.push(format!(
+                        "blur: requirement `{}` is intended but has no \\req{{}} in {SPEC_TEX}",
+                        req.id
+                    ));
+                }
+            }
+            "implemented" if !outside => {
+                errors.push(format!(
+                    "blur: requirement `{}` is implemented but \\req{{}} is missing or only inside \\intent{{}} in {SPEC_TEX}",
+                    req.id
+                ));
+            }
+            _ => {}
+        }
+    }
+    errors
 }
 
 fn collect_files(root: &str, ext: &str, out: &mut Vec<PathBuf>) {
@@ -370,6 +488,9 @@ fn lint() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    let spec_tex = fs::read_to_string(SPEC_TEX).unwrap_or_default();
+    errors.extend(lint_blur_guard(&reqs, &spec_tex));
+
     if errors.is_empty() {
         let impl_n = reqs
             .requirement
@@ -378,7 +499,7 @@ fn lint() -> Result<(), Box<dyn Error>> {
             .count();
         let intended_n = reqs.requirement.len() - impl_n;
         println!(
-            "lint: OK — {} requirements ({impl_n} implemented & test-backed, {intended_n} intended), all referenced.",
+            "lint: OK — {} requirements ({impl_n} implemented & test-backed, {intended_n} intended), all referenced, blur guard clean.",
             declared.len()
         );
 
