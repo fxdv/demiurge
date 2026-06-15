@@ -60,10 +60,10 @@ Track C — Fleet, GPU & economics →  real accelerator fleets, actuation, migr
 | Cost algebra, router, KV hand-off (TCP), state/control planes | ✅ | ✅ | — |
 | CPU bench gates, load-bench, load-stress (mock backends) | ✅ | ✅ | — |
 | Userspace RCU + `AdmitBucket` (P5 proof) | ✅ | ✅ | — |
-| `cargo xtask lint` / spec PDF / design-conformance | ✅ | ✅ (CI) | — |
+| `cargo xtask lint` / spec PDF / ci (conformance in quality job) | ✅ | ✅ (CI) | — |
 | macOS tagged release (`scripts/publish.sh`) | ✅ | — | — |
 | XDP compile + attach, `io_uring` L7 forwarder | — | ✅ | — |
-| Weekly `linux-nightly` pre-release binaries | — | ✅ | — |
+| `linux-nightly` pre-release binaries | — | ✅ (green `main` ci + weekly) | — |
 | RDMA KV hand-off (production transport) | trait + mock ✅ | trait + mock ✅ | planned |
 | Live migration sub-ITL cutover | — | — | planned |
 | Pool autoscaler / GPU fraction actuation | shadow ✅ | shadow ✅ | planned |
@@ -467,7 +467,7 @@ cost algebra + least-cost selection over phase pools.
 | `crates/demiurge-cost/` | Log-space cost composition; fail-expensive clamping. |
 | `crates/demiurge-router/` | Phase pools, `select()` / `Router::pick()`, blocking TCP proxy shell. |
 | `xtask gen` / `xtask lint` | Parameter projection + traceability + phase burndown. |
-| CI (`design-conformance`, `ci`, `spec`) | Drift detection, fmt/clippy/test, PDF build. |
+| CI (`ci`, `spec`) | Drift detection, fmt/clippy/test, PDF build. |
 
 **Requirements (implemented + test-backed)**
 
@@ -700,8 +700,8 @@ Run after `./scripts/gate.sh` or `./scripts/pre-release.sh` when tuning or befor
 # Track B — Linux production dataplane
 
 **Platform:** Linux x86_64 only (XDP, `io_uring`, real NIC path). CI:
-[`publish-linux.yml`](.github/workflows/publish-linux.yml) (weekly + dispatch → rolling
-**`linux-nightly`**), [`bpf.yml`](.github/workflows/bpf.yml) (eBPF compile).
+[`publish-linux.yml`](.github/workflows/publish-linux.yml) (after green `ci` on `main`, weekly
+Mon 06:00 UTC + dispatch → rolling **`linux-nightly`**), [`bpf.yml`](.github/workflows/bpf.yml) (eBPF compile).
 
 ## Phase 5+ — Kernel dataplane — **in progress**
 

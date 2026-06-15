@@ -8,49 +8,14 @@ on:
 jobs:
   quality:
     name: Quality
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-rust
-
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Test
-        run: cargo test --all
-
-      - name: Release build + binary check
-        run: |
-          cargo build --release --workspace
-          test -x target/release/demiurge-router
-          test -x target/release/xtask
+    uses: ./.github/workflows/gate-reusable.yml
+    with:
+      phase: quality
 
   regression:
     name: Regression
     needs: quality
-    runs-on: ubuntu-latest
-    env:
-      CI: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-rust
-
-      - name: CPU bench gates
-        run: |
-          cargo build --release --workspace
-          cargo run --release -q --package xtask -- bench-gate
-
-      - name: Load smoke
-        run: cargo run --release -q --package xtask -- load-bench --ci
-
-      - name: Track A fleet pilot (shadow π* + corrector shadow)
-        run: cargo run --release -q --package xtask -- fleet-pilot
-
-      - name: Track B gate (BPF + XDP veth smoke)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y iputils-ping iproute2 clang llvm libbpf-dev
-          ./scripts/track-b-gate.sh
+    uses: ./.github/workflows/gate-reusable.yml
+    with:
+      phase: regression
+      skip_release_build: true

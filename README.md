@@ -4,7 +4,6 @@
 
 **A phase-aware, cache-locality-first load balancer for inference fleets**
 
-[![design-conformance](https://github.com/fxdv/demiurge/actions/workflows/design-conformance.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/design-conformance.yml)
 [![ci](https://github.com/fxdv/demiurge/actions/workflows/ci.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/ci.yml)
 [![spec](https://github.com/fxdv/demiurge/actions/workflows/spec.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/spec.yml)
 [![invariant: C&gt;0](https://img.shields.io/badge/invariant-C%3E0%20by%20construction-005aa0)](spec/demiurge.tex)
@@ -141,7 +140,7 @@ spec/demiurge.tex            ──►  cargo xtask spec ──►  spec/demiurg
 | Plate | Command | CI |
 |-------|---------|-----|
 | Single source of truth | `cargo xtask gen` | drift check in `gate.sh` |
-| Traceability pipe | `cargo xtask lint` | design-conformance workflow |
+| Traceability pipe | `cargo xtask lint` | ci quality job |
 | Spec PDF | `cargo xtask spec` | spec workflow |
 | CPU gates | `cargo xtask bench-gate` | ci workflow |
 

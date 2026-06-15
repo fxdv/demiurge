@@ -1,0 +1,53 @@
+name: gate
+
+# Reusable gate phases — shared entrypoint for CI and local ./scripts/gate.sh --ci-*.
+on:
+  workflow_call:
+    inputs:
+      phase:
+        description: conformance | quality | regression
+        required: true
+        type: string
+      skip_release_build:
+        description: Skip release build in regression (reuse quality artifact)
+        required: false
+        type: boolean
+        default: false
+      artifact_name:
+        description: Release artifact name (quality uploads, regression downloads)
+        required: false
+        type: string
+        default: release-target
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      CI: true
+      GATE_SKIP_RELEASE_BUILD: ${{ inputs.skip_release_build && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+
+      - name: Download release build (regression reuse)
+        if: inputs.phase == 'regression' && inputs.skip_release_build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: target/release
+
+      - name: Install Track B deps
+        if: inputs.phase == 'regression'
+        run: sudo apt-get update && sudo apt-get install -y iputils-ping iproute2 clang llvm libbpf-dev
+
+      - name: Run gate phase
+        run: ./scripts/gate.sh --ci-${{ inputs.phase }}
+
+      - name: Upload release build
+        if: inputs.phase == 'quality'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: target/release/
+          retention-days: 1
+          if-no-files-found: error

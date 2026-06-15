@@ -78,27 +78,23 @@ release) and on demand via the **release** workflow for tagged semver builds.
 
 | Workflow | What it enforces |
 |----------|------------------|
-| `design-conformance` | generated artifacts are not stale; spec ⇄ code ⇄ test links are intact |
-| `ci` | **Quality** (fmt, clippy, test, release build); **Regression** (CPU bench gates + load smoke) |
+| `ci` | **Quality** (gen/drift/lint + fmt/clippy/test/release build); **Regression** (CPU bench gates + load smoke + fleet-pilot + Track B gate) |
 | `spec` | the design PDF compiles from regenerated inputs |
-| `publish-linux` | **Weekly** Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) release (Mon 06:00 UTC); manual dispatch |
+| `publish-linux` | Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) after green `ci` on `main`, weekly Mon 06:00 UTC, or manual dispatch |
 | `release` | manual semver tag release (Linux artifact + one-pager) |
 | `bpf` | compile XDP `admit_shed.bpf.c` on Ubuntu + `track-b-gate.sh` (veth smoke) |
 
 All workflows share [`.github/actions/setup-rust`](.github/actions/setup-rust/) (toolchain + cache).
-Local `./scripts/gate.sh` still mirrors **design-conformance + ci quality + regression**; it does not run pre-release or publish.
+CI phases call [`.github/workflows/gate-reusable.yml`](.github/workflows/gate-reusable.yml) → `./scripts/gate.sh --ci-*`.
+Local `./scripts/gate.sh` mirrors **ci quality + regression**; `--quick` skips release bench/load/Track B.
 
-### CI structure (refactored)
+### CI structure
 
-| Before | After |
-|--------|-------|
-| 3 `ci` jobs each checkout + toolchain + cache | 2 jobs (`quality` → `regression`); shared `setup-rust` action |
-| Toolchain/cache duplicated in 4 workflows | `.github/actions/setup-rust` reused everywhere |
-| Release path hard-coded in workflow YAML | `scripts/publish.sh` writes `target/release-artifacts/publish.env` |
-
-**Further opportunities** (not done — trade-offs):
-
-- Merge `design-conformance` into `ci` quality job (one less workflow badge, ~30s saved on PRs).
-- Pass release `target/` via artifacts from `quality` to `regression` (skip second `cargo build --release`; cache usually makes this marginal).
-- Reusable workflow wrapping `./scripts/gate.sh` flags so CI and local gate share one entrypoint.
-- `publish-linux` on every green `main` push (currently weekly only — pre-release is ~4 min + 2 min port recovery).
+| Item | Status |
+|------|--------|
+| Shared `setup-rust` action | done |
+| Reusable `gate-reusable.yml` → `gate.sh --ci-*` | done |
+| Design-conformance merged into `ci` quality job | done |
+| Release `target/release/` artifact reuse (quality → regression) | done |
+| `publish-linux` on every green `main` `ci` | done |
+| `scripts/publish.sh` → `publish.env` for release workflows | done |

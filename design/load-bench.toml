@@ -221,6 +221,7 @@ isolate_recovery = true
 [[scenario]]
 id = "LOAD-TRACK-B-KERNEL"
 summary = "Track B: io_uring + kernel XDP admit on veth under concurrent TCP (root)"
+optional = true
 track_b_kernel = true
 admit_mode = "kernel_xdp"
 io_uring = true

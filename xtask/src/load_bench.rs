@@ -119,6 +119,9 @@ struct Scenario {
     /// Skip on non-Linux hosts (Track B kernel dataplane scenarios).
     #[serde(default)]
     linux_only: bool,
+    /// Skip without failing the suite when prerequisites are missing (e.g. root for kernel XDP load).
+    #[serde(default)]
+    optional: bool,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -557,6 +560,7 @@ fn run_admit_decouple_scenario(
     sc: &Scenario,
     warmup: u32,
 ) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
+    let wall_start = Instant::now();
     let delays = if sc.prefill_delay_sweep_us.len() >= 2 {
         sc.prefill_delay_sweep_us.clone()
     } else {
@@ -592,6 +596,7 @@ fn run_admit_decouple_scenario(
     let ratio = p99_high as f64 / p99_low.max(1) as f64;
 
     let total = u64::from(sc.concurrency) * u64::from(sc.requests_per_worker) * delays.len() as u64;
+    let duration_secs = wall_start.elapsed().as_secs_f64();
     Ok(ScenarioResult {
         id: sc.id.clone(),
         summary: sc.summary.clone(),
@@ -605,8 +610,12 @@ fn run_admit_decouple_scenario(
         total_requests: total,
         ok: total,
         errors: 0,
-        duration_secs: 0.0,
-        req_per_sec: 0.0,
+        duration_secs,
+        req_per_sec: if duration_secs > 0.0 {
+            total as f64 / duration_secs
+        } else {
+            0.0
+        },
         min_us: p99_low,
         p50_us: p99_low,
         p90_us: p99_high,
@@ -956,6 +965,12 @@ fn load_bench_isolated(mode: IsolatedMode) -> Result<(), Box<dyn std::error::Err
     let mut failures = 0usize;
     for id in &ids {
         if let Some(sc) = file.scenario.iter().find(|s| s.id == *id) {
+            if let Some(reason) = scenario_skip_reason(sc) {
+                if sc.optional {
+                    eprintln!("load-bench: {id} SKIP (optional) — {reason}");
+                    continue;
+                }
+            }
             if sc.isolate_recovery {
                 let delay = if file.settings.stress_recovery_ms > 0 {
                     file.settings.stress_recovery_ms
@@ -1073,6 +1088,14 @@ fn load_bench_inner(
         }
         eprintln!("load-bench: running {} …", sc.id);
         if let Some(reason) = scenario_skip_reason(sc) {
+            if sc.optional {
+                eprintln!("load-bench: {} SKIP (optional) — {reason}", sc.id);
+                if only_scenario.is_some() {
+                    eprintln!("load-bench: done — skipped optional scenario {}", sc.id);
+                    return Ok(());
+                }
+                continue;
+            }
             eprintln!("load-bench: {} SKIP — {reason}", sc.id);
             if only_scenario.is_some() {
                 return Err(format!("{}: {reason}", sc.id).into());

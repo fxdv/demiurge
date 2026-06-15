@@ -1,9 +1,13 @@
 name: publish-linux
 
-# Weekly Linux release artifact + rolling `linux-nightly` GitHub Release.
-# Manual dispatch re-runs the same pipeline (e.g. after main fixes).
+# Linux release artifact + rolling `linux-nightly` GitHub Release.
+# Runs after green `ci` on main, weekly (Mon 06:00 UTC), or manual dispatch.
 
 on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
@@ -14,12 +18,20 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: publish-linux
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
 jobs:
   linux:
     runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-rust

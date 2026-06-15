@@ -16,7 +16,7 @@ bold "pseudo report (post-step)"
 cargo run --release -q --package xtask -- load-report
 
 if [ "$bench_rc" -ne 0 ]; then
-  printf '\n\033[1;33mLOAD BENCH: soft gate failure (see report)\033[0m\n' >&2
+  printf '\n\033[1;31mLOAD BENCH: FAILED\033[0m (strict gate or isolated scenario — see report)\033[0m\n' >&2
   exit "$bench_rc"
 fi
 
