@@ -16,7 +16,8 @@ as_root() {
   if [[ "$(id -u)" -eq 0 ]]; then
     "$@"
   else
-    sudo "$@"
+    # sudo resets PATH — keep the runner/toolchain cargo on root invocations.
+    sudo env "PATH=$PATH" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "HOME=$HOME" "$@"
   fi
 }
 
