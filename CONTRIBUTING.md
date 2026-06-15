@@ -55,7 +55,19 @@ suite, CPU bench gates, load regression smoke (`load-bench --ci`), and (if
 For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
 (strict zero-error gates; not part of `gate.sh` or CI). Before a release tag,
 run `./scripts/pre-release.sh` (full gate + load bench incl. `LOAD-STEP-ACTUATE`
-+ stress). To ship a local release artifact (binaries, validation logs, technical
++ stress).
+
+**Track B (Linux only).** After `./scripts/gate.sh` on a Linux VM or CI mirror:
+
+```bash
+./scripts/track-b-verify.sh           # full gate + bench-probe + load + stress + report
+./scripts/track-b-verify.sh --quick   # gate + CPU benches + p5 tests
+./scripts/track-b-bench.sh            # CPU probe/gate + XDP veth smoke (~1 min)
+```
+
+See [`scripts/linux-vm/README.md`](scripts/linux-vm/README.md) for Vagrant/Docker setup.
+
+To ship a local release artifact (binaries, validation logs, technical
 one-pager, **product & design PDF**), run `./scripts/publish.sh`; CI publishes
 **Linux** weekly via the
 `publish-linux` workflow (rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly)
@@ -70,7 +82,7 @@ release) and on demand via the **release** workflow for tagged semver builds.
 | `spec` | the design PDF compiles from regenerated inputs |
 | `publish-linux` | **Weekly** Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) release (Mon 06:00 UTC); manual dispatch |
 | `release` | manual semver tag release (Linux artifact + one-pager) |
-| `bpf` | compile XDP `admit_shed.bpf.c` on Ubuntu (clang `-target bpf`) |
+| `bpf` | compile XDP `admit_shed.bpf.c` on Ubuntu + `track-b-gate.sh` (veth smoke) |
 
 All workflows share [`.github/actions/setup-rust`](.github/actions/setup-rust/) (toolchain + cache).
 Local `./scripts/gate.sh` still mirrors **design-conformance + ci quality + regression**; it does not run pre-release or publish.

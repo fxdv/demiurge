@@ -47,7 +47,7 @@ weight_slo = 0.35
 # When true, rebalancer may actuate π and publish to the data-plane RCU table.
 actuation_enabled = false
 
-# Phase 5 — data plane hardening (proof shipped; production XDP/io_uring planned)
+# Phase 5 — userspace dataplane proof (Track A); kernel XDP/io_uring partial on Track B
 [dataplane]
 admit_burst = 4096
 rcu_stale_alert_ms = 500

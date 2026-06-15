@@ -50,7 +50,7 @@ Track C — Fleet, GPU & economics →  real accelerator fleets, actuation, migr
 |-------|----------|--------|-----------|--------|
 | **A — macOS & local dev** | macOS (primary), portable Rust | **0–5 proof** | `./scripts/gate.sh`, `pre-release.sh`, tagged macOS release | **done** |
 | **A — remaining (portable)** | macOS + trace replay | fleet pilot, corrector shadow, HandoffTransport | `cargo xtask fleet-pilot` | **done** |
-| **B — Linux production** | Linux x86_64 | **5+** dataplane | `bpf` workflow, `publish-linux.yml` → `linux-nightly` | in progress (BPF compiles ✅) |
+| **B — Linux production** | Linux x86_64 | **5+** dataplane | `bpf` workflow, `publish-linux.yml` → `linux-nightly`, `track-b-verify.sh` | **in progress** (engineering path ✅; exit gates open) |
 | **C — Fleet & GPU** | Linux + GPU fleet | **6–8**, RDMA prod, π actuation at scale | measured on reference hardware | planned |
 
 **What runs where**
@@ -84,7 +84,7 @@ Runtime XDP shed before decode saturation is Track B (`Phase 5+`).
 | **3** | A | State plane | 2 / 2 | **done** |
 | **4** | A | Control plane & pairing | 2 / 2 | **done** |
 | **5** | A | Data plane hardening (**proof**) | 2 / 2 | **done** |
-| **5+** | B | Data plane **production** (XDP / io_uring) | — | planned |
+| **5+** | B | Data plane **production** (XDP / io_uring) | — | **in progress** |
 | **6** | C | Live migration | 0 / 1 | planned |
 | **7** | C | Multi-tenancy & cache security | 0 / 1 | planned |
 | **8** | C | Learned corrector graduation | 0 / 1 (`DEMI-CORR-GRAD`) | planned |
@@ -128,6 +128,7 @@ CI applies `settings.ci_slack` (2×) for runner jitter. Run
 | `BENCH-PAIR-GREEDY` | 4 | Greedy pf→dc pair selection over N×M candidates | ≤ 5 µs/op |
 | `BENCH-REBALANCE` | 4 | Pool pressure normalization + π* computation | ≤ 800 ns/op |
 | `BENCH-RCU-SNAPSHOT` | 5 | RCU table read on data-plane routing path | ≤ 50 ns/op |
+| `BENCH-IOURING-FWD` | 5+ | `io_uring` forward micro-path (reused ring; Linux) | ≤ 1.5 µs/op |
 
 ### Thin gates — optimization status
 
@@ -147,20 +148,12 @@ No gates are thin anymore at local limits; CI applies 2× slack on top.
 `route_short` (~85 ns) → `route_long` (~102 ns) → **`select_64` (~308 ns)**.
 
 Plenty gates (`BENCH-KV-RESERVE`, `BENCH-WARM-LOOKUP`, `BENCH-PAIR-GREEDY`, `BENCH-REBALANCE`,
-`BENCH-RCU-SNAPSHOT`) have large headroom — not urgent.
+`BENCH-RCU-SNAPSHOT`, `BENCH-IOURING-FWD`) have large headroom — not urgent.
 
 Re-run after changes: `cargo xtask bench-probe`.
 
-### Planned gates (register before closing the phase)
-
-| Track | Phase | Proposed ID | Target |
-|-------|------:|-------------|--------|
-| **B** | **5+** | `BENCH-IOURING-FWD` | `io_uring` forward path latency (Linux only) |
-
-Each new gate gets a row in `bench-gates.toml` in the **same PR** that lands the
-code it measures. Tighten a limit only when deliberately optimizing that path;
-loosening requires justification in the PR. Phase exit checklists below include
-“bench gates pass” where applicable.
+Track B micro-bench gates register in the **same PR** as the code they measure. No
+additional Phase 5+ CPU gates are planned until the io_uring production TCP path lands.
 
 ### Local load bench (optional)
 
@@ -640,7 +633,7 @@ pairing-regret monitor.
 - [x] Step-load test: no pool-weight oscillation (hysteresis holds).
 - [x] `BENCH-PAIR-GREEDY` and `BENCH-REBALANCE` gates pass.
 
-**Out of scope.** Learned corrector in prod (Phase 8 / Track C), XDP production dataplane (Phase 5+ / Track B), live migration (Phase 6 / Track C).
+**Out of scope.** Learned corrector in prod (Phase 8 / Track C), Track B **production exit gates** (real NIC + io_uring TCP serve — see Phase 5+), live migration (Phase 6 / Track C).
 
 ---
 
@@ -709,25 +702,56 @@ Run after `./scripts/gate.sh` or `./scripts/pre-release.sh` when tuning or befor
 [`publish-linux.yml`](.github/workflows/publish-linux.yml) (weekly + dispatch → rolling
 **`linux-nightly`**), [`bpf.yml`](.github/workflows/bpf.yml) (eBPF compile).
 
-## Phase 5+ — Kernel dataplane — **planned**
+## Phase 5+ — Kernel dataplane — **in progress**
 
-**Goal.** Replace userspace proof with kernel dataplane: XDP admission, `io_uring` L7 forwarder.
+**Goal.** Kernel dataplane on Linux: XDP admission, `io_uring` L7 forwarder, production
+exit gates on reference hardware.
 
-| Crate / module | Work |
-|----------------|------|
-| `bpf/admit_shed.bpf.c` | XDP token-bucket shed (mirrors userspace `AdmitBucket`); CI compiles via `bpf` workflow. |
-| `demiurge-dataplane` | Rust loader stub (`XdpAdmitShed`); wire `aya`/libbpf attach + map seeding. |
-| `demiurge-dataplane` | Rust `io_uring` L7 forwarder wired to recv/send; RCU snapshot only on hot path. |
-| Bench | `BENCH-IOURING-FWD` — forward path latency gate (register in same PR as code). |
-| CI / release | `linux-nightly` pre-release on Ubuntu (gate + load + stress + artifacts). |
+**Status (Jun 2026).** Engineering path green on Linux VM (`./scripts/track-b-verify.sh`
+PASS): runtime XDP on veth, router kernel admit + actuation map sync,
+`BENCH-IOURING-FWD`, full load/stress. **Exit gates** (real NIC, io_uring production
+TCP serve, x86_64 p99) remain open.
+
+### Shipped
+
+| Crate / module | Shipped |
+|----------------|---------|
+| `bpf/admit_shed.bpf.c` | XDP token-bucket shed; CI via `bpf.yml` → `target/bpf/admit_shed.o` |
+| `demiurge-dataplane` | `XdpAdmitShed` via aya — load, attach, map seed/reseed; veth tests incl. packet shed |
+| `demiurge-router` | `AdmitMode`, `with_kernel_admit()`, actuation BPF map sync, env flags |
+| `demiurge-dataplane` | `IoUringForwarder::copy_between`, `DEMIURGE_IOURING=1` proxy path |
+| Bench | `BENCH-IOURING-FWD` + `BENCH-RCU-SNAPSHOT` in `bench-gates.toml` |
+| CI / scripts | `track-b-gate.sh` in `gate.sh` + CI; `track-b-verify.sh`, `track-b-bench.sh`; Vagrant bootstrap |
+| Release | `linux-nightly` rolling pre-release on Ubuntu |
+
+### Remaining
+
+| Item | Closes |
+|------|--------|
+| io_uring recv/send on production TCP `serve()` loop | Exit: io_uring serves production path |
+| Load scenario with `DEMIURGE_ADMIT_MODE` / XDP / IOURING env | Kernel path under TCP load |
+| XDP on production NIC under decode saturation | Exit: shed before pool saturation |
+| x86_64 + NIC p99 under CP slowdown | Exit: reference hardware |
 
 **Exit gate — production**
 
 - [x] XDP program **compiles** in CI (`bpf` workflow → `target/bpf/admit_shed.o`).
 - [x] `linux-nightly` rolling release green on Ubuntu.
-- [ ] Shed at **XDP** before decode pool saturation (runtime attach + map sync, not userspace bucket alone).
-- [ ] `io_uring` forwarder serves production TCP path.
-- [ ] Data-plane p99 admit latency within budget under CP slowdown on reference Linux hardware.
+- [x] Runtime XDP attach + map sync on Linux (veth smoke + router integration; packet shed test).
+- [x] `BENCH-IOURING-FWD` gate passes (reused-ring micro-bench; proxy `copy_between` shipped).
+- [ ] Shed at **XDP on production NIC** before decode pool saturation under load.
+- [ ] `io_uring` forwarder serves production TCP path (not proxy `copy_between` only).
+- [ ] Data-plane p99 admit latency within budget under CP slowdown on **x86_64 reference** hardware.
+
+**Validation.**
+
+```bash
+./scripts/track-b-verify.sh           # full (~5–10 min)
+./scripts/track-b-verify.sh --quick   # gate + bench-probe + p5 (skip load/stress)
+./scripts/track-b-bench.sh            # CPU probe/gate + XDP smoke (~1 min)
+```
+
+Vagrant: `scripts/linux-vm/vagrant-up.sh` → repo at `/demiurge`. Verified ARM64 Jun 2026.
 
 **Out of scope.** Live migration (Track C / Phase 6), cross-tenant auth (Track C / Phase 7).
 

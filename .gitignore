@@ -12,6 +12,7 @@
 *.fls
 *.fdb_latexmk
 spec/**/*.pdf
+docs/**/*.pdf
 
 # Editor / OS
 .DS_Store
