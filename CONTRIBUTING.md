@@ -34,7 +34,7 @@ remain under the repository license.
 3. **New normative requirement?** Add a row to `design/requirements.toml`,
    reference its ID from the spec and (if `requires_test = true`) from a test.
    `cargo xtask lint` must pass.
-4. **Decisions go in ADRs**, not in the spec. The spec is steady-state truth;
+4. **Decisions go in ADRs** (when we add `docs/adr/`), not in the spec. The spec is steady-state truth;
    the *why* is an architecture decision record.
 5. **Phased delivery.** Pick work from [`ROADMAP.md`](ROADMAP.md); register new
    requirement IDs before implementing; close a phase by flipping `status` to

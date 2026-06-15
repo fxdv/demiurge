@@ -62,12 +62,23 @@ Linux today with mock TCP backends, userspace dataplane proofs, and CI gates.
         (\req{DEMI-XDP-SHED}).
 \end{itemize}
 
-\textbf{Not shipped (Track~B/C).} Production kernel eBPF/XDP attach and
-\texttt{io\_uring} L7 forwarder, pool rebalancing \emph{actuation} in production
-fleets, RDMA production hand-off, cross-tenant sharing (\S\ref{sec:sharing}),
-live migration (\S\ref{sec:migration}), and corrector graduation
-(\S\ref{sec:corrector}) remain \textbf{design intent} tracked in
-\texttt{design/requirements.toml} and \texttt{ROADMAP.md}.
+\textbf{Track~B engineering (Linux).} Kernel dataplane code ships and passes
+\texttt{./scripts/track-b-verify.sh} on Linux VM (veth smoke; production NIC exit
+gates remain open):
+\begin{itemize}[nosep]
+  \item Runtime XDP attach + kernel admit (\texttt{AdmitMode}, actuation BPF map sync).
+  \item \texttt{io\_uring} L7 forwarder on production TCP \texttt{serve()}
+        (\texttt{IoUringProxySession} recv/send per connection).
+  \item Track~B load scenarios (\texttt{LOAD-TRACK-B-IOURING}, \texttt{LOAD-TRACK-B-KERNEL}).
+\end{itemize}
+
+\textbf{Not shipped (Track~B exit gates / Track~C).} XDP shed on production NIC
+under fleet load, data-plane p99 admit budget on x86\_64 reference hardware under
+CP slowdown, pool rebalancing \emph{actuation} in production fleets, RDMA production
+hand-off, cross-tenant sharing (\S\ref{sec:sharing}), live migration
+(\S\ref{sec:migration}), and corrector graduation (\S\ref{sec:corrector}) remain
+\textbf{design intent} tracked in \texttt{design/requirements.toml} and
+\texttt{ROADMAP.md}.
 
 \begin{table}[h]
   \centering
@@ -131,11 +142,12 @@ Requirement phase numbers are stable; burndown is reported by
   \label{tab:tracks}
 \end{table}
 
-\proof{\texttt{DEMI-XDP-SHED} and \texttt{DEMI-DP-RCU} at \emph{implemented} mean
-the userspace proof on the live TCP router path --- not kernel XDP drop or
-production \texttt{io\_uring} splice yet.}
-\trackb{Runtime XDP shed before decode saturation and \texttt{io\_uring}-backed
-proxying are the next dataplane deliverables; BPF objects compile in CI today.}
+\proof{\texttt{DEMI-DP-RCU} and \texttt{DEMI-XDP-SHED} at \emph{implemented}: RCU
+snapshot read on the live TCP path; userspace \texttt{AdmitBucket} shed before L7.
+Kernel XDP shed on a production NIC under fleet load is a Track~B exit gate.}
+\trackb{Runtime XDP on veth, kernel admit wiring, and \texttt{io\_uring}
+production TCP \texttt{serve()} are shipped; exit gates (production NIC shed,
+x86\_64 p99 budget) remain on reference hardware.}
 
 \section{Architecture}\label{sec:arch}
 Three planes, three consistency models:
@@ -288,9 +300,10 @@ token-bucket admit gate before L7 \req{DEMI-XDP-SHED}.
   \label{tab:dataplane}
 \end{table}
 
-\trackb{Production wiring attaches compiled BPF to netdev, programs bucket
-capacity from control-plane $\pi$, and routes bulk bytes through
-\texttt{io\_uring} when available.}
+\trackb{Production wiring attaches compiled BPF to netdev (veth smoke shipped;
+production NIC exit gate open), programs bucket capacity from control-plane $\pi$,
+and routes bulk bytes through \texttt{io\_uring} on the production TCP
+\texttt{serve()} loop (\texttt{IoUringProxySession}).}
 
 \section{Tooling, Gates, and Operations}\label{sec:ops}
 Design conformance is enforced in CI and locally via \texttt{./scripts/gate.sh}:

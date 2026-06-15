@@ -4,7 +4,7 @@
 
 *Human-readable product and design brief. Synthesized from [`README.md`](../README.md), [`ROADMAP.md`](../ROADMAP.md), and the living requirement registry. For machine-checked contracts, see [`design/requirements.toml`](../design/requirements.toml); for academic notation, see [`spec/demiurge.tex`](../spec/demiurge.tex) (PDF is optional).*
 
-**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **21 of 24** normative requirements are implemented with named tests. **Track B** kernel dataplane is **partially shipped** (runtime XDP on veth, router integration, io_uring micro-path); production exit gates (real NIC, io_uring TCP serve, x86_64 p99) and **Track C** fleet economics remain open.
+**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **21 of 24** requirements implemented with named tests (3 intended, Track C). **Track B** engineering path green on Linux VM (XDP veth, kernel admit, io_uring production TCP `serve()`, Track B load scenarios); **production exit gates** (real NIC XDP under load, x86_64 p99 budget) and **Track C** fleet economics remain open.
 
 ---
 
@@ -16,7 +16,7 @@
 
 **What exists today.** A working Rust forwarder with cost-based routing, async prefill→decode flow, KV hand-off and memory barriers, warmth-aware placement, pool rebalancing (shadow mode), and userspace dataplane proofs — all enforced by CI gates, CPU benchmarks, and load/stress suites.
 
-**What we are building toward.** Production-grade kernel admission (eBPF/XDP), io_uring forwarding, RDMA KV transfer, live migration, and safe multi-tenant cache sharing — the pieces needed to run this at fleet scale on real GPU clusters.
+**What we are building toward.** Production-grade kernel admission at fleet scale (real NIC XDP under load), RDMA KV transfer, live migration, and safe multi-tenant cache sharing on real GPU clusters. io_uring L7 forwarding on the production TCP path is shipped; reference-hardware validation remains.
 
 **Honest caveat.** Early proof is green on mock backends and local TCP. **Disruption depends on production economics** on real accelerators. We do not oversell kernel XDP or RDMA as shipped when they are still Track B/C work.
 
@@ -230,7 +230,7 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 - [x] Runtime XDP attach + kernel admit on Linux (veth smoke, router `AdmitMode`, actuation map sync)
 - [x] io_uring L7 forwarder on production TCP `serve()` loop (`IoUringProxySession` recv/send)
 - [x] Weekly `linux-nightly` release binaries with BPF objects
-- [ ] Production exit gates: real NIC XDP under load, io_uring serve path, x86_64 p99 budget
+- [ ] Production exit gates: real NIC XDP under load, x86_64 p99 budget under CP slowdown
 
 ### Track C — Fleet economics
 

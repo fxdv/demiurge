@@ -64,10 +64,10 @@ Track C — Fleet, GPU & economics →  real accelerator fleets, actuation, migr
 | macOS tagged release (`scripts/publish.sh`) | ✅ | — | — |
 | XDP compile + attach, `io_uring` L7 forwarder | — | ✅ | — |
 | Weekly `linux-nightly` pre-release binaries | — | ✅ | — |
-| RDMA KV hand-off (production transport) | — | ✅ | ✅ |
-| Live migration sub-ITL cutover | — | ✅ | ✅ |
-| Pool autoscaler / GPU fraction actuation | shadow ✅ | ✅ | ✅ |
-| Corrector canary → production | shadow ✅ | — | ✅ |
+| RDMA KV hand-off (production transport) | trait + mock ✅ | trait + mock ✅ | planned |
+| Live migration sub-ITL cutover | — | — | planned |
+| Pool autoscaler / GPU fraction actuation | shadow ✅ | shadow ✅ | planned |
+| Corrector canary → production | shadow ✅ | shadow ✅ | planned |
 
 Honest scope: **`DEMI-XDP-SHED` at `implemented`** is the userspace proof (Track A).
 Runtime XDP shed before decode saturation is Track B (`Phase 5+`).
@@ -80,7 +80,7 @@ Runtime XDP shed before decode saturation is Track B (`Phase 5+`).
 |------:|-------|------|--------------|--------|
 | **0** | A | Foundations | 4 / 4 | **done** |
 | **1** | A | Non-blocking routing loop | 2 / 2 | **done** |
-| **2** | A | KV hand-off & memory barriers | 5 / 5 | **done** |
+| **2** | A | KV hand-off & memory barriers | 6 / 6 | **done** |
 | **3** | A | State plane | 2 / 2 | **done** |
 | **4** | A | Control plane & pairing | 2 / 2 | **done** |
 | **5** | A | Data plane hardening (**proof**) | 2 / 2 | **done** |
@@ -152,8 +152,9 @@ Plenty gates (`BENCH-KV-RESERVE`, `BENCH-WARM-LOOKUP`, `BENCH-PAIR-GREEDY`, `BEN
 
 Re-run after changes: `cargo xtask bench-probe`.
 
-Track B micro-bench gates register in the **same PR** as the code they measure. No
-additional Phase 5+ CPU gates are planned until the io_uring production TCP path lands.
+Track B micro-bench gates register in the **same PR** as the code they measure.
+`BENCH-IOURING-FWD` covers the reused-ring forward path; production TCP `serve()` is
+validated via `forward_io_uring` tests and `LOAD-TRACK-B-*` load scenarios on Linux.
 
 ### Local load bench (optional)
 
@@ -250,17 +251,17 @@ disaggregated path.
 | **3** | Warmth override: short prompt + hot prefix on backend B → disaggregated to B's prefill pool anyway. |
 | **4** | Predictor-driven classification; fast-path share telemetry (`fast_path_ratio`, mis-route regret). |
 
-**Proposed requirement** — registered as `intended` in `requirements.toml`:
+**Requirement (implemented in `requirements.toml`)**
 
-| ID | Summary | Proposed test |
-|----|---------|---------------|
+| ID | Summary | Test |
+|----|---------|------|
 | `DEMI-SHORT-FASTPATH` | Short contexts skip cross-pool hand-off unless warmth override fires. | `short_context_uses_colocated_path` |
 
-**Exit gate**
+**Exit gate (met in Phase 1)**
 
-- [ ] Synthetic mix: fast-path requests never allocate a cross-pool hand-off handle.
-- [ ] At equal load, fast-path p50 latency below disaggregated baseline for ≤ threshold prompts.
-- [ ] Warmth override correctly forces disaggregated routing when colocation would miss.
+- [x] Synthetic mix: fast-path requests never allocate a cross-pool hand-off handle.
+- [x] At equal load, fast-path p50 latency below disaggregated baseline for ≤ threshold prompts.
+- [x] Warmth override correctly forces disaggregated routing when colocation would miss.
 
 **Parameters** — canonical in `design/demiurge.params.toml` (`[routing].*`); consumed by `route()` / fast-path classification.
 
@@ -421,11 +422,11 @@ if |π* − π| > rebalance_hysteresis:
 | **4** | `demiurge-control`: rebalancer loop, shadow mode, `[DEMI-POOL-RATIO]`. |
 | **5** | Autoscaler webhook / RCU publish path; actuation behind feature flag. |
 
-**Proposed requirement**
+**Requirement (implemented in `requirements.toml`)**
 
-| ID | Summary | Proposed test |
-|----|---------|---------------|
-| `DEMI-POOL-RATIO` | Rebalancer moves `π` only when hysteresis exceeded and cooldown elapsed; shadow mode never actuates. | `rebalance_respects_hysteresis_and_cooldown` |
+| ID | Summary | Test |
+|----|---------|------|
+| `DEMI-POOL-RATIO` | Rebalancer moves `π` only when hysteresis exceeded and cooldown elapsed; shadow mode never actuates. | `rebalance_respects_hysteresis_and_cooldown`, `shadow_mode_never_actuates` |
 
 **Exit gate**
 
@@ -433,7 +434,7 @@ if |π* − π| > rebalance_hysteresis:
 - [ ] Step-load test: actuation removes sustained queue imbalance without oscillation *(Track C — fleet / autoscaler)*.
 - [ ] Fast-path traffic spike reduces `demand_prefill` via `FP_share` term (no manual retune).
 
-**Parameters** (to add when Phase 4 starts):
+**Parameters** (canonical in `design/demiurge.params.toml`):
 
 ```toml
 [pool]
@@ -633,7 +634,7 @@ pairing-regret monitor.
 - [x] Step-load test: no pool-weight oscillation (hysteresis holds).
 - [x] `BENCH-PAIR-GREEDY` and `BENCH-REBALANCE` gates pass.
 
-**Out of scope.** Learned corrector in prod (Phase 8 / Track C), Track B **production exit gates** (real NIC + io_uring TCP serve — see Phase 5+), live migration (Phase 6 / Track C).
+**Out of scope.** Learned corrector in prod (Phase 8 / Track C), Track B **production exit gates** (real NIC XDP under load, x86_64 p99 — see Phase 5+), live migration (Phase 6 / Track C).
 
 ---
 
@@ -709,8 +710,9 @@ exit gates on reference hardware.
 
 **Status (Jun 2026).** Engineering path green on Linux VM (`./scripts/track-b-verify.sh`
 PASS): runtime XDP on veth, router kernel admit + actuation map sync,
-`BENCH-IOURING-FWD`, full load/stress. **Exit gates** (real NIC, io_uring production
-TCP serve, x86_64 p99) remain open.
+`IoUringProxySession` on production TCP `serve()`, `LOAD-TRACK-B-*` load scenarios,
+`BENCH-IOURING-FWD`, full load/stress. **Exit gates** (real NIC XDP under load,
+x86_64 p99 budget) remain open.
 
 ### Shipped
 
@@ -719,19 +721,20 @@ TCP serve, x86_64 p99) remain open.
 | `bpf/admit_shed.bpf.c` | XDP token-bucket shed; CI via `bpf.yml` → `target/bpf/admit_shed.o` |
 | `demiurge-dataplane` | `XdpAdmitShed` via aya — load, attach, map seed/reseed; veth tests incl. packet shed |
 | `demiurge-router` | `AdmitMode`, `with_kernel_admit()`, actuation BPF map sync, env flags |
-| `demiurge-dataplane` | `IoUringForwarder::copy_between`, `DEMIURGE_IOURING=1` proxy path |
+| `demiurge-dataplane` | `IoUringProxySession` (production TCP recv/send), `IoUringForwarder::copy_between` |
+| `demiurge-router` | `DEMIURGE_IOURING=1` per-connection proxy on `serve()` |
+| `xtask` / load | `LOAD-TRACK-B-IOURING`, `LOAD-TRACK-B-KERNEL` + `track_b_load.rs` veth wiring |
 | Bench | `BENCH-IOURING-FWD` + `BENCH-RCU-SNAPSHOT` in `bench-gates.toml` |
 | CI / scripts | `track-b-gate.sh` in `gate.sh` + CI; `track-b-verify.sh`, `track-b-bench.sh`; Vagrant bootstrap |
 | Release | `linux-nightly` rolling pre-release on Ubuntu |
 
-### Remaining
+### Remaining (exit gates)
 
 | Item | Closes |
 |------|--------|
-| io_uring recv/send on production TCP `serve()` loop | **done** — `IoUringProxySession` per connection |
-| Load scenario with `DEMIURGE_ADMIT_MODE` / XDP / IOURING env | **done** — `LOAD-TRACK-B-IOURING`, `LOAD-TRACK-B-KERNEL` |
 | XDP on production NIC under decode saturation | Exit: shed before pool saturation |
 | x86_64 + NIC p99 under CP slowdown | Exit: reference hardware |
+| Track B load scenarios in automated CI | Today: `track-b-verify.sh` on Linux only |
 
 **Exit gate — production**
 
