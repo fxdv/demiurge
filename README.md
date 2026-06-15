@@ -2,105 +2,80 @@
 
 # Demiurge
 
-**A phase-aware, cache-locality-first load balancer for inference fleets** *(Phases 0–5 shipped locally; production economics TBD).*
-
-*We're building the missing control/dataplane layer for disaggregated LLM serving — early proof is green; disruption depends on production economics.*
-
-*Target: route prefill and decode as independent phases across two pools, with the KV cache as the explicit hand-off artifact — because an inference request is a lease on stateful accelerator memory, not a packet.*
+**A phase-aware, cache-locality-first load balancer for inference fleets**
 
 [![design-conformance](https://github.com/fxdv/demiurge/actions/workflows/design-conformance.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/design-conformance.yml)
 [![ci](https://github.com/fxdv/demiurge/actions/workflows/ci.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/ci.yml)
 [![spec](https://github.com/fxdv/demiurge/actions/workflows/spec.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/spec.yml)
-[![invariant: C&gt;0](https://img.shields.io/badge/invariant-C%3E0%20by%20construction-005aa0)](#invariants-that-cant-rot)
+[![invariant: C&gt;0](https://img.shields.io/badge/invariant-C%3E0%20by%20construction-005aa0)](spec/demiurge.tex)
 [![license](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)](#license)
 
 </div>
 
 > **The name.** In Platonic cosmology the *demiurge* is the craftsman who shapes
-> formless chaos into an ordered cosmos — which is precisely this system's job:
-> imposing locality-aware order on chaotic inference traffic.
+> formless chaos into an ordered cosmos — imposing locality-aware order on
+> chaotic inference traffic.
 
-> **Status.** **Track A (macOS / local dev):** Phases **0–5 proof** are implemented
-> and gated — through userspace RCU + admit shed, load/stress, and macOS release.
-> **Track B (Linux):** runtime XDP on veth, router kernel admit, `track-b-verify` green
-> on Linux VM; io_uring production TCP + real NIC exit gates remain. **Track C (fleet / GPU):** migration, production
-> actuation, cross-tenant cache sharing, and corrector graduation remain design
-> intent. See [Status](#status-what-exists) and [`ROADMAP.md`](ROADMAP.md).
+> **Status.** [`ROADMAP.md`](ROADMAP.md) — tracks, burndown, and exit gates.
 
 ---
 
-## Table of contents
+## Quickstart
 
-- [Why Demiurge](#why-demiurge)
-- [Product & design brief (YC / partners)](#product--design-brief-yc--partners)
-- [The bet](#the-bet)
-- [Architecture at a glance](#architecture-at-a-glance)
-- [Repository layout](#repository-layout)
-- [Daily commands](#daily-commands)
-- [Quickstart (extended)](#quickstart-extended)
-- [Design-driven development](#design-driven-development)
-  - [The single source of truth](#the-single-source-of-truth)
-  - [Invariants that can't rot](#invariants-that-cant-rot)
-  - [Traceability: spec ⇄ code ⇄ test](#traceability-spec--code--test)
-- [Everyday workflows](#everyday-workflows)
-- [Roadmap & gates](#roadmap--gates)
-- [Contributing](#contributing)
-- [License](#license)
+**Daily loop**
+
+```bash
+./scripts/bootstrap.sh              # once: toolchain + pre-push hook (full gate)
+cargo xtask lint                    # design loop — burndown + blur guard
+./scripts/gate.sh --quick           # inner loop (~1 min): gen, lint, fmt, clippy, test
+./scripts/gate.sh                   # before push / merge: full CI mirror
+cargo xtask product-doc             # human brief PDF → target/product-doc/docs/
+cargo xtask product-doc --plain     # same, no release stamp (needs pandoc)
+cargo xtask spec                    # implementer's LaTeX spec → spec/demiurge.pdf
+```
+
+**Track B on macOS** (BPF compile + gate; XDP veth needs Linux):
+
+```bash
+./scripts/linux-vm/docker-track-b.sh bootstrap   # once
+./scripts/linux-vm/docker-track-b.sh gate        # CI mirror inside container
+```
+
+Full VM path (XDP veth smoke): [`scripts/linux-vm/README.md`](scripts/linux-vm/README.md).
+
+**Verify & release**
+
+```bash
+cargo xtask gen               # regenerate everything derived from canonical inputs
+cargo run --release -q --package xtask -- bench-gate   # CPU hot-path gates
+cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-gate report
+./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
+./scripts/load-stress.sh      # strict heavy stress — local only, not in gate.sh
+./scripts/pre-release.sh      # gate + full load bench + stress (nightly / pre-tag)
+./scripts/track-a-verify.sh   # optional Track A observability (~5 min; report.md)
+./scripts/track-b-verify.sh   # Track B on Linux (gate + load + stress + report)
+./scripts/publish.sh          # pre-release + tarball (binaries, one-pager, product PDF)
+./scripts/publish.sh --github v0.1.0-p6   # local macOS/Linux + GitHub Release tag
+cargo test --all              # executable invariants (C>0, ±α)
+```
+
+If `cargo xtask gen` changes any tracked file, commit it — CI fails on stale
+generated artifacts.
 
 ---
 
 ## Why Demiurge
 
 Round-robin and least-connections optimize for connection equivalence. For LLM
-inference that's wrong on three counts, all at once:
+inference that's wrong on three counts:
 
 - the most valuable backend state — the **KV cache** — is request-correlated, not interchangeable;
 - the cost of a request depends on the target's **current batch and active KV footprint**, not a fixed weight;
 - occupancy is a **random variable**, not a constant.
 
-Demiurge is built to exploit exactly those three facts.
+Demiurge is built to exploit exactly those three facts. Full design reasoning lives in [`spec/`](spec/).
 
-## Product & design brief (YC / partners)
-
-The LaTeX spec PDF is the **implementer's contract** — precise, but not a pleasant
-read for partners or investors. For a narrative product and technical design
-document (problem, solution, traction, roadmap, honest scope), see
-**[`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md)**.
-
-## Status: what exists
-
-| Area | State |
-|------|-------|
-| Cost-factor algebra (`demiurge-cost`), log-space, positive by construction, fail-expensive | **implemented + property-tested** (P0) |
-| Minimal forwarder (`demiurge-router`): phase pools, least-cost selection, live in-flight load | **implemented + tested** (P0) |
-| Async `Route` / non-blocking prefill + short-context fast path | **implemented + tested** (P1) |
-| KV hand-off (`demiurge-handoff`), reservation ledger (`demiurge-control`), Φ barrier | **implemented + tested** (P2) |
-| State plane (`demiurge-state`): warmth map, occupancy gossip, RCU snapshots | **implemented + tested** (P3) |
-| Control plane: greedy pf→dc pairing, length predictor, shadow rebalancer | **implemented + tested** (P4) |
-| Design-conformance tooling (`xtask gen`/`lint`), CI, spec PDF | **implemented** |
-| CPU bench gates (`bench-gates.toml`, `cargo xtask bench-gate`) | **implemented** — in CI |
-| Local load bench (`load-bench.sh`, pseudo report) | **implemented** — CI runs `load-bench --ci` smoke |
-| Real stress suite (`load-stress.sh`, strict zero-error gates) | **implemented** — local only, not in CI |
-| Userspace RCU + admit shed (P5 proof) | **shipped** — Track A; `BENCH-RCU-SNAPSHOT` in CI |
-| Kernel XDP admit + io_uring forward (Track B) | **partial** — aya attach on veth, router `AdmitMode`, map sync, `copy_between` + `BENCH-IOURING-FWD`; production TCP serve + real NIC exit gates open |
-| Track B Linux verify (`track-b-verify.sh`, Vagrant) | **shipped** — gate + bench-probe + load + stress + report on Linux |
-| Track A shadow tooling (fleet pilot, corrector shadow, HandoffTransport) | **implemented** — `cargo xtask fleet-pilot` |
-| RDMA hand-off production path, live migration | design intent (P6) |
-| Cross-tenant cache sharing, learned corrector graduation | design intent (P7–P8) |
-
-The `spec/` document is the *target* design; the generated conformance matrix
-marks each requirement `implemented` or `intended` so the two never blur.
-
-## The bet
-
-> **Disaggregated prefill/decode-aware routing as the organizing principle of the entire balancer.**
-
-Prefill is compute-bound, bursty, embarrassingly parallel, and cache-*producing*.
-Decode is memory-bandwidth-bound, long-lived, latency-sensitive, and
-cache-*consuming*. Demiurge schedules the two phases independently across two
-pools and treats the KV cache as the explicit hand-off between them. Full
-reasoning — alternatives rejected and what we deliberately sacrifice — lives in
-[`spec/`](spec/).
+---
 
 ## Architecture at a glance
 
@@ -130,7 +105,9 @@ flowchart TB
 
 - **Data plane** never blocks on the control plane; it serves the last RCU snapshot.
 - **Control plane** holds the policy and republishes weights at a bounded cadence.
-- **State plane** is eventually consistent on purpose — a wrong guess costs a cache miss, never a correctness violation. *Authorization* (who may share a cache line) is the one thing kept strongly consistent.
+- **State plane** is eventually consistent on purpose — a wrong guess costs a cache miss, never a correctness violation.
+
+---
 
 ## Repository layout
 
@@ -140,157 +117,68 @@ flowchart TB
 | [`design/bench-gates.toml`](design/bench-gates.toml) | CPU hot-path gate thresholds (median ns/op, release). |
 | [`design/load-bench.toml`](design/load-bench.toml) | Local TCP load scenarios + optional p99 soft gates. |
 | [`design/requirements.toml`](design/requirements.toml) | Registry of normative/structural requirement IDs + phase tags. |
-| [`ROADMAP.md`](ROADMAP.md) | **Concrete build plan** — phased deliverables, gates, burndown. |
-| [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md) | **Human-readable product & design brief** (partners, YC, investors). |
+| [`ROADMAP.md`](ROADMAP.md) | Build plan — tracks, phased deliverables, gates, burndown. |
+| [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md) | Narrative product & design brief. |
 | [`spec/demiurge.tex`](spec/) | Full target design; §1 lists shipped vs intended scope |
 | `spec/generated/` | `@generated` parameter & conformance tables — never hand-edited. |
-| [`crates/demiurge-cost/`](crates/demiurge-cost/) | The cost-function factor algebra and its property tests. |
+| [`crates/demiurge-cost/`](crates/demiurge-cost/) | Cost-factor algebra and property tests. |
 | [`crates/demiurge-router/`](crates/demiurge-router/) | Phase-aware forwarder: async route, fast path, KV pool integration. |
 | [`crates/demiurge-handoff/`](crates/demiurge-handoff/) | KV hand-off descriptor, registry, TCP transport (RDMA trait later). |
 | [`crates/demiurge-control/`](crates/demiurge-control/) | Reservation ledger, TTL release, admit/reject metrics. |
 | [`xtask/`](xtask/) | `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `load-bench`, `fleet-pilot`. |
 | [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `load-bench.sh`, `publish.sh`, `track-a-verify.sh`, `track-b-verify.sh`, [`linux-vm/`](scripts/linux-vm/). |
 
-## Daily commands
+---
 
-```bash
-./scripts/bootstrap.sh              # once: toolchain + pre-push hook (full gate)
-cargo xtask lint                    # design loop — burndown + blur guard
-./scripts/gate.sh --quick           # inner loop (~1 min): gen, lint, fmt, clippy, test
-./scripts/gate.sh                   # before push / merge: full CI mirror
-cargo xtask product-doc             # human brief PDF → target/product-doc/docs/
-cargo xtask product-doc --plain     # same, no release stamp (needs pandoc)
-cargo xtask spec                    # implementer's LaTeX spec → spec/demiurge.pdf
-```
-
-**Track B on macOS** (BPF compile + gate; XDP veth needs Linux):
-
-```bash
-./scripts/linux-vm/docker-track-b.sh bootstrap   # once
-./scripts/linux-vm/docker-track-b.sh gate        # CI mirror inside container
-```
-
-Full VM path (XDP veth smoke): [`scripts/linux-vm/README.md`](scripts/linux-vm/README.md).
-
-## Quickstart (extended)
-
-```bash
-cargo xtask gen               # regenerate everything derived from canonical inputs
-cargo run --release -q --package xtask -- bench-gate  # CPU hot-path gates
-cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-gate report
-./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
-./scripts/load-stress.sh      # strict heavy stress — local only, not in gate.sh
-./scripts/pre-release.sh      # gate + full load bench + stress (nightly / pre-tag)
-./scripts/track-a-verify.sh   # optional Track A observability (~5 min; report.md + soft spots)
-./scripts/publish.sh          # pre-release + tarball (binaries, one-pager, product PDF)
-./scripts/publish.sh --github v0.1.0-p6   # local macOS/Linux + GitHub Release tag
-cargo test --all              # run the executable invariants (C>0, ±α)
-```
-
-If `cargo xtask gen` changes any tracked file, commit it — CI fails on stale
-generated artifacts.
-
-## Design-driven development
-
-The spec isn't documentation that trails the code; it's the contract the code is
-checked against. Three mechanisms keep them honest, all enforced in CI.
-
-### The single source of truth
-
-Every constant lives in **one** file:
-
-```toml
-# design/demiurge.params.toml
-[corrector]
-alpha = 0.20
-```
-
-`cargo xtask gen` projects it into both worlds:
-
-- `crates/demiurge-cost/src/generated_params.rs` → the Rust constants the binary uses,
-- `spec/generated/params_table.tex` → the table the spec prints.
-
-Change `α` once, regenerate, and the prose and the binary move together.
-
-### Invariants that can't rot
-
-Cost is represented by its **natural logarithm** and composed by *adding* logs:
-
-```
-ln C = ln(TimeCore>0) + Σ ln(Barrier≥1) + Σ ln(Discount∈(0,1]) + ln(Corrector∈[1−α,1+α])
-```
-
-A finite log is the logarithm of a strictly-positive real, so positivity is
-genuinely by construction — there is no linear product to underflow to `0.0` or
-flip sign (the failure mode an earlier draft had), and comparison uses the exact
-log. Rewards enter only as discounts (never subtraction), and invalid hot-path
-signals saturate *toward expensive*, so a broken metric can't make a sick
-backend look cheap. The properties are enforced in four layers:
-
-| Layer | Mechanism | Guards against |
-|-------|-----------|----------------|
-| Types | log-space `Cost`, positive factor newtypes | structurally invalid composition |
-| CI tests | `proptest` + named traceability tests | regressions in algebra and routing |
-| CI bench | `cargo xtask bench-gate` | hot-path CPU regressions |
-| Prod | `FACTOR_CLAMP_EVENTS` metric / alarms | drift the first two miss |
-
-### Traceability: spec ⇄ code ⇄ test
-
-Every normative claim has a stable ID — `DEMI-COST-POS`, `DEMI-CORR-CLAMP`,
-`DEMI-S1-DOMAIN`, … — appearing verbatim in all three places:
+## Design contract
 
 ```text
-spec:  \req{DEMI-COST-POS}            (prose, §4.3)
-code:  /// [DEMI-COST-POS] ...        (doc-comment on the function)
-test:  tests = ["cost_strictly_positive", ...]  (named in requirements.toml)
+design/demiurge.params.toml  ──►  cargo xtask gen  ──►  generated_params.rs + params_table.tex
+design/requirements.toml     ──►  cargo xtask lint ──►  spec ⇄ code ⇄ test (requirement IDs)
+spec/demiurge.tex            ──►  cargo xtask spec ──►  spec/demiurge.pdf
 ```
 
-`cargo xtask lint` enforces: (1) every reference resolves to a declared
-requirement; (2) every declared requirement is referenced in the spec or code;
-(3) every `implemented` requirement lists named `#[test]` / proptest functions
-that exist.
+| Plate | Command | CI |
+|-------|---------|-----|
+| Single source of truth | `cargo xtask gen` | drift check in `gate.sh` |
+| Traceability pipe | `cargo xtask lint` | design-conformance workflow |
+| Spec PDF | `cargo xtask spec` | spec workflow |
+| CPU gates | `cargo xtask bench-gate` | ci workflow |
 
-## Everyday workflows
+Cost is log-composed and positive by construction (`C>0`); property tests and bench gates enforce it. Details: [`spec/demiurge.tex`](spec/demiurge.tex) §4.
+
+---
+
+## Workflows
 
 **Change a parameter**
 
 ```bash
-$EDITOR design/demiurge.params.toml   # edit the one value
-cargo xtask gen                       # propagate to code + spec
-cargo test --all                      # confirm invariants still hold
-git add -A && git commit              # spec + code move in lockstep
+$EDITOR design/demiurge.params.toml
+cargo xtask gen && cargo test --all
 ```
 
-**Add a normative requirement** — add `\req{DEMI-NEW-THING}` in the spec, a row in
-`requirements.toml`, and reference `[DEMI-NEW-THING]` in the function and its test;
-`cargo xtask lint` must pass.
+**Add a requirement** — `\req{DEMI-NEW-THING}` in spec, row in `requirements.toml`, reference in code + test; `cargo xtask lint` must pass.
 
-**Land a new module** — flip its requirement from `requires_test = false` to
-`true` in the same PR. Conformance ratchets tighter as the system grows, never
-looser.
+**Land a new module** — flip `requires_test` to `true` in the same PR. Conformance ratchets tighter, never looser.
 
-## Roadmap & gates
+---
 
-The full plan — **three tracks** (macOS local dev → Linux production dataplane →
-fleet/GPU economics), deliverables, requirement IDs, exit gates, cross-cutting
-plans, and the live burndown — lives in **[`ROADMAP.md`](ROADMAP.md)**.
+## Roadmap
 
-Track progress: `cargo xtask lint` prints per-phase burndown
-(`P0: 4/4`, …, `P5: 2/2`). The spec conformance matrix includes a Phase column;
-the roadmap maps phases **0–5** to Track A, **5+** to Track B, **6–8** to Track C.
+Phased deliverables, three tracks (macOS → Linux dataplane → fleet/GPU), exit gates, and live burndown: **[`ROADMAP.md`](ROADMAP.md)**.
+
+Track progress: `cargo xtask lint` prints per-phase burndown (`P0: 4/4`, …).
+
+---
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). External contributors must sign the
-[`CLA.md`](CLA.md) before merge (see PR template).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). External contributors sign [`CLA.md`](CLA.md) before merge.
+
+---
 
 ## License
 
 Dual-licensed under **Apache-2.0 OR MIT** — see [`LICENSE-APACHE`](LICENSE-APACHE)
 and [`LICENSE-MIT`](LICENSE-MIT).
-
----
-
-<div align="center">
-<sub>Demiurge — design spec v1.5 · the spec is the contract, the code is the proof · human brief: [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md).</sub>
-</div>
