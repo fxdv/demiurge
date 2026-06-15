@@ -36,7 +36,8 @@
 - [The bet](#the-bet)
 - [Architecture at a glance](#architecture-at-a-glance)
 - [Repository layout](#repository-layout)
-- [Quickstart](#quickstart)
+- [Daily commands](#daily-commands)
+- [Quickstart (extended)](#quickstart-extended)
 - [Design-driven development](#design-driven-development)
   - [The single source of truth](#the-single-source-of-truth)
   - [Invariants that can't rot](#invariants-that-cant-rot)
@@ -147,15 +148,34 @@ flowchart TB
 | [`crates/demiurge-router/`](crates/demiurge-router/) | Phase-aware forwarder: async route, fast path, KV pool integration. |
 | [`crates/demiurge-handoff/`](crates/demiurge-handoff/) | KV hand-off descriptor, registry, TCP transport (RDMA trait later). |
 | [`crates/demiurge-control/`](crates/demiurge-control/) | Reservation ledger, TTL release, admit/reject metrics. |
-| [`xtask/`](xtask/) | `gen`, `lint`, `bench-gate`, `load-bench`, `load-report`. |
-| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `gen.sh`, `load-bench.sh`, `load-stress.sh`, `pre-release.sh`, `publish.sh`, `track-a-verify.sh`. |
+| [`xtask/`](xtask/) | `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `load-bench`, `fleet-pilot`. |
+| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `load-bench.sh`, `publish.sh`, `track-a-verify.sh`, `track-b-verify.sh`, [`linux-vm/`](scripts/linux-vm/). |
 
-## Quickstart
+## Daily commands
 
 ```bash
-./scripts/bootstrap.sh        # once: toolchain components + pre-push gate hook
+./scripts/bootstrap.sh              # once: toolchain + pre-push hook (full gate)
+cargo xtask lint                    # design loop — burndown + blur guard
+./scripts/gate.sh --quick           # inner loop (~1 min): gen, lint, fmt, clippy, test
+./scripts/gate.sh                   # before push / merge: full CI mirror
+cargo xtask product-doc             # human brief PDF → target/product-doc/docs/
+cargo xtask product-doc --plain     # same, no release stamp (needs pandoc)
+cargo xtask spec                    # implementer's LaTeX spec → spec/demiurge.pdf
+```
+
+**Track B on macOS** (BPF compile + gate; XDP veth needs Linux):
+
+```bash
+./scripts/linux-vm/docker-track-b.sh bootstrap   # once
+./scripts/linux-vm/docker-track-b.sh gate        # CI mirror inside container
+```
+
+Full VM path (XDP veth smoke): [`scripts/linux-vm/README.md`](scripts/linux-vm/README.md).
+
+## Quickstart (extended)
+
+```bash
 cargo xtask gen               # regenerate everything derived from canonical inputs
-cargo xtask lint              # enforce the spec ⇄ code ⇄ test join
 cargo run --release -q --package xtask -- bench-gate  # CPU hot-path gates
 cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-gate report
 ./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
@@ -165,7 +185,6 @@ cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-
 ./scripts/publish.sh          # pre-release + tarball (binaries, one-pager, product PDF)
 ./scripts/publish.sh --github v0.1.0-p6   # local macOS/Linux + GitHub Release tag
 cargo test --all              # run the executable invariants (C>0, ±α)
-./scripts/gate.sh             # run the full local gate (mirrors CI)
 ```
 
 If `cargo xtask gen` changes any tracked file, commit it — CI fails on stale
