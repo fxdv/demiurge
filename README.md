@@ -22,8 +22,8 @@
 
 > **Status.** **Track A (macOS / local dev):** Phases **0–5 proof** are implemented
 > and gated — through userspace RCU + admit shed, load/stress, and macOS release.
-> **Track B (Linux):** XDP compile + `linux-nightly` CI are live; runtime attach and
-> `io_uring` forwarder are next. **Track C (fleet / GPU):** migration, production
+> **Track B (Linux):** runtime XDP on veth, router kernel admit, `track-b-verify` green
+> on Linux VM; io_uring production TCP + real NIC exit gates remain. **Track C (fleet / GPU):** migration, production
 > actuation, cross-tenant cache sharing, and corrector graduation remain design
 > intent. See [Status](#status-what-exists) and [`ROADMAP.md`](ROADMAP.md).
 
@@ -80,7 +80,9 @@ document (problem, solution, traction, roadmap, honest scope), see
 | CPU bench gates (`bench-gates.toml`, `cargo xtask bench-gate`) | **implemented** — in CI |
 | Local load bench (`load-bench.sh`, pseudo report) | **implemented** — CI runs `load-bench --ci` smoke |
 | Real stress suite (`load-stress.sh`, strict zero-error gates) | **implemented** — local only, not in CI |
-| XDP/L4 admission, io_uring data plane, RCU data-plane serving | **proof shipped (P5)** — userspace RCU + admit shed; **production** XDP/io_uring planned (Track B) |
+| Userspace RCU + admit shed (P5 proof) | **shipped** — Track A; `BENCH-RCU-SNAPSHOT` in CI |
+| Kernel XDP admit + io_uring forward (Track B) | **partial** — aya attach on veth, router `AdmitMode`, map sync, `copy_between` + `BENCH-IOURING-FWD`; production TCP serve + real NIC exit gates open |
+| Track B Linux verify (`track-b-verify.sh`, Vagrant) | **shipped** — gate + bench-probe + load + stress + report on Linux |
 | Track A shadow tooling (fleet pilot, corrector shadow, HandoffTransport) | **implemented** — `cargo xtask fleet-pilot` |
 | RDMA hand-off production path, live migration | design intent (P6) |
 | Cross-tenant cache sharing, learned corrector graduation | design intent (P7–P8) |

@@ -4,7 +4,7 @@
 
 *Human-readable product and design brief. Synthesized from [`README.md`](../README.md), [`ROADMAP.md`](../ROADMAP.md), and the living requirement registry. For machine-checked contracts, see [`design/requirements.toml`](../design/requirements.toml); for academic notation, see [`spec/demiurge.tex`](../spec/demiurge.tex) (PDF is optional).*
 
-**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **21 of 24** normative requirements are implemented with named tests. Production kernel dataplane (XDP, io_uring) and fleet-scale economics are **in progress / planned**.
+**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **21 of 24** normative requirements are implemented with named tests. **Track B** kernel dataplane is **partially shipped** (runtime XDP on veth, router integration, io_uring micro-path); production exit gates (real NIC, io_uring TCP serve, x86_64 p99) and **Track C** fleet economics remain open.
 
 ---
 
@@ -43,7 +43,7 @@ When prefill and decode share one pool, you get the worst of both worlds: comput
 ### What Demiurge does
 
 1. **Classifies** each request: short-context fast path (colocated) vs disaggregated prefill→decode.
-2. **Admits** under overload (token bucket today; kernel XDP on Linux next).
+2. **Admits** under overload (userspace token bucket on all platforms; kernel XDP on Linux when `DEMIURGE_ADMIT_MODE=xdp`).
 3. **Selects** the minimum-cost backend within each phase pool using live signals — queue depth, KV pressure, warmth hits, length predictions.
 4. **Hands off** the KV cache explicitly between prefill and decode backends.
 5. **Reserves memory** with honest overhead accounting so bursts cannot silently exhaust decode GPUs.
@@ -160,7 +160,7 @@ Live count from `cargo xtask lint`:
 |-------|---------------|--------|
 | **A — Local proof** | macOS + Linux, mock TCP backends | **Done** (Phases 0–5) |
 | **A+ — Shadow tooling** | Trace replay, corrector shadow, fleet pilot | **Done** |
-| **B — Linux production** | XDP attach, io_uring forwarder, nightly binaries | **In progress** (BPF compiles in CI) |
+| **B — Linux production** | XDP attach, io_uring forwarder, nightly binaries | **In progress** — engineering path green (`track-b-verify`); exit gates open |
 | **C — Fleet / GPU** | RDMA hand-off, migration, actuation at scale | **Planned** |
 
 ### CPU hot path (release benchmarks)
@@ -173,7 +173,7 @@ Routing logic is **sub-microsecond to low-microsecond** on laptop-class hardware
 | Compose (8 factors) | Full cost assembly | ~20 ns | 50 ns |
 | Classify | Fast vs disagg path | ~88 ns | 350 ns |
 | Select (64 backends) | Min-cost over pool | ~325 ns | 1 µs |
-| RCU snapshot read | Dataplane hot path | ~50 ns | 50 ns |
+| RCU snapshot read | Dataplane hot path | ~3 ns | 50 ns |
 
 ### Quality gates (always on in CI)
 
@@ -227,9 +227,10 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 
 ### Track B — Linux production dataplane (now)
 
-- [ ] Runtime XDP attach and kernel admit shed (not just userspace proof)
-- [ ] io_uring L7 forwarder for bulk proxy path
-- [ ] Weekly `linux-nightly` release binaries with BPF objects
+- [x] Runtime XDP attach + kernel admit on Linux (veth smoke, router `AdmitMode`, actuation map sync)
+- [ ] io_uring L7 forwarder on production TCP `serve()` loop (partial: `copy_between` + `BENCH-IOURING-FWD`)
+- [x] Weekly `linux-nightly` release binaries with BPF objects
+- [ ] Production exit gates: real NIC XDP under load, io_uring serve path, x86_64 p99 budget
 
 ### Track C — Fleet economics
 
