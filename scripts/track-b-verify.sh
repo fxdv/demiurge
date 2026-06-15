@@ -8,12 +8,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# shellcheck source=lib/ui.sh
+source "$(dirname "$0")/lib/ui.sh"
+
 ROOT="$PWD"
 OUT="$ROOT/target/track-b-verify"
 VAL="$OUT/validation"
 mkdir -p "$VAL" "$OUT/load" "$OUT/stress"
 
-bold() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 stamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 QUICK=0
@@ -33,6 +35,19 @@ if [[ "$(uname -s)" != "Linux" ]]; then
 fi
 
 STARTED="$(stamp)"
+if [[ "$QUICK" -eq 1 ]]; then
+  demiurge_banner "DEMIURGE · Track B verification" \
+    "mode    quick · gate + CPU benches" \
+    "repo    $(_ui_git_ref)" \
+    "host    $(_ui_host_tag) · linux"
+else
+  demiurge_banner "DEMIURGE · Track B verification" \
+    "mode    full · gate + load + stress" \
+    "repo    $(_ui_git_ref)" \
+    "host    $(_ui_host_tag) · linux" \
+    "note    proof ≠ production · mock TCP backends"
+fi
+
 bold "Track B verification started $STARTED (quick=$QUICK)"
 
 bash ./scripts/ensure-rust-toolchain.sh 2>&1 | tee "$VAL/ensure-rust.log"
@@ -248,8 +263,8 @@ if [[ "$QUICK" -eq 0 ]] && { [[ "$load_rc" -ne 0 ]] || [[ "$stress_rc" -ne 0 ]];
 fi
 
 if [[ "$fail" -ne 0 ]]; then
-  printf '\n\033[1;31mTRACK B VERIFY: FAILED\033[0m (gate/load/stress — see report)\033[0m\n' >&2
+  demiurge_fail "TRACK B VERIFY: FAILED (gate/load/stress — see report)"
   exit 1
 fi
 
-printf '\n\033[1;32mTRACK B VERIFY: PASSED\033[0m\n'
+demiurge_pass "TRACK B VERIFY: PASSED"

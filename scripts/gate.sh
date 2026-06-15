@@ -10,6 +10,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# shellcheck source=lib/ui.sh
+source "$(dirname "$0")/lib/ui.sh"
+
 QUICK=0
 CI_PHASE=""
 GATE_SKIP_RELEASE_BUILD="${GATE_SKIP_RELEASE_BUILD:-0}"
@@ -35,8 +38,6 @@ for arg in "$@"; do
       ;;
   esac
 done
-
-bold() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 
 run_conformance() {
   bold "regenerate artifacts from canonical inputs"
@@ -107,7 +108,7 @@ run_spec_optional() {
 }
 
 print_footer() {
-  printf '\n\033[1;32mALL GATES PASSED\033[0m\n'
+  demiurge_pass "ALL GATES PASSED"
   echo ""
   echo "Optional Track A total verification (full metrics + soft spots, ~5 min):"
   echo "  ./scripts/track-a-verify.sh  →  target/track-a-verify/report.md"
@@ -124,28 +125,47 @@ print_footer() {
 
 case "$CI_PHASE" in
   conformance)
+    demiurge_banner "DEMIURGE · verification gate" \
+      "mode    CI · conformance" \
+      "repo    $(_ui_git_ref)" \
+      "host    $(_ui_host_tag)"
     run_conformance
-    printf '\n\033[1;32mCONFORMANCE PASSED\033[0m\n'
+    demiurge_pass "CONFORMANCE PASSED"
     exit 0
     ;;
   quality)
+    demiurge_banner "DEMIURGE · verification gate" \
+      "mode    CI · quality" \
+      "repo    $(_ui_git_ref)" \
+      "host    $(_ui_host_tag)"
     run_conformance
     run_quality
-    printf '\n\033[1;32mQUALITY PASSED\033[0m\n'
+    demiurge_pass "QUALITY PASSED"
     exit 0
     ;;
   regression)
+    demiurge_banner "DEMIURGE · verification gate" \
+      "mode    CI · regression" \
+      "repo    $(_ui_git_ref)" \
+      "host    $(_ui_host_tag)"
     run_regression
-    printf '\n\033[1;32mREGRESSION PASSED\033[0m\n'
+    demiurge_pass "REGRESSION PASSED"
     exit 0
     ;;
 esac
+
+if [[ "$QUICK" -eq 0 ]]; then
+  demiurge_banner "DEMIURGE · verification gate" \
+    "mode    full · track A + B (platform-dependent)" \
+    "repo    $(_ui_git_ref)" \
+    "host    $(_ui_host_tag)"
+fi
 
 run_conformance
 run_quality
 
 if [[ "$QUICK" -eq 1 ]]; then
-  printf '\n\033[1;32mQUICK GATE PASSED\033[0m\n'
+  demiurge_pass "QUICK GATE PASSED"
   echo ""
   echo "Before merge or release, run the full gate:  ./scripts/gate.sh"
   exit 0

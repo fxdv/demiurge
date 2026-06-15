@@ -43,6 +43,10 @@ pub use demiurge_handoff::{
 };
 pub use demiurge_state::{BackendSnapshot, StatePlane, StateSnapshot, WarmthMap};
 
+mod banner;
+
+pub use banner::print_startup_banner;
+
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Request phase. Prefill is compute-bound and cache-producing; decode is

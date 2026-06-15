@@ -4,7 +4,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-bold() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+# shellcheck source=lib/ui.sh
+source "$(dirname "$0")/lib/ui.sh"
+
+demiurge_banner "DEMIURGE · load bench" \
+  "mode    local scenarios · release" \
+  "repo    $(_ui_git_ref)" \
+  "host    $(_ui_host_tag)" \
+  "note    proof ≠ production · mock TCP backends"
 
 bold "load scenarios (release)"
 set +e
@@ -20,4 +27,4 @@ if [ "$bench_rc" -ne 0 ]; then
   exit "$bench_rc"
 fi
 
-printf '\n\033[1;32mLOAD BENCH DONE\033[0m — see target/load-bench/latest.pseudo\n'
+demiurge_pass "LOAD BENCH DONE — see target/load-bench/latest.pseudo"

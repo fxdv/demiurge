@@ -4,15 +4,23 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# shellcheck source=lib/ui.sh
+source "$(dirname "$0")/lib/ui.sh"
+
 ROOT="$PWD"
 OUT="$ROOT/target/track-a-verify"
 VAL="$OUT/validation"
 mkdir -p "$VAL" "$OUT/load" "$OUT/stress" "$OUT/fleet-pilot"
 
-bold() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 stamp() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 STARTED="$(stamp)"
+demiurge_banner "DEMIURGE · Track A verification" \
+  "mode    full · metrics + load + stress" \
+  "repo    $(_ui_git_ref)" \
+  "host    $(_ui_host_tag)" \
+  "note    proof ≠ production · mock TCP backends"
+
 bold "Track A verification started $STARTED"
 
 bold "lint + phase burndown"
@@ -228,8 +236,8 @@ echo "  $OUT/load/latest.pseudo"
 echo "  $OUT/stress/stress.pseudo"
 
 if [ "$load_rc" -ne 0 ] || [ "$stress_rc" -ne 0 ]; then
-  printf '\n\033[1;31mTRACK A VERIFY: FAILED\033[0m (load_rc=%s stress_rc=%s)\n' "$load_rc" "$stress_rc" >&2
+  demiurge_fail "TRACK A VERIFY: FAILED (load_rc=$load_rc stress_rc=$stress_rc)"
   exit 1
 fi
 
-printf '\n\033[1;32mTRACK A VERIFY: PASSED\033[0m\n'
+demiurge_pass "TRACK A VERIFY: PASSED"

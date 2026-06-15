@@ -7,13 +7,15 @@
 //!   DEMIURGE_ADMIT_MODE    userspace | xdp | hybrid  (default userspace)
 //!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux)
 //!   DEMIURGE_IOURING       1 for io_uring recv/send on production TCP proxy (Linux)
+//!   DEMIURGE_BANNER        0|1 force disable/enable startup banner (default: TTY)
+//!   DEMIURGE_QUIET         1 for compact one-line startup
 
 use std::net::TcpListener;
 use std::process::exit;
 use std::sync::Arc;
 
 use demiurge_dataplane::AdmitMode;
-use demiurge_router::{parse_pool, serve, Router};
+use demiurge_router::{parse_pool, print_startup_banner, serve, Router};
 
 fn main() {
     if let Err(e) = run() {
@@ -37,20 +39,16 @@ fn run() -> Result<(), String> {
     let listener = TcpListener::bind(&listen).map_err(|e| format!("bind {listen}: {e}"))?;
 
     let admit_mode = AdmitMode::from_env();
-    let mut router = Router::new(prefill.clone(), decode.clone()).with_admit_mode(admit_mode);
-    if let Ok(iface) = std::env::var("DEMIURGE_XDP_IFACE") {
+    let mut router = Router::new(prefill, decode).with_admit_mode(admit_mode);
+    let xdp_iface = std::env::var("DEMIURGE_XDP_IFACE").ok();
+    if let Some(ref iface) = xdp_iface {
         router = router
-            .with_kernel_admit(&iface)
+            .with_kernel_admit(iface)
             .map_err(|e| format!("XDP attach on {iface}: {e}"))?;
     }
 
-    eprintln!(
-        "demiurge-router listening on {listen} (prefill={}, decode={}, admit={admit_mode:?}, xdp={}, io_uring={})",
-        prefill.len(),
-        decode.len(),
-        router.kernel_admit_attached(),
-        router.io_uring_enabled(),
-    );
+    print_startup_banner(&router, &listen, xdp_iface.as_deref());
+
     let router = Arc::new(router);
     serve(listener, router).map_err(|e| e.to_string())
 }

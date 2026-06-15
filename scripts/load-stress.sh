@@ -4,10 +4,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-bold() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
+# shellcheck source=lib/ui.sh
+source "$(dirname "$0")/lib/ui.sh"
 
 # Allow ephemeral ports to clear after prior bench runs.
 sleep 30
+
+demiurge_banner "DEMIURGE · load stress" \
+  "mode    strict · zero errors required" \
+  "repo    $(_ui_git_ref)" \
+  "host    $(_ui_host_tag)"
 
 bold "stress scenarios (release, strict)"
 set +e
@@ -19,8 +25,8 @@ bold "stress report"
 cargo run --release -q --package xtask -- load-report --stress
 
 if [ "$stress_rc" -ne 0 ]; then
-  printf '\n\033[1;31mSTRESS FAILED\033[0m — see target/load-bench/stress.pseudo\n' >&2
+  demiurge_fail "STRESS FAILED — see target/load-bench/stress.pseudo"
   exit "$stress_rc"
 fi
 
-printf '\n\033[1;32mSTRESS PASSED\033[0m — see target/load-bench/stress.pseudo\n'
+demiurge_pass "STRESS PASSED — see target/load-bench/stress.pseudo"
