@@ -24,7 +24,8 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), String> {
+/// Parse env, bind listen socket, build router — everything before the accept loop.
+fn configure() -> Result<(TcpListener, Arc<Router>), String> {
     let listen = std::env::var("DEMIURGE_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let prefill = parse_pool(&std::env::var("DEMIURGE_PREFILL").unwrap_or_default())?;
     let decode = parse_pool(&std::env::var("DEMIURGE_DECODE").unwrap_or_default())?;
@@ -49,6 +50,95 @@ fn run() -> Result<(), String> {
 
     print_startup_banner(&router, &listen, xdp_iface.as_deref());
 
-    let router = Arc::new(router);
+    Ok((listener, Arc::new(router)))
+}
+
+fn run() -> Result<(), String> {
+    let (listener, router) = configure()?;
     serve(listener, router).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&str, Option<&str>)]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap();
+            let mut saved = Vec::new();
+            for (key, val) in vars {
+                saved.push(((*key).to_string(), std::env::var(key).ok()));
+                match val {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+            Self { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, old) in &self.saved {
+                match old {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configure_rejects_empty_pools() {
+        let _env = EnvGuard::set(&[("DEMIURGE_PREFILL", None), ("DEMIURGE_DECODE", None)]);
+        let Err(err) = configure() else {
+            panic!("expected configure to fail on empty pools");
+        };
+        assert!(err.contains("no backends"));
+    }
+
+    #[test]
+    fn configure_rejects_invalid_pool_spec() {
+        let _env = EnvGuard::set(&[
+            ("DEMIURGE_PREFILL", Some("not-a-valid-spec")),
+            ("DEMIURGE_DECODE", None),
+            ("DEMIURGE_LISTEN", Some("127.0.0.1:0")),
+        ]);
+        let Err(err) = configure() else {
+            panic!("expected configure to fail on invalid pool spec");
+        };
+        assert!(err.contains("bad backend spec"));
+    }
+
+    #[test]
+    fn configure_binds_ephemeral_listener() {
+        let _env = EnvGuard::set(&[
+            ("DEMIURGE_PREFILL", Some("pf@127.0.0.1:9@0.01")),
+            ("DEMIURGE_DECODE", None),
+            ("DEMIURGE_LISTEN", Some("127.0.0.1:0")),
+            ("DEMIURGE_BANNER", Some("0")),
+        ]);
+        let (listener, _router) = configure().unwrap();
+        assert!(listener.local_addr().unwrap().port() > 0);
+    }
+
+    #[test]
+    fn configure_accepts_decode_only_pool() {
+        let _env = EnvGuard::set(&[
+            ("DEMIURGE_PREFILL", None),
+            ("DEMIURGE_DECODE", Some("dc@127.0.0.1:9@0.02")),
+            ("DEMIURGE_LISTEN", Some("127.0.0.1:0")),
+            ("DEMIURGE_BANNER", Some("0")),
+        ]);
+        let (listener, _router) = configure().unwrap();
+        assert!(listener.local_addr().unwrap().port() > 0);
+    }
 }
