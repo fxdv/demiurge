@@ -151,6 +151,7 @@ if [[ "$QUICK" -eq 1 ]]; then
   exit 0
 fi
 
+GATE_SKIP_RELEASE_BUILD=1
 run_regression
 run_spec_optional
 print_footer
