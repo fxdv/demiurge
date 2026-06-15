@@ -243,8 +243,12 @@ fn apply_scenario_router_flags(mut router: Router, sc: &Scenario) -> Router {
 }
 
 fn scenario_skip_reason(sc: &Scenario) -> Option<String> {
+    if sc.linux_only {
+        #[cfg(not(target_os = "linux"))]
+        return Some("Linux only".into());
+    }
     #[cfg(not(target_os = "linux"))]
-    if sc.linux_only || sc.track_b_kernel {
+    if sc.track_b_kernel {
         return Some("Linux only".into());
     }
     #[cfg(target_os = "linux")]
