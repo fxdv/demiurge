@@ -32,5 +32,8 @@ fi
 bash ./scripts/build-bpf.sh
 export DEMIURGE_BPF_OBJECT="$(pwd)/target/bpf/admit_shed.o"
 export DEMIURGE_XDP_FLAGS=skb
+# Root-owned artifacts in the shared target/ dir break subsequent CI cargo runs.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(pwd)/target/xdp-veth-smoke}"
+mkdir -p "$CARGO_TARGET_DIR"
 cargo test -p demiurge-dataplane --test xdp_veth -- --ignored --nocapture
 echo "xdp-veth-smoke: OK"

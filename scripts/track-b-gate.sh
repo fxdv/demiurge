@@ -39,7 +39,15 @@ fi
 bold "Track B gate — XDP veth smoke (root)"
 export DEMIURGE_BPF_OBJECT="${DEMIURGE_BPF_OBJECT:-$ROOT/target/bpf/admit_shed.o}"
 export DEMIURGE_XDP_FLAGS="${DEMIURGE_XDP_FLAGS:-skb}"
-as_root env DEMIURGE_BPF_OBJECT="$DEMIURGE_BPF_OBJECT" DEMIURGE_XDP_FLAGS="$DEMIURGE_XDP_FLAGS" \
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/xdp-veth-smoke}"
+as_root env PATH="$PATH" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" HOME="$HOME" \
+  DEMIURGE_BPF_OBJECT="$DEMIURGE_BPF_OBJECT" DEMIURGE_XDP_FLAGS="$DEMIURGE_XDP_FLAGS" \
+  CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
   ./scripts/xdp-veth-smoke.sh
+
+# Defensive: root smoke must not leave the shared target/ tree unwritable.
+if [[ -d "$ROOT/target" && "$(id -u)" -ne 0 ]]; then
+  as_root chown -R "$(id -u)":"$(id -g)" "$ROOT/target" 2>/dev/null || true
+fi
 
 printf '\n\033[1;32mTRACK B GATE: PASSED\033[0m\n'
