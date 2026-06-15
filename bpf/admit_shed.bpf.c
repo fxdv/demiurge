@@ -26,15 +26,18 @@ static __always_inline int admit_or_shed(void)
 	if (!tokens)
 		return XDP_ABORTED;
 
-	if (*tokens == 0) {
+	/* Decrement-first (matches userspace AdmitBucket CAS): a plain
+	 * load/compare then sub races on multi-CPU XDP — two CPUs can both
+	 * observe the last token and over-admit, or sub from zero and wrap. */
+	__u64 prev = __sync_fetch_and_sub(tokens, 1);
+	if (prev == 0) {
+		__sync_fetch_and_add(tokens, 1);
 		__u32 shed_key = KEY_SHED_TOTAL;
 		__u64 *shed = bpf_map_lookup_elem(&admit_state, &shed_key);
 		if (shed)
 			__sync_fetch_and_add(shed, 1);
 		return XDP_DROP;
 	}
-
-	__sync_fetch_and_sub(tokens, 1);
 	return XDP_PASS;
 }
 
