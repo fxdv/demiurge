@@ -6,7 +6,7 @@
 //!   DEMIURGE_DECODE        decode pool spec          label@host:port@seconds,...
 //!   DEMIURGE_ADMIT_MODE    userspace | xdp | hybrid  (default userspace)
 //!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux)
-//!   DEMIURGE_IOURING       1 to proxy via io_uring copy (Linux)
+//!   DEMIURGE_IOURING       1 for io_uring recv/send on production TCP proxy (Linux)
 
 use std::net::TcpListener;
 use std::process::exit;

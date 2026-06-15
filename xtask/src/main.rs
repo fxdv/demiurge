@@ -29,6 +29,8 @@ mod bench_gate;
 mod fleet_pilot;
 mod load_bench;
 mod pseudo_report;
+#[cfg(target_os = "linux")]
+mod track_b_load;
 
 const PARAMS: &str = "design/demiurge.params.toml";
 const REQS: &str = "design/requirements.toml";
@@ -103,9 +105,10 @@ fn main() {
         "build-bpf" => build_bpf(),
         "fleet-pilot" => fleet_pilot::fleet_pilot(),
         "spec" => build_spec(),
+        "product-doc" => build_product_doc(),
         other => {
             eprintln!(
-                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, `build-bpf`, or `fleet-pilot`"
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, `build-bpf`, or `fleet-pilot`"
             );
             exit(2);
         }
@@ -132,6 +135,42 @@ fn build_spec() -> Result<(), Box<dyn Error>> {
         Ok(())
     } else {
         Err(format!("latexmk exited with {status}").into())
+    }
+}
+
+fn build_product_doc() -> Result<(), Box<dyn Error>> {
+    let plain = std::env::args().any(|a| a == "--plain");
+    let out_dir = Path::new("target/product-doc/docs");
+    fs::create_dir_all(out_dir)?;
+    let out_md = out_dir.join("PRODUCT-AND-DESIGN.md");
+    let out_pdf = out_dir.join("PRODUCT-AND-DESIGN.pdf");
+
+    if plain {
+        fs::copy("docs/PRODUCT-AND-DESIGN.md", &out_md)?;
+        println!("product-doc: copied docs/PRODUCT-AND-DESIGN.md (no release stamp)");
+    } else {
+        let status = std::process::Command::new("bash")
+            .arg("scripts/generate-product-doc.sh")
+            .arg(&out_md)
+            .env("ARTIFACT_DIR", "target/product-doc")
+            .status()?;
+        if !status.success() {
+            return Err(format!("generate-product-doc exited with {status}").into());
+        }
+    }
+
+    let status = std::process::Command::new("bash")
+        .args([
+            "scripts/compile-product-doc.sh",
+            &out_md.to_string_lossy(),
+            &out_pdf.to_string_lossy(),
+        ])
+        .status()?;
+    if status.success() {
+        println!("product-doc: wrote {}", out_pdf.display());
+        Ok(())
+    } else {
+        Err(format!("compile-product-doc exited with {status}").into())
     }
 }
 

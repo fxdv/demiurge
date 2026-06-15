@@ -228,7 +228,7 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 ### Track B — Linux production dataplane (now)
 
 - [x] Runtime XDP attach + kernel admit on Linux (veth smoke, router `AdmitMode`, actuation map sync)
-- [ ] io_uring L7 forwarder on production TCP `serve()` loop (partial: `copy_between` + `BENCH-IOURING-FWD`)
+- [x] io_uring L7 forwarder on production TCP `serve()` loop (`IoUringProxySession` recv/send)
 - [x] Weekly `linux-nightly` release binaries with BPF objects
 - [ ] Production exit gates: real NIC XDP under load, io_uring serve path, x86_64 p99 budget
 

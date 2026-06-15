@@ -728,8 +728,8 @@ TCP serve, x86_64 p99) remain open.
 
 | Item | Closes |
 |------|--------|
-| io_uring recv/send on production TCP `serve()` loop | Exit: io_uring serves production path |
-| Load scenario with `DEMIURGE_ADMIT_MODE` / XDP / IOURING env | Kernel path under TCP load |
+| io_uring recv/send on production TCP `serve()` loop | **done** — `IoUringProxySession` per connection |
+| Load scenario with `DEMIURGE_ADMIT_MODE` / XDP / IOURING env | **done** — `LOAD-TRACK-B-IOURING`, `LOAD-TRACK-B-KERNEL` |
 | XDP on production NIC under decode saturation | Exit: shed before pool saturation |
 | x86_64 + NIC p99 under CP slowdown | Exit: reference hardware |
 
@@ -740,7 +740,7 @@ TCP serve, x86_64 p99) remain open.
 - [x] Runtime XDP attach + map sync on Linux (veth smoke + router integration; packet shed test).
 - [x] `BENCH-IOURING-FWD` gate passes (reused-ring micro-bench; proxy `copy_between` shipped).
 - [ ] Shed at **XDP on production NIC** before decode pool saturation under load.
-- [ ] `io_uring` forwarder serves production TCP path (not proxy `copy_between` only).
+- [x] `io_uring` forwarder serves production TCP path (`IoUringProxySession` recv/send on `serve()`).
 - [ ] Data-plane p99 admit latency within budget under CP slowdown on **x86_64 reference** hardware.
 
 **Validation.**

@@ -49,6 +49,9 @@ impl IoUringForwarder {
 mod io_uring_impl;
 
 #[cfg(target_os = "linux")]
+pub use io_uring_impl::IoUringProxySession;
+
+#[cfg(target_os = "linux")]
 impl IoUringForwarder {
     pub fn io_uring_enabled_from_env() -> bool {
         std::env::var("DEMIURGE_IOURING")
@@ -56,7 +59,13 @@ impl IoUringForwarder {
             .unwrap_or(false)
     }
 
-    /// Copy bytes between two stream fds via io_uring read/write (production proxy path).
+    /// Production proxy session: reused ring for recv/send on one TCP connection.
+    pub fn open_proxy_session(&self) -> std::io::Result<io_uring_impl::IoUringProxySession> {
+        let _ = self.forward_decision();
+        io_uring_impl::IoUringProxySession::new()
+    }
+
+    /// Copy bytes between two stream fds via io_uring read/write (one-shot session).
     pub fn copy_between(
         &self,
         read_fd: std::os::fd::RawFd,
