@@ -78,7 +78,7 @@ release) and on demand via the **release** workflow for tagged semver builds.
 
 | Workflow | What it enforces |
 |----------|------------------|
-| `ci` | **Quality** (gen/drift/lint + fmt/clippy/test/release build); **Regression** (CPU bench gates + load smoke + fleet-pilot + Track B gate) |
+| `ci` | **Quality** (gen/drift/lint + fmt/clippy/test/release build); **Regression** (CPU bench gates + load smoke + `LOAD-TRACK-B-IOURING` + root `LOAD-TRACK-B-KERNEL` + fleet-pilot + Track B gate) |
 | `spec` | the design PDF compiles from regenerated inputs |
 | `publish-linux` | Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) after green `ci` on `main`, weekly Mon 06:00 UTC, or manual dispatch |
 | `release` | manual semver tag release (Linux artifact + one-pager) |

@@ -159,8 +159,8 @@ validated via `forward_io_uring` tests and `LOAD-TRACK-B-*` load scenarios on Li
 ### Local load bench (optional)
 
 End-to-end TCP load against a live router + mock backends. CI runs
-`load-bench --ci` (scenarios with `ci = true`). Locally, `./scripts/load-bench.sh`
-runs the full suite and renders the pseudo report.
+`load-bench --ci` (`LOAD-CI-SMOKE`, `LOAD-TRACK-B-IOURING` on Linux; kernel scenario via root step).
+Locally, `./scripts/load-bench.sh` runs the full suite and renders the pseudo report.
 
 ```bash
 ./scripts/load-bench.sh
@@ -734,7 +734,6 @@ x86_64 p99 budget) remain open.
 |------|--------|
 | XDP on production NIC under decode saturation | Exit: shed before pool saturation |
 | x86_64 + NIC p99 under CP slowdown | Exit: reference hardware |
-| Track B load scenarios in automated CI | Today: `track-b-verify.sh` on Linux only |
 
 **Exit gate — production**
 

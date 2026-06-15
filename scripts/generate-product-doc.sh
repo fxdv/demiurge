@@ -23,6 +23,7 @@ PRE_RELEASE="$ARTIFACT_ROOT/validation/pre-release.log"
 LOAD_JSON="$ARTIFACT_ROOT/load-bench/load-full.json"
 LOAD_JSON_FALLBACK="$ARTIFACT_ROOT/load-bench/latest.json"
 STRESS_JSON="$ARTIFACT_ROOT/load-bench/stress.json"
+TRACK_B_SUMMARY="$ARTIFACT_ROOT/track-b-verify/summary.json"
 
 LINT_OUT="$(mktemp)"
 if cargo run --release -q --manifest-path "$ROOT/xtask/Cargo.toml" -- lint 2>&1 | tee "$LINT_OUT"; then
@@ -35,7 +36,7 @@ rm -f "$LINT_OUT"
 
 python3 - "$OUT" "$SOURCE" "$VERSION" "$COMMIT" "$COMMIT_FULL" "$DATE" "$ARCH" \
   "$LINT_STATUS" "$LINT_SUMMARY" "$PRE_RELEASE" "$BENCH_GATE" \
-  "$LOAD_JSON" "$LOAD_JSON_FALLBACK" "$STRESS_JSON" <<'PY'
+  "$LOAD_JSON" "$LOAD_JSON_FALLBACK" "$STRESS_JSON" "$TRACK_B_SUMMARY" <<'PY'
 import re, sys
 from pathlib import Path
 
@@ -54,6 +55,7 @@ from pathlib import Path
     load_json,
     load_fallback,
     stress_json,
+    track_b_summary,
 ) = sys.argv[1:]
 
 def parse_bench_gate(path: Path) -> list[tuple[str, str, str]]:
@@ -102,6 +104,17 @@ gate_rows = parse_bench_gate(Path(bench_gate))
 load_ok, load_err, load_total, load_src = load_totals(Path(load_json), Path(load_fallback))
 stress_ok, stress_err, stress_total = sum_scenarios(Path(stress_json))
 
+track_b_line = "not bundled"
+track_b_path = Path(track_b_summary)
+if track_b_path.is_file():
+    import json
+
+    tb = json.loads(track_b_path.read_text())
+    gate = "PASS" if tb.get("gate_pass") and tb.get("track_b_gate_pass") else "FAIL"
+    load_st = "PASS" if tb.get("load_bench_rc") == 0 else "FAIL/SKIP"
+    stress_st = "PASS" if tb.get("stress_rc") == 0 else "FAIL/SKIP"
+    track_b_line = f"gate {gate} · load {load_st} · stress {stress_st} (see track-b-verify/report.md)"
+
 body = Path(source).read_text()
 # Drop the source-only footer line; release footer appended below.
 body = re.sub(
@@ -127,6 +140,7 @@ header = f"""# Demiurge — Product & Technical Design
 | CPU bench gates | **{len(gate_rows)}** recorded |
 | Load bench (`{load_src}`) | **{load_ok}/{load_total}** ok ({load_err} errors) |
 | Stress (`stress.json`) | **{stress_ok}/{stress_total}** ok ({stress_err} errors) |
+| Track B verify (`summary.json`) | **{track_b_line}** |
 
 """
 

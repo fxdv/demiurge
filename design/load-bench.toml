@@ -7,6 +7,8 @@
 # Local full suite: ./scripts/load-bench.sh
 # Real stress:      ./scripts/load-stress.sh  (stress=true scenarios, zero errors)
 # CI regression: gate.sh and .github/workflows/ci.yml run `load-bench --ci`.
+# CI scenarios: LOAD-CI-SMOKE, LOAD-TRACK-B-IOURING (Linux).
+# LOAD-TRACK-B-KERNEL runs in CI via a separate root step (see gate-reusable.yml).
 # Optional soft gates (max_p99_ms): advisory on full runs; enforced with `--ci`.
 
 [settings]
@@ -33,6 +35,24 @@ concurrency = 8
 requests_per_worker = 25
 prefill_fraction = 0.5
 max_p99_ms = 500.0
+
+[[scenario]]
+id = "LOAD-TRACK-B-IOURING"
+ci = true
+summary = "Track B: io_uring production TCP proxy under concurrent load"
+io_uring = true
+linux_only = true
+backends = 4
+decode_backends = 2
+base_cost_seconds = 0.01
+cost_step_seconds = 0.002
+backend_delay_us = 25
+concurrency = 16
+requests_per_worker = 40
+request_style = "mixed_tokens"
+long_prompt_tokens = 512
+max_p99_ms = 250.0
+isolate_recovery = true
 
 # --- Local scenarios (./scripts/load-bench.sh) ------------------------------
 
@@ -200,23 +220,6 @@ max_p99_ms = 200.0
 isolate_recovery = true
 
 # --- Track B kernel dataplane (Linux; LOAD-TRACK-B-KERNEL needs root) ---------
-
-[[scenario]]
-id = "LOAD-TRACK-B-IOURING"
-summary = "Track B: io_uring production TCP proxy under concurrent load"
-io_uring = true
-linux_only = true
-backends = 4
-decode_backends = 2
-base_cost_seconds = 0.01
-cost_step_seconds = 0.002
-backend_delay_us = 25
-concurrency = 16
-requests_per_worker = 40
-request_style = "mixed_tokens"
-long_prompt_tokens = 512
-max_p99_ms = 250.0
-isolate_recovery = true
 
 [[scenario]]
 id = "LOAD-TRACK-B-KERNEL"

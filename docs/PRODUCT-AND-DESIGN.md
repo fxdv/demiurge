@@ -181,9 +181,22 @@ Routing logic is **sub-microsecond to low-microsecond** on laptop-class hardware
 - **Blur guard** — `intended` requirements appear only in “design intent” prose; `implemented` ones appear in normative sections.
 - **Property tests** — cost positivity, corrector bounds, fail-expensive clamping.
 - **CPU bench gates** — hot-path regressions fail the build.
-- **Load smoke** — TCP scenarios against live router + mock backends.
+- **Load regression** — `LOAD-CI-SMOKE` + `LOAD-TRACK-B-IOURING` on Linux CI; kernel XDP+veth load under root (optional locally via `optional = true`).
 
 Local stress suite (`load-stress.sh`): **11k+ requests**, zero-error gates — run before release tags, not on every PR.
+
+### Track B verification (Linux traction)
+
+Full dataplane proof on Linux VM (`./scripts/track-b-verify.sh`) writes **`target/track-b-verify/report.md`** and **`summary.json`** — gate + CPU headroom + load + stress. Use these artifacts in partner conversations alongside stamped **`PRODUCT-AND-DESIGN.pdf`** from `./scripts/publish.sh`.
+
+| Evidence | Where |
+|----------|--------|
+| CI Track B load | `LOAD-TRACK-B-IOURING` in `ci` regression; `LOAD-TRACK-B-KERNEL` as root step |
+| Full Linux verify | `target/track-b-verify/report.md` after `./scripts/track-b-verify.sh` |
+| Rolling Linux binary | [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) release |
+| Stamped product PDF | `target/product-doc/docs/PRODUCT-AND-DESIGN.pdf` via `cargo xtask product-doc` |
+
+Reference run (Vagrant ARM64, Jun 2026): gate 3/3 XDP veth, `BENCH-IOURING-FWD` ~200 ns, load 11/11 scenarios, stress zero errors — engineering path, not production NIC exit gates.
 
 ---
 

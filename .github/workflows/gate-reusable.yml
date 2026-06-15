@@ -43,6 +43,12 @@ jobs:
       - name: Run gate phase
         run: ./scripts/gate.sh --ci-${{ inputs.phase }}
 
+      - name: Track B kernel load (root)
+        if: inputs.phase == 'regression'
+        run: |
+          sudo -E env PATH="$PATH" GATE_SKIP_RELEASE_BUILD=1 \
+            cargo run --release -q --package xtask -- load-bench --scenario LOAD-TRACK-B-KERNEL
+
       - name: Upload release build
         if: inputs.phase == 'quality'
         uses: actions/upload-artifact@v4

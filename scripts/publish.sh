@@ -117,6 +117,12 @@ if [[ -d target/load-bench/runs ]]; then
 fi
 cp design/bench-gates.toml "$STAGING/design/"
 
+if [[ -f target/track-b-verify/summary.json ]]; then
+  mkdir -p "$STAGING/track-b-verify"
+  cp target/track-b-verify/summary.json "$STAGING/track-b-verify/"
+  [[ -f target/track-b-verify/report.md ]] && cp target/track-b-verify/report.md "$STAGING/track-b-verify/"
+fi
+
 if [[ -f target/release-artifacts/pre-release.log ]] && [[ ! -s "$PRE_LOG" ]]; then
   cp target/release-artifacts/pre-release.log "$PRE_LOG"
 fi
