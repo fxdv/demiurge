@@ -33,6 +33,7 @@ mod harden_report;
 mod harden_verify;
 mod load_bench;
 mod pseudo_report;
+mod pseudo_ui;
 #[cfg(target_os = "linux")]
 mod track_b_load;
 

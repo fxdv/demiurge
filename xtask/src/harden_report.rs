@@ -3,8 +3,7 @@
 use std::fmt::Write as FmtWrite;
 
 use crate::load_bench::LoadBenchReport;
-
-const W: usize = 72;
+use crate::pseudo_ui::{h_rule, pad_line, pseudo_width};
 
 #[derive(Debug, Clone)]
 pub struct HardenEntry {
@@ -45,18 +44,8 @@ pub fn parse_line(line: &str) -> Option<HardenEntry> {
     })
 }
 
-fn pad_line(inner: &str) -> String {
-    let max_len = W - 4;
-    let content = if inner.chars().count() > max_len {
-        let truncated: String = inner.chars().take(max_len - 1).collect();
-        format!("{truncated}…")
-    } else {
-        inner.to_string()
-    };
-    format!("║ {content:<width$} ║", width = W - 4)
-}
-
 pub fn render(entries: &[HardenEntry], load: Option<&LoadBenchReport>) -> String {
+    let w = pseudo_width();
     let mut out = String::new();
     let pass = entries.iter().filter(|e| e.status == "PASS").count();
     let skip = entries.iter().filter(|e| e.status == "SKIP").count();
@@ -65,29 +54,32 @@ pub fn render(entries: &[HardenEntry], load: Option<&LoadBenchReport>) -> String
         .filter(|e| e.status != "PASS" && e.status != "SKIP")
         .count();
 
-    let _ = writeln!(out, "╔{}╗", "═".repeat(W - 2));
+    let _ = writeln!(out, "╔{}╗", h_rule(w, '═'));
     let _ = writeln!(
         out,
         "{}",
-        pad_line("DEMIURGE · DIE-HARD VERIFY · PSEUDO REPORT")
+        pad_line("DEMIURGE · DIE-HARD VERIFY · PSEUDO REPORT", w)
     );
-    let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
+    let _ = writeln!(out, "╠{}╣", h_rule(w, '═'));
     let _ = writeln!(
         out,
         "{}",
-        pad_line(&format!(
-            "cases: PASS {pass} · SKIP {skip} · FAIL {fail} · total {}",
-            entries.len()
-        ))
+        pad_line(
+            &format!(
+                "cases: PASS {pass} · SKIP {skip} · FAIL {fail} · total {}",
+                entries.len()
+            ),
+            w,
+        )
     );
-    let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
+    let _ = writeln!(out, "╠{}╣", h_rule(w, '═'));
 
     for tier in 1u8..=4 {
         let tier_entries: Vec<_> = entries.iter().filter(|e| e.tier == tier).collect();
         if tier_entries.is_empty() {
             continue;
         }
-        let _ = writeln!(out, "{}", pad_line(&format!("Tier {tier}")));
+        let _ = writeln!(out, "{}", pad_line(&format!("Tier {tier}"), w));
         for e in tier_entries {
             let mark = match e.status.as_str() {
                 "PASS" => "✓",
@@ -97,14 +89,17 @@ pub fn render(entries: &[HardenEntry], load: Option<&LoadBenchReport>) -> String
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!("  {mark} {} — {} ({})", e.id, e.status, e.detail))
+                pad_line(
+                    &format!("  {mark} {} — {} ({})", e.id, e.status, e.detail),
+                    w
+                )
             );
         }
-        let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+        let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
     }
 
     if let Some(report) = load {
-        let _ = writeln!(out, "{}", pad_line("Tier 4 load scenarios"));
+        let _ = writeln!(out, "{}", pad_line("Tier 4 load scenarios", w));
         for s in &report.scenarios {
             let p99_ms = s.p99_us as f64 / 1000.0;
             let tail = if s.p99_us > 0 {
@@ -115,10 +110,13 @@ pub fn render(entries: &[HardenEntry], load: Option<&LoadBenchReport>) -> String
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!(
-                    "  {} ok={}/{} p99={p99_ms:.2}ms max={}µs tail={tail:.1}x",
-                    s.id, s.ok, s.total_requests, s.max_us
-                ))
+                pad_line(
+                    &format!(
+                        "  {} ok={}/{} p99={p99_ms:.2}ms max={}µs tail={tail:.1}x",
+                        s.id, s.ok, s.total_requests, s.max_us
+                    ),
+                    w,
+                )
             );
             if let Some(rejects) = s.kv_admit_rejects {
                 let note = if s.ok == 0 && rejects > 0 {
@@ -129,16 +127,16 @@ pub fn render(entries: &[HardenEntry], load: Option<&LoadBenchReport>) -> String
                 let _ = writeln!(
                     out,
                     "{}",
-                    pad_line(&format!("    kv_rejects={rejects}{note}"))
+                    pad_line(&format!("    kv_rejects={rejects}{note}"), w)
                 );
             }
             if let Some(m) = s.fastpath_misroute_mean {
-                let _ = writeln!(out, "{}", pad_line(&format!("    misroute_mean={m:.3}")));
+                let _ = writeln!(out, "{}", pad_line(&format!("    misroute_mean={m:.3}"), w));
             }
         }
     }
 
-    let _ = writeln!(out, "╚{}╝", "═".repeat(W - 2));
+    let _ = writeln!(out, "╚{}╝", h_rule(w, '═'));
     out
 }
 

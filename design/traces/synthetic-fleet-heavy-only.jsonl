@@ -1,0 +1,6 @@
+{"ts_ms":0,"q_prefill":0.90,"q_decode":0.20,"kv_decode":0.22,"slo_prefill":0.12,"fp_share":0.15,"prefill_heavy":true,"held_out":false}
+{"ts_ms":120000,"q_prefill":0.88,"q_decode":0.18,"kv_decode":0.28,"slo_prefill":0.10,"fp_share":0.18,"prefill_heavy":true,"held_out":false}
+{"ts_ms":240000,"q_prefill":0.91,"q_decode":0.16,"kv_decode":0.30,"slo_prefill":0.14,"fp_share":0.10,"prefill_heavy":true,"held_out":false}
+{"ts_ms":360000,"q_prefill":0.93,"q_decode":0.17,"kv_decode":0.26,"slo_prefill":0.11,"fp_share":0.14,"prefill_heavy":true,"held_out":true}
+{"ts_ms":480000,"q_prefill":0.89,"q_decode":0.19,"kv_decode":0.24,"slo_prefill":0.13,"fp_share":0.16,"prefill_heavy":true,"held_out":true}
+{"ts_ms":600000,"q_prefill":0.94,"q_decode":0.15,"kv_decode":0.32,"slo_prefill":0.15,"fp_share":0.11,"prefill_heavy":true,"held_out":true}

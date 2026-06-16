@@ -98,6 +98,9 @@ run_track_a() {
 
   bold "Track A fleet pilot (shadow π* + corrector shadow)"
   cargo run --release -q --package xtask -- fleet-pilot
+
+  bold "fleet simulation integration (DEMI-FLEET-SIM)"
+  cargo test -p demiurge-control --test fleet_sim_integration -q
 }
 
 run_track_b() {
@@ -147,7 +150,7 @@ print_footer() {
   echo "Optional verification suites (rerunnable):"
   echo "  ./scripts/verify.sh list              all suites + artifact paths"
   echo "  ./scripts/verify.sh harden            Tiers 1–4 die-hard (+ report.pseudo)"
-  echo "  ./scripts/verify.sh full              gate + load + stress + harden report"
+  echo "  ./scripts/verify.sh full              gate + load + stress + harden + 'sim"
   echo "Optional Track A total verification (full metrics + soft spots, ~5 min):"
   echo "  ./scripts/verify.sh track-a           →  target/track-a-verify/report.md"
   if [[ "$(uname -s)" == "Linux" ]]; then

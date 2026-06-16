@@ -71,6 +71,9 @@ case "$cmd" in
   gate)
     run_in_container_batch 'cd /work && ./scripts/gate.sh'
     ;;
+  sim)
+    run_in_container_batch 'cd /work && ./scripts/apostrophe-sim.sh'
+    ;;
   bpf)
     run_in_container_batch 'cd /work && bash ./scripts/build-bpf.sh'
     ;;

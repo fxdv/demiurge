@@ -8,8 +8,8 @@
 mod transport;
 
 pub use transport::{
-    HandoffTransport, HeaderPassthroughTransport, MockRdmaTransport, ModeledRdmaTransport,
-    TransferOutcome,
+    handoff_transport_from_env, HandoffTransport, HeaderPassthroughTransport, MockRdmaTransport,
+    ModeledRdmaTransport, TransferOutcome,
 };
 
 use std::collections::HashMap;

@@ -79,6 +79,15 @@ impl PoolRebalancer {
     pub fn shadow_pi_star(&self, signals: &PoolPressure) -> f64 {
         self.compute_pi_star(signals)
     }
+
+    /// Force π to trace-derived target (bypasses hysteresis/cooldown for fleet replay windows).
+    pub fn force_actuate(&mut self, pi_star: f64) -> f64 {
+        if self.mode == RebalancerMode::CanActuate {
+            self.pi = pi_star.clamp(0.0, 1.0);
+            self.last_change = Instant::now();
+        }
+        self.pi
+    }
 }
 
 #[cfg(test)]

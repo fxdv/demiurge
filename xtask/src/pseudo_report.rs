@@ -6,19 +6,7 @@ use std::fmt::Write as FmtWrite;
 use crate::load_bench::{
     evaluate_scenario_gates, GateVerdict, LoadBenchReport, ScenarioGateConfig,
 };
-
-const W: usize = 96;
-
-fn pad_line(inner: &str) -> String {
-    let max_len = W - 4;
-    let content = if inner.chars().count() > max_len {
-        let truncated: String = inner.chars().take(max_len - 1).collect();
-        format!("{truncated}…")
-    } else {
-        inner.to_string()
-    };
-    format!("║ {content:<width$} ║", width = W - 4)
-}
+use crate::pseudo_ui::{h_rule, histogram_bar_width, pad_line, pseudo_width};
 
 fn bar(f: &mut String, label: &str, value: f64, max: f64, width: usize) {
     let frac = if max > 0.0 {
@@ -37,7 +25,7 @@ fn bar(f: &mut String, label: &str, value: f64, max: f64, width: usize) {
     );
 }
 
-fn histogram(f: &mut String, latencies_us: &[u64], buckets: usize) {
+fn histogram(f: &mut String, latencies_us: &[u64], buckets: usize, bar_w: usize) {
     if latencies_us.is_empty() {
         let _ = writeln!(f, "  (no samples)");
         return;
@@ -51,12 +39,12 @@ fn histogram(f: &mut String, latencies_us: &[u64], buckets: usize) {
         counts[b.min(buckets - 1)] += 1;
     }
     let peak = *counts.iter().max().unwrap_or(&1).max(&1);
-    let bar_w = 32usize;
     for (i, &c) in counts.iter().enumerate() {
         let lo = min + span * i as u64 / buckets as u64;
         let hi = min + span * (i + 1) as u64 / buckets as u64;
         let label = format!("{:>5}-{:>5}µs", lo, hi);
         bar(f, &label, c as f64, peak as f64, bar_w);
+        let _ = writeln!(f);
     }
 }
 
@@ -72,34 +60,40 @@ fn gate_status(pass: bool) -> &'static str {
     }
 }
 
-fn write_gates(out: &mut String, gates: &[GateVerdict]) {
+fn write_gates(out: &mut String, gates: &[GateVerdict], w: usize) {
     if gates.is_empty() {
         return;
     }
     let passed = gates.iter().filter(|g| g.pass).count();
     let all_pass = passed == gates.len();
-    let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-    let _ = writeln!(out, "{}", pad_line("GATES (strict + soft)"));
+    let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+    let _ = writeln!(out, "{}", pad_line("GATES (strict + soft)", w));
     for gate in gates {
         let _ = writeln!(
             out,
             "{}",
-            pad_line(&format!(
-                "  {:<18} → {}  {}",
-                gate.name,
-                gate_status(gate.pass),
-                gate.detail
-            ))
+            pad_line(
+                &format!(
+                    "  {:<22} → {}  {}",
+                    gate.name,
+                    gate_status(gate.pass),
+                    gate.detail
+                ),
+                w,
+            )
         );
     }
     let _ = writeln!(
         out,
         "{}",
-        pad_line(&format!(
-            "  scenario summary .... → {}  ({passed}/{} gates)",
-            gate_status(all_pass),
-            gates.len()
-        ))
+        pad_line(
+            &format!(
+                "  scenario summary .... → {}  ({passed}/{} gates)",
+                gate_status(all_pass),
+                gates.len()
+            ),
+            w,
+        )
     );
 }
 
@@ -108,232 +102,278 @@ pub fn render(
     gate_configs: &HashMap<String, ScenarioGateConfig>,
     sim_brand: bool,
 ) -> String {
+    let w = pseudo_width();
+    let bar_w = histogram_bar_width(w);
     let mut out = String::new();
     let mut suite_gates = 0usize;
     let mut suite_pass = 0usize;
     let mut scenario_fail = 0usize;
 
-    let _ = writeln!(out, "╔{}╗", "═".repeat(W - 2));
+    let _ = writeln!(out, "╔{}╗", h_rule(w, '═'));
     let title = if sim_brand {
         "DEMIURGE · 'sim · FLEET SIMULATION · PSEUDO REPORT"
     } else {
         "DEMIURGE · LOCAL LOAD BENCH · PSEUDO REPORT"
     };
-    let _ = writeln!(out, "{}", pad_line(title));
-    let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
+    let _ = writeln!(out, "{}", pad_line(title, w));
+    let _ = writeln!(out, "╠{}╣", h_rule(w, '═'));
     let _ = writeln!(
         out,
         "{}",
-        pad_line(&format!("generated: {}", report.generated_at))
+        pad_line(&format!("generated: {}", report.generated_at), w)
     );
     let _ = writeln!(
         out,
         "{}",
-        pad_line(&format!("host:      {}", report.hostname))
+        pad_line(&format!("host:      {}", report.hostname), w)
     );
-    let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
+    let _ = writeln!(out, "╠{}╣", h_rule(w, '═'));
 
     for (idx, s) in report.scenarios.iter().enumerate() {
         if idx > 0 {
-            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+            let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
         }
-        let _ = writeln!(out, "{}", pad_line(&format!("scenario:  {}", s.id)));
-        let _ = writeln!(out, "{}", pad_line(&format!("summary:   {}", s.summary)));
+        let _ = writeln!(out, "{}", pad_line(&format!("scenario:  {}", s.id), w));
+        let _ = writeln!(out, "{}", pad_line(&format!("summary:   {}", s.summary), w));
         let _ = writeln!(
             out,
             "{}",
-            pad_line(&format!(
-                "topology:  {} pf · {} dc · {}×{} reqs · style {} · delay {}µs",
-                s.backends,
-                s.decode_backends,
-                s.concurrency,
-                s.requests_per_worker,
-                s.request_style,
-                s.backend_delay_us
-            ))
+            pad_line(
+                &format!(
+                    "topology:  {} pf · {} dc · {}×{} reqs · style {} · delay {}µs",
+                    s.backends,
+                    s.decode_backends,
+                    s.concurrency,
+                    s.requests_per_worker,
+                    s.request_style,
+                    s.backend_delay_us
+                ),
+                w,
+            )
         );
-        let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-        let _ = writeln!(out, "{}", pad_line("THROUGHPUT"));
+        let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+        let _ = writeln!(out, "{}", pad_line("THROUGHPUT", w));
         let _ = writeln!(
             out,
             "{}",
-            pad_line(&format!("  total .............. {:>8}", s.total_requests))
+            pad_line(
+                &format!("  total .............. {:>8}", s.total_requests),
+                w,
+            )
         );
         let _ = writeln!(
             out,
             "{}",
-            pad_line(&format!(
-                "  ok / errors ........ {:>8} / {}",
-                s.ok, s.errors
-            ))
+            pad_line(
+                &format!("  ok / errors ........ {:>8} / {}", s.ok, s.errors),
+                w,
+            )
         );
         if s.errors_graceful.is_some() || s.errors_hard.is_some() {
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!(
-                    "  503 / hard ......... {:>8} / {}",
-                    s.errors_graceful.unwrap_or(0),
-                    s.errors_hard.unwrap_or(0),
-                ))
+                pad_line(
+                    &format!(
+                        "  503 / hard ......... {:>8} / {}",
+                        s.errors_graceful.unwrap_or(0),
+                        s.errors_hard.unwrap_or(0),
+                    ),
+                    w,
+                )
             );
         }
         let _ = writeln!(
             out,
             "{}",
-            pad_line(&format!("  wall ............... {:>8.2}s", s.duration_secs))
+            pad_line(
+                &format!("  wall ............... {:>8.2}s", s.duration_secs),
+                w,
+            )
         );
         let _ = writeln!(
             out,
             "{}",
-            pad_line(&format!("  req/s .............. {:>8.1}", s.req_per_sec))
+            pad_line(&format!("  req/s .............. {:>8.1}", s.req_per_sec), w,)
         );
-        let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-        let _ = writeln!(out, "{}", pad_line("LATENCY"));
-        let _ = writeln!(out, "{}", pad_line("  min   p50   p90   p99   max  (ms)"));
+        let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+        let _ = writeln!(out, "{}", pad_line("LATENCY", w));
         let _ = writeln!(
             out,
             "{}",
-            pad_line(&format!(
-                "  {:>5} {:>5} {:>5} {:>5} {:>5}",
-                fmt_ms(s.min_us),
-                fmt_ms(s.p50_us),
-                fmt_ms(s.p90_us),
-                fmt_ms(s.p99_us),
-                fmt_ms(s.max_us),
-            ))
+            pad_line("  min   p50   p90   p99   max  (ms)", w)
         );
-        let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-        let _ = writeln!(out, "{}", pad_line("HISTOGRAM (latency µs)"));
+        let _ = writeln!(
+            out,
+            "{}",
+            pad_line(
+                &format!(
+                    "  {:>5} {:>5} {:>5} {:>5} {:>5}",
+                    fmt_ms(s.min_us),
+                    fmt_ms(s.p50_us),
+                    fmt_ms(s.p90_us),
+                    fmt_ms(s.p99_us),
+                    fmt_ms(s.max_us),
+                ),
+                w,
+            )
+        );
+        let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+        let _ = writeln!(out, "{}", pad_line("HISTOGRAM (latency µs)", w));
         let mut hist = String::new();
-        histogram(&mut hist, &s.latencies_us, 8);
+        histogram(&mut hist, &s.latencies_us, 8, bar_w);
         for line in hist.lines() {
             if line.is_empty() {
                 continue;
             }
-            let _ = writeln!(out, "{}", pad_line(line));
+            let _ = writeln!(out, "{}", pad_line(line, w));
         }
         if let (Some(low), Some(high), Some(ratio)) = (
             s.accept_p99_us_low,
             s.accept_p99_us_high,
             s.accept_p99_ratio,
         ) {
-            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-            let _ = writeln!(out, "{}", pad_line("ACCEPT DECOUPLE (P1)"));
+            let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+            let _ = writeln!(out, "{}", pad_line("ACCEPT DECOUPLE (P1)", w));
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!("  p99 low / high (µs) .. {:>6} / {}", low, high))
+                pad_line(
+                    &format!("  p99 low / high (µs) .. {:>6} / {}", low, high),
+                    w,
+                )
             );
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!("  p99 ratio ............ {:>8.2}", ratio))
+                pad_line(&format!("  p99 ratio ............ {:>8.2}", ratio), w)
             );
         }
         if let Some(peak) = s.kv_bytes_reserved_peak {
-            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-            let _ = writeln!(out, "{}", pad_line("KV POOL (Phase 2)"));
+            let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+            let _ = writeln!(out, "{}", pad_line("KV POOL (Phase 2)", w));
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!("  peak reserved ....... {:>12} bytes", peak))
+                pad_line(&format!("  peak reserved ....... {:>12} bytes", peak), w,)
             );
             if let Some(rejects) = s.kv_admit_rejects {
                 let _ = writeln!(
                     out,
                     "{}",
-                    pad_line(&format!("  admit rejects ....... {:>12}", rejects))
+                    pad_line(&format!("  admit rejects ....... {:>12}", rejects), w,)
                 );
             }
         }
         if let Some(n) = s.handoff_transfer_count {
-            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-            let _ = writeln!(out, "{}", pad_line("HAND-OFF TRANSFER (Phase 2 exit)"));
+            let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+            let _ = writeln!(out, "{}", pad_line("HAND-OFF TRANSFER (Phase 2 exit)", w));
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!("  transfers ............ {:>12}", n))
+                pad_line(&format!("  transfers ............ {:>12}", n), w)
             );
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!(
-                    "  bytes p50 / p99 ...... {:>6} / {}",
-                    s.handoff_bytes_p50.unwrap_or(0),
-                    s.handoff_bytes_p99.unwrap_or(0)
-                ))
+                pad_line(
+                    &format!(
+                        "  bytes p50 / p99 ...... {:>6} / {}",
+                        s.handoff_bytes_p50.unwrap_or(0),
+                        s.handoff_bytes_p99.unwrap_or(0)
+                    ),
+                    w,
+                )
             );
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!(
-                    "  wall p50 / p99 (µs) .. {:>6} / {}",
-                    s.handoff_wall_us_p50.unwrap_or(0),
-                    s.handoff_wall_us_p99.unwrap_or(0)
-                ))
+                pad_line(
+                    &format!(
+                        "  wall p50 / p99 (µs) .. {:>6} / {}",
+                        s.handoff_wall_us_p50.unwrap_or(0),
+                        s.handoff_wall_us_p99.unwrap_or(0)
+                    ),
+                    w,
+                )
             );
         }
         if let Some(pi) = s.dataplane_pi {
-            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-            let _ = writeln!(out, "{}", pad_line("DATAPLANE"));
+            let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+            let _ = writeln!(out, "{}", pad_line("DATAPLANE", w));
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!(
-                    "  π / π* / age ......... {:>5.3} / {:.3} / {}ms",
-                    pi,
-                    s.pi_star.unwrap_or(0.0),
-                    s.dataplane_age_ms.unwrap_or(0)
-                ))
+                pad_line(
+                    &format!(
+                        "  π / π* / age ......... {:>5.3} / {:.3} / {}ms",
+                        pi,
+                        s.pi_star.unwrap_or(0.0),
+                        s.dataplane_age_ms.unwrap_or(0)
+                    ),
+                    w,
+                )
             );
         }
         if let Some(n) = s.rdma_shadow_samples {
-            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-            let _ = writeln!(out, "{}", pad_line("RDMA COST SHADOW"));
+            let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+            let _ = writeln!(out, "{}", pad_line("RDMA COST SHADOW", w));
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line(&format!("  shadow samples ....... {:>12}", n))
+                pad_line(&format!("  shadow samples ....... {:>12}", n), w)
             );
             if let Some(ratio) = s.rdma_transfer_ratio_median {
                 let _ = writeln!(
                     out,
                     "{}",
-                    pad_line(&format!("  transfer ratio median {:>12.3}", ratio))
+                    pad_line(&format!("  transfer ratio median {:>12.3}", ratio), w,)
                 );
             }
         }
         if !s.fleet_windows.is_empty() {
-            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
-            let _ = writeln!(out, "{}", pad_line("'sim FLEET WINDOWS (live replay)"));
+            let _ = writeln!(out, "╟{}╢", h_rule(w, '─'));
+            let _ = writeln!(out, "{}", pad_line("'sim FLEET WINDOWS (live replay)", w));
             let _ = writeln!(
                 out,
                 "{}",
-                pad_line("  ts(ms)  heavy  ok  503  hard  p99(ms)  π_live  π*_shadow")
+                pad_line(
+                    "  ts(ms)   heavy    ok   503  hard   p99(ms)   π_live   π*_shadow",
+                    w,
+                )
             );
-            for w in &s.fleet_windows {
+            for win in &s.fleet_windows {
                 let _ = writeln!(
                     out,
                     "{}",
-                    pad_line(&format!(
-                        "  {:>7}  {:>5}  {:>3}  {:>3}  {:>4}  {:>7}  {:>6.3}  {:>6.3}",
-                        w.ts_ms,
-                        if w.prefill_heavy { "yes" } else { "no" },
-                        w.ok,
-                        w.errors_graceful,
-                        w.errors_hard,
-                        w.p99_us as f64 / 1000.0,
-                        w.dataplane_pi,
-                        w.pi_star,
-                    ))
+                    pad_line(
+                        &format!(
+                            "  {:>7}  {:>5}  {:>4}  {:>3}  {:>4}  {:>8.2}  {:>7.3}  {:>7.3}",
+                            win.ts_ms,
+                            if win.prefill_heavy { "yes" } else { "no" },
+                            win.ok,
+                            win.errors_graceful,
+                            win.errors_hard,
+                            win.p99_us as f64 / 1000.0,
+                            win.dataplane_pi,
+                            win.pi_star,
+                        ),
+                        w,
+                    )
                 );
             }
             if let Some(corr) = s.fleet_live_pi_correlation {
                 let _ = writeln!(
                     out,
                     "{}",
-                    pad_line(&format!("  held-out live π corr .. {:>6.3}", corr))
+                    pad_line(&format!("  held-out live π corr .. {:>6.3}", corr), w)
+                );
+            }
+            if let Some(corr) = s.fleet_shadow_correlation {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    pad_line(&format!("  held-out shadow π* corr {:>6.3}", corr), w)
                 );
             }
         }
@@ -344,25 +384,28 @@ pub fn render(
             if !gates.is_empty() && gates.iter().any(|g| !g.pass) {
                 scenario_fail += 1;
             }
-            write_gates(&mut out, &gates);
+            write_gates(&mut out, &gates, w);
         }
     }
 
     if suite_gates > 0 {
-        let _ = writeln!(out, "╠{}╣", "═".repeat(W - 2));
+        let _ = writeln!(out, "╠{}╣", h_rule(w, '═'));
         let suite_ok = scenario_fail == 0;
         let _ = writeln!(
             out,
             "{}",
-            pad_line(&format!(
-                "SUITE GATES → {}  {suite_pass}/{suite_gates} gates · {}/{} scenarios",
-                gate_status(suite_ok),
-                report.scenarios.len() - scenario_fail,
-                report.scenarios.len()
-            ))
+            pad_line(
+                &format!(
+                    "SUITE GATES → {}  {suite_pass}/{suite_gates} gates · {}/{} scenarios",
+                    gate_status(suite_ok),
+                    report.scenarios.len() - scenario_fail,
+                    report.scenarios.len()
+                ),
+                w,
+            )
         );
     }
 
-    let _ = writeln!(out, "╚{}╝", "═".repeat(W - 2));
+    let _ = writeln!(out, "╚{}╝", h_rule(w, '═'));
     out
 }

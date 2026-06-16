@@ -9,13 +9,15 @@
 //!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux)
 //!   DEMIURGE_IOURING       1 for io_uring recv/send on production TCP proxy (Linux)
 //!   DEMIURGE_BANNER        0|1 force disable/enable startup banner (default: TTY)
-//!   DEMIURGE_QUIET         1 for compact one-line startup
+//!   DEMIURGE_HANDOFF_TRANSPORT  tcp (default) | mock_rdma | modeled_rdma
+//!   DEMIURGE_RDMA_ROUTING       1 to use topology transfer model in decode placement
 
 use std::net::TcpListener;
 use std::process::exit;
 use std::sync::Arc;
 
 use demiurge_dataplane::AdmitMode;
+use demiurge_handoff::handoff_transport_from_env;
 use demiurge_router::{
     parse_pool_with_topology, parse_topology_map, print_startup_banner, serve, Router,
 };
@@ -50,7 +52,10 @@ fn configure() -> Result<(TcpListener, Arc<Router>), String> {
     let listener = TcpListener::bind(&listen).map_err(|e| format!("bind {listen}: {e}"))?;
 
     let admit_mode = AdmitMode::from_env();
-    let mut router = Router::new(prefill, decode).with_admit_mode(admit_mode);
+    let transport = handoff_transport_from_env(topology.clone());
+    let mut router = Router::new(prefill, decode)
+        .with_admit_mode(admit_mode)
+        .with_handoff_transport(transport);
     let xdp_iface = std::env::var("DEMIURGE_XDP_IFACE").ok();
     if let Some(ref iface) = xdp_iface {
         router = router

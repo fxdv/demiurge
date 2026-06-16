@@ -54,7 +54,7 @@ The full gate adds release build, CPU bench gates, load smoke, fleet-pilot, Trac
 
 For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
 (strict zero-error gates; not part of `gate.sh` or CI). Before a release tag,
-run `./scripts/pre-release.sh` (full gate + load bench incl. `LOAD-STEP-ACTUATE`
+run `./scripts/pre-release.sh` (full gate + load + stress + harden + `'sim`, incl. `LOAD-STEP-ACTUATE`
 + stress).
 
 **Track B (Linux only).** After `./scripts/gate.sh` on a Linux VM or CI mirror:

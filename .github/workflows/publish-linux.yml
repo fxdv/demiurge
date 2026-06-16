@@ -48,6 +48,12 @@ jobs:
           cp target/load-bench/stress.pseudo target/release-artifacts/stress.pseudo 2>/dev/null || true
           cp target/harden-verify/report.pseudo target/release-artifacts/harden.pseudo 2>/dev/null || true
           cp target/harden-verify/report.md target/release-artifacts/harden.md 2>/dev/null || true
+          cp target/reports/sim-latest.pseudo target/release-artifacts/sim.pseudo 2>/dev/null || true
+
+      - name: 'sim L3 docker (optional)'
+        continue-on-error: true
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_pre_release }}
+        run: ./scripts/linux-vm/docker-track-b.sh sim
 
       - name: Upload bench + harden reports
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_pre_release }}
@@ -56,14 +62,17 @@ jobs:
           name: demiurge-linux-reports-${{ github.run_id }}
           path: |
             target/release-artifacts/pre-release.log
-            target/release-artifacts/gate.log
             target/release-artifacts/load-full.pseudo
             target/release-artifacts/stress.pseudo
             target/release-artifacts/harden.pseudo
             target/release-artifacts/harden.md
+            target/release-artifacts/sim.pseudo
             target/load-bench/latest.json
             target/load-bench/stress.json
             target/load-bench/harden.json
+            target/load-bench/sim.json
+            target/load-bench/sim.pseudo
+            target/reports/sim-latest.pseudo
           if-no-files-found: warn
           retention-days: 90
 

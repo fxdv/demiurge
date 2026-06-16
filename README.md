@@ -49,7 +49,7 @@ cargo run --release -q --package xtask -- bench-gate   # CPU hot-path gates
 cargo run --release -q --package xtask -- bench-probe  # floor/p95 probe + thin-gate report
 ./scripts/load-bench.sh       # local TCP load + pseudo report (optional)
 ./scripts/load-stress.sh      # strict heavy stress — local only, not in gate.sh
-./scripts/pre-release.sh      # gate + full load bench + stress (nightly / pre-tag)
+./scripts/pre-release.sh      # gate + load + stress + harden + 'sim (nightly / pre-tag)
 ./scripts/track-a-verify.sh   # optional Track A observability (~5 min; report.md)
 ./scripts/track-b-verify.sh   # Track B on Linux (gate + load + stress + report)
 ./scripts/publish.sh          # pre-release + tarball (binaries, one-pager, product PDF)

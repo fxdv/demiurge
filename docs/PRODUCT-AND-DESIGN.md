@@ -4,7 +4,7 @@
 
 *Human-readable product and design brief. Synthesized from [`README.md`](../README.md), [`ROADMAP.md`](../ROADMAP.md), and the living requirement registry. For machine-checked contracts, see [`design/requirements.toml`](../design/requirements.toml); for academic notation, see [`spec/demiurge.tex`](../spec/demiurge.tex) (PDF is optional).*
 
-**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **21 of 24** requirements implemented with named tests (3 intended, Track C). **Track B** engineering path green on Linux VM (XDP veth, kernel admit, io_uring production TCP `serve()`, Track B load scenarios); **production exit gates** (real NIC XDP under load, x86_64 p99 budget) and **Track C** fleet economics remain open.
+**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **26 requirements** in the registry (**23 implemented**, **3 intended** for Track C: migration, tenant auth, corrector graduation). **Track B** engineering path green on Linux VM (XDP veth, kernel admit, io_uring production TCP `serve()`, `LOAD-TRACK-B-KERNEL` in Gate + linux-nightly); **production exit gates** (real NIC XDP under load, x86_64 p99 budget) remain open. Unified **Gate** CI workflow mirrors `./scripts/gate.sh`; **`'sim`** fleet replay + **`verify.sh`** harden tiers ship observable pseudo reports.
 
 ---
 

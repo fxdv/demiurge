@@ -322,6 +322,8 @@ Design conformance is enforced in CI and locally via \texttt{./scripts/gate.sh}:
   \item \texttt{./scripts/load-bench.sh} / \texttt{load-stress.sh} --- TCP load scenarios (stress local-only).
   \item \texttt{cargo xtask fleet-pilot} --- shadow fleet replay (Track~A+).
   \item \texttt{cargo xtask apostrophe-sim} --- trace $\to$ live load fleet simulation \req{DEMI-FLEET-SIM}.
+  \item \texttt{./scripts/verify.sh full} --- gate + load + stress + harden + \texttt{'sim} pseudo report.
+  \item \texttt{design/topologies/} --- ELI5 admit vs KV diagram + env config matrix (Track A/B/C).
 \end{itemize}
 
 \textbf{Operational posture.} The data plane is fail-closed on admit exhaustion

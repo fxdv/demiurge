@@ -674,14 +674,15 @@ shedding; actuated π on the hot path; observability for RCU staleness.
 - [x] `BENCH-RCU-SNAPSHOT` gate passes.
 
 **Validation.** Local load bench **8,060/8,060** ok; stress **11,600/11,600** ok.
-Pre-release: `./scripts/pre-release.sh` (gate + full load + stress).
+Pre-release: `./scripts/pre-release.sh` (same as `./scripts/verify.sh full`: gate + load + stress + harden + `'sim`).
 
 ### Track A — remaining (portable) — **done**
 
 | Item | Goal | Gate | Status |
 |------|------|------|--------|
 | Fleet pilot (shadow) | Replay production trace; `π*` vs prefill-heavy windows | `cargo xtask fleet-pilot` held-out corr ≥ 0.45 | **done** |
-| **'sim** fleet simulation | Trace windows → live load; mock pf/dc fleet; L1/L2 gates | `./scripts/apostrophe-sim.sh` · `DEMI-FLEET-SIM` | **done** |
+| **'sim** fleet simulation | Trace windows → live load; mock pf/dc fleet; L1/L2/L-KV gates | `./scripts/apostrophe-sim.sh` · `DEMI-FLEET-SIM` | **done** |
+| Topology reference | ELI5 SVG + config matrix (admit vs KV, Track A/B/C) | [`design/topologies/`](design/topologies/) | **done** |
 | Die-hard verify | Tiers 1–4 hardening + observable pseudo report | `./scripts/verify.sh harden` | **done** |
 | Corrector shadow | Log `(features, analytic_cost, observed_latency)`; train bounded δ | shadow log + offline train/eval in `fleet-pilot` | **done** |
 | RDMA trait | `HandoffTransport` + mock RDMA; TCP default on Mac | `mock_rdma_*` tests | **done** |

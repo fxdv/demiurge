@@ -305,12 +305,19 @@ fn select_prefill_with_pi(
         .cloned()
 }
 
+#[derive(Clone, Copy)]
+struct DecodePlacementCtx<'a> {
+    prefill_label: &'a str,
+    pf_topo: &'a TopologyId,
+    kv_bytes: u64,
+    use_rdma_routing: bool,
+}
+
 fn select_decode_with_pi(
-    prefill_label: &str,
+    ctx: &DecodePlacementCtx<'_>,
     candidates: &[Arc<Backend>],
     snapshot: Option<&StateSnapshot>,
     prompt_tokens: u64,
-    transfer_penalty: f64,
     extra_barriers: &[BarrierFactor],
     pool_pi: f64,
 ) -> Option<Arc<Backend>> {
@@ -320,11 +327,25 @@ fn select_decode_with_pi(
         .min_by(|a, b| {
             let mut ba = extra_barriers.to_vec();
             let mut bb = extra_barriers.to_vec();
-            if prefill_label != a.label {
-                ba.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+            if ctx.prefill_label != a.label {
+                let penalty = if ctx.use_rdma_routing {
+                    rdma_transfer_ln(ctx.kv_bytes, ctx.pf_topo, a.topology())
+                        .exp()
+                        .max(1.0)
+                } else {
+                    ROUTING_TRANSFER_PENALTY.max(1.0)
+                };
+                ba.push(BarrierFactor::clamped(penalty));
             }
-            if prefill_label != b.label {
-                bb.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+            if ctx.prefill_label != b.label {
+                let penalty = if ctx.use_rdma_routing {
+                    rdma_transfer_ln(ctx.kv_bytes, ctx.pf_topo, b.topology())
+                        .exp()
+                        .max(1.0)
+                } else {
+                    ROUTING_TRANSFER_PENALTY.max(1.0)
+                };
+                bb.push(BarrierFactor::clamped(penalty));
             }
             a.cost_with_warmth_pi(&ba, snapshot, &blocks, true, pool_pi)
                 .ln()
@@ -434,6 +455,7 @@ pub struct Router {
     colocated_routes: AtomicU64,
     disagg_routes: AtomicU64,
     handoff_transport: Option<Arc<dyn HandoffTransport>>,
+    rdma_routing: bool,
 }
 
 impl Clone for Router {
@@ -456,6 +478,7 @@ impl Clone for Router {
             colocated_routes: AtomicU64::new(self.colocated_routes.load(Ordering::Relaxed)),
             disagg_routes: AtomicU64::new(self.disagg_routes.load(Ordering::Relaxed)),
             handoff_transport: self.handoff_transport.clone(),
+            rdma_routing: self.rdma_routing,
         }
     }
 }
@@ -539,6 +562,7 @@ impl Router {
             colocated_routes: AtomicU64::new(0),
             disagg_routes: AtomicU64::new(0),
             handoff_transport: None,
+            rdma_routing: rdma_routing_enabled(),
         }
     }
 
@@ -582,6 +606,7 @@ impl Router {
             colocated_routes: AtomicU64::new(0),
             disagg_routes: AtomicU64::new(0),
             handoff_transport: Some(Self::default_handoff_transport()),
+            rdma_routing: rdma_routing_enabled(),
         };
         (router, ledger, handoffs)
     }
@@ -603,6 +628,31 @@ impl Router {
     pub fn with_handoff_transport(mut self, transport: Arc<dyn HandoffTransport>) -> Self {
         self.handoff_transport = Some(transport);
         self
+    }
+
+    pub fn with_rdma_routing(mut self, enabled: bool) -> Self {
+        self.rdma_routing = enabled;
+        self
+    }
+
+    /// Inject trace window pressure and publish π (fleet replay actuation; bypasses hysteresis).
+    pub fn actuate_from_trace_pressure(&self, signals: PoolPressure) {
+        let pi_star = {
+            let mut cp = self.control.lock().expect("control plane");
+            let pi_star = cp.rebalancer.compute_pi_star(&signals);
+            cp.last_pi_star = pi_star;
+            if self.rebalancer_actuation {
+                cp.rebalancer.force_actuate(pi_star);
+            }
+            pi_star
+        };
+        if self.rebalancer_actuation {
+            self.dataplane.publish(DataPlaneSnapshot::new(
+                self.dataplane.generation().saturating_add(1),
+                pi_star,
+            ));
+            self.maybe_sync_admit_for_pi(pi_star);
+        }
     }
 
     pub fn with_admit_mode(mut self, mode: AdmitMode) -> Self {
@@ -796,10 +846,11 @@ impl Router {
 
         let mut cp = self.control.lock().expect("control plane");
         if let Some(colocated) = colocated {
-            if colocated {
+            // Misroute = short-context request sent disaggregated (not colocated fast path).
+            if !colocated {
                 if let Some(tokens) = prompt_tokens {
                     let threshold = ROUTING_SHORT_CONTEXT_TOKENS.max(1);
-                    if tokens * 100 / threshold >= 80 {
+                    if tokens <= threshold && tokens * 100 / threshold >= 80 {
                         let frac = (tokens as f64 / threshold as f64).clamp(0.0, 1.0);
                         cp.fastpath_misroute_sum += frac;
                         cp.fastpath_misroute_samples += 1;
@@ -1223,12 +1274,21 @@ pub fn on_prefill_complete(
     let extra: Vec<BarrierFactor> = phi.into_iter().collect();
 
     let pool_pi = router.dataplane.read_pi();
+    let pf_topo = router.topology_for_label(prefill_label);
+    let kv_bytes = handoff
+        .as_ref()
+        .map(|h| h.byte_len)
+        .unwrap_or_else(|| kv_breakdown(signals.prompt_tokens, router.bytes_per_token).kv_reserved);
     let backend = select_decode_with_pi(
-        prefill_label,
+        &DecodePlacementCtx {
+            prefill_label,
+            pf_topo: &pf_topo,
+            kv_bytes,
+            use_rdma_routing: router.rdma_routing,
+        },
         router.pool(Phase::Decode),
         router.state.as_ref(),
         signals.prompt_tokens,
-        ROUTING_TRANSFER_PENALTY,
         &extra,
         pool_pi,
     )
@@ -1492,6 +1552,12 @@ fn rebalancer_actuation_enabled() -> bool {
         return matches!(v.as_str(), "1" | "true" | "yes");
     }
     POOL_ACTUATION_ENABLED
+}
+
+fn rdma_routing_enabled() -> bool {
+    std::env::var("DEMIURGE_RDMA_ROUTING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {

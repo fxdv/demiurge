@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/demiurge-auth",
     "crates/demiurge-cost",
     "crates/demiurge-control",
     "crates/demiurge-dataplane",
