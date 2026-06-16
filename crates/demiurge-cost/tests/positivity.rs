@@ -72,11 +72,32 @@ proptest! {
         let bound = (1.0 + ALPHA).ln().abs().max((1.0 - ALPHA).ln().abs());
         prop_assert!(shift <= bound + 1e-9, "shift={shift} bound={bound}");
     }
+
+    // [DEMI-FAIL-EXPENSIVE] — clamp_D(invalid) = 1 is neutral vs no discount, but
+    // strictly more expensive than any baseline that already earned D_c < 1.
+    #[test]
+    fn invalid_discount_never_cheapens_valid_baseline(d in f64::MIN_POSITIVE..=1.0) {
+        let core = TimeCore::new(1.0).unwrap();
+        let id = Corrector::identity();
+        let baseline = compose(core, &[], &[Discount::new(d).unwrap()], id);
+        let broken = compose(core, &[], &[Discount::clamped(f64::NAN)], id);
+        prop_assert!(
+            broken.ln() >= baseline.ln(),
+            "invalid discount cheapened valid baseline (d={d})"
+        );
+        if d < 1.0 - f64::EPSILON {
+            prop_assert!(
+                broken.ln() > baseline.ln(),
+                "replacing valid discount must strictly increase cost (d={d})"
+            );
+        }
+    }
 }
 
 // [DEMI-FAIL-EXPENSIVE] — a broken signal can only ever make a target look more
 // expensive (or neutral), never cheaper. A NaN latency must not undercut a
-// valid fast target; an invalid discount must not grant an unearned reward.
+// valid fast target; invalid discount clamps to neutral and never undercuts a
+// baseline that already includes a valid reward factor.
 #[test]
 fn invalid_signal_never_cheapens() {
     let id = Corrector::identity();
@@ -91,10 +112,27 @@ fn invalid_signal_never_cheapens() {
     let core = TimeCore::new(1.0).unwrap();
     let neutral = compose(core, &[], &[], id);
     let broken_discount = compose(core, &[], &[Discount::clamped(f64::NAN)], id);
+    assert!(
+        broken_discount.ln() >= neutral.ln(),
+        "invalid discount granted a reward"
+    );
     assert_eq!(
         broken_discount.ln(),
         neutral.ln(),
-        "invalid discount granted a reward"
+        "invalid discount must match neutral when baseline has no reward"
+    );
+
+    let with_warmth = compose(core, &[], &[Discount::new(0.5).unwrap()], id);
+    assert!(
+        broken_discount.ln() > with_warmth.ln(),
+        "invalid discount cheapened relative to valid warmth baseline"
+    );
+
+    let with_neutral_discount = compose(core, &[], &[Discount::new(1.0).unwrap()], id);
+    assert_eq!(
+        broken_discount.ln(),
+        with_neutral_discount.ln(),
+        "invalid discount must match baseline when valid factor was already neutral"
     );
 
     let broken_barrier = compose(core, &[BarrierFactor::clamped(f64::NAN)], &[], id);
