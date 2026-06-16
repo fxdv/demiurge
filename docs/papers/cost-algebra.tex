@@ -38,7 +38,7 @@ This note formalizes the \emph{cost-factor algebra} implemented in
 \texttt{demiurge-cost} and the \emph{decision-makers} in router and control
 planes that consume it: admission, path classification, min-cost placement,
 greedy pairing, KV reservation, and pool-ratio actuation.
-$C(r,q) > 0$ built as a product of a time core and dimensionless factors,
+The cost $C(r,q) > 0$ is built as a product of a time core and dimensionless factors,
 realized in software as \emph{addition in log-space}.
 We state the algebraic domains of barriers, discounts, and correctors;
 prove positivity and monotonicity under composition; characterize the
@@ -46,7 +46,7 @@ prove positivity and monotonicity under composition; characterize the
 core with fleet $\Phi$ barriers, warmth discounts, cross-node transfer penalties,
 and pool-ratio scaling.
 The algebra is executable: property tests and CPU bench gates enforce the
-invariants on every merge.
+invariants on every code merge (CI gate).
 \end{abstract}
 
 \section{Introduction}
@@ -88,7 +88,8 @@ We write $\oplus$ for log-space composition (ordinary addition on logs):
 
 \section{Factor algebra}
 
-The analytic cost is a multiplicative product in linear space:
+The analytic cost is a multiplicative product in linear space, subject to
+the domain constraints below:
 \begin{equation}\label{eq:product}
   C(r,q)
   \;=\;
@@ -100,7 +101,6 @@ The analytic cost is a multiplicative product in linear space:
   \;\cdot\;
   \delta,
 \end{equation}
-subject to domain constraints below.
 In implementation, Equation~\eqref{eq:product} becomes
 \begin{equation}\label{eq:logcompose}
   \ln C
@@ -181,7 +181,8 @@ Demiurge adopts a \textbf{fail-expensive} policy: invalid signals never
 \emph{cheapen} a target.
 
 \begin{definition}[Fail-expensive clamp]
-Let $\mathrm{clamp}_T(x)$ map invalid $x$ to $T_{\max}$ (largest finite time).
+Let $\mathrm{clamp}_T(x)$ map invalid $x$ to $T_{\max}$ (the largest finite
+representable time, e.g., \texttt{f64::MAX} seconds).
 Let $\mathrm{clamp}_B(x)$ map invalid $x$ to $B_{\max}$.
 Let $\mathrm{clamp}_D(x)$ map invalid $x$ to $1$.
 \end{definition}
@@ -191,10 +192,17 @@ For any valid baseline cost $C_0$ built from valid factors:
 \[
   C(\mathrm{clamp}_T(\mathrm{NaN}), \ldots) \;\ge\; C_0,
   \qquad
-  C(\ldots, \mathrm{clamp}_D(\mathrm{NaN}), \ldots) \;=\; C_0,
+  C(\ldots, \mathrm{clamp}_D(\mathrm{NaN}), \ldots) \;\ge\; C_0,
 \]
-when the invalid discount is the only perturbation.
+when the invalid factor is the only perturbation.
 \end{theorem}
+
+\begin{proof}
+If the baseline $C_0$ contains a valid discount $D_c \in (0,1)$, clamping
+the invalid telemetry to $1$ removes this discount, yielding
+$C = C_0 / D_c \ge C_0$. Equality holds only if the baseline factor was
+already $1$.
+\end{proof}
 
 Violations increment \texttt{FACTOR\_CLAMP\_EVENTS} (process-global health gauge).
 
@@ -283,6 +291,8 @@ telemetry only (\texttt{DEMI-RDMA-COST-SHADOW}).
 \subsection{Pool-ratio scaling}
 
 The control plane publishes prefill share $\pi \in (0,1)$.
+Let $T_0$ denote the unscaled time core returned by the ordinary composition
+(before pool-ratio modulation).
 Service time cores scale inversely with pool pressure:
 \begin{equation}
   T_{\mathrm{core}}^{\mathrm{pf}} = T_0 \cdot \frac{1-\pi}{\pi},
@@ -310,7 +320,7 @@ They are grouped by plane and latency budget (Table~\ref{tab:deciders}).
     \toprule
     Agent & Plane & Trigger & Decision rule \\
     \midrule
-    Admit / shed & Data & Connection arrival & Token bucket: pass or \texttt{503} \\
+    Admit/Shed & Data & Connection arrival & Token bucket: pass or \texttt{503} \\
     Path classifier & Router & HTTP head parsed & Colocated, disaggregated, or decode-only \\
     \textsc{SelectPrefill} & Router & Disaggregated route & $\arg\min_p \ln C_{\mathrm{pf}}$ \\
     \textsc{SelectDecode} & Router & Prefill complete & $\arg\min_d \ln C_{\mathrm{dc}}(\cdot \mid p)$ \\
@@ -335,6 +345,8 @@ capacity $B_{\mathrm{admit}}$; exhaustion returns HTTP~503 without entering
 the routing loop.
 When pool ratio~$\pi$ actuates, admit capacity rescales with $\pi$ so overload
 protection tracks fleet pressure.
+For instance, the token bucket refill rate for the prefill admission gate is
+multiplied by $\pi$, and for the decode gate by $1-\pi$.
 This is a \textbf{boolean gate}, not a min-cost problem---but it precedes every
 cost-based decision-maker below.
 
@@ -402,6 +414,9 @@ The rebalancer computes target prefill share:
   d_{\mathrm{dc}} &= w_q Q_{\mathrm{dc}} + w_{kv} \mathrm{KV}_{\mathrm{dc}} + w_s S_{\mathrm{dc}}, \\
   \pi^* &= d_{\mathrm{pf}} / (d_{\mathrm{pf}} + d_{\mathrm{dc}}).
 \end{align*}
+Here, $Q$ denotes queue length, $S$ service-time pressure, $\mathrm{KV}_{\mathrm{dc}}$
+KV-cache occupancy, and $\mathrm{FP\_share}$ the fraction of false-positive warmth
+predictions.
 Actuation publishes $\pi$ to the RCU dataplane snapshot only when
 $|\pi^* - \pi| > \texttt{rebalance\_hysteresis}$ and cooldown elapsed
 (\texttt{DEMI-POOL-RATIO}).
@@ -467,7 +482,7 @@ The algebra is enforced by construction and by tests:
     \texttt{DEMI-ROUTE-MINCOST} & $\arg\min \ln C$ & Router \texttt{pick} / pairing \\
     \texttt{DEMI-PAIR-GREEDY} & Two-stage pf$\to$dc & \texttt{select\_prefill\_target} \\
     \texttt{DEMI-POOL-RATIO} & Hysteresis on $\pi$ & \texttt{PoolRebalancer} \\
-    \texttt{BENCH-COMPOSE-8} & Hot \texttt{compose} path & Median ns/op gate \\
+    \texttt{BENCH-COMPOSE-8} & Hot \texttt{compose} (4 barriers, 2 discounts) & Median $\le 50$\,ns/op gate \\
     \bottomrule
   \end{tabular}
 \end{table}
