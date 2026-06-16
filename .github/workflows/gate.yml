@@ -12,6 +12,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  policy:
+    name: Policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: PR policy
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: ./scripts/pr-policy.sh "origin/${{ github.base_ref }}"
+
   verify:
     name: Verify
     uses: ./.github/workflows/gate-phase.yml
