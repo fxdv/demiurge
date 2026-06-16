@@ -1,0 +1,577 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{microtype}
+\usepackage{enumitem}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=black
+}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{definition}{Definition}
+\newtheorem{property}{Property}
+
+\title{%
+  \textbf{Log-Space Cost Composition}\\
+  \large The Routing Algebra of Demiurge
+}
+\author{Demiurge Project\\\small\texttt{fxdv/demiurge}}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Demiurge routes LLM inference requests by minimum analytic cost over phase pools
+(prefill, decode) under cache-locality and memory-pressure constraints.
+This note formalizes the \emph{cost-factor algebra} implemented in
+\texttt{demiurge-cost} and the \emph{decision-makers} in router and control
+planes that consume it: admission, path classification, min-cost placement,
+greedy pairing, KV reservation, and pool-ratio actuation.
+The cost $C(r,q) > 0$ is built as a product of a time core and dimensionless factors,
+realized in software as \emph{addition in log-space}.
+We state the algebraic domains of barriers, discounts, and correctors;
+prove positivity and monotonicity under composition; characterize the
+\emph{fail-expensive} clamping policy for invalid telemetry; and extend the
+core with fleet $\Phi$ barriers, warmth discounts, cross-node transfer penalties,
+and pool-ratio scaling.
+The algebra is executable: property tests and CPU bench gates enforce the
+invariants on every code merge (CI gate).
+\end{abstract}
+
+\section{Introduction}
+
+Classical load balancers minimize connection counts or queue length.
+For disaggregated LLM inference, that objective is mis-specified: the valuable
+state is the \textbf{KV cache}, occupancy is stochastic, and the marginal cost
+of placing request~$r$ on backend~$q$ depends on $q$'s current batch, warmth,
+and fleet-level memory headroom.
+
+Demiurge therefore evaluates a \textbf{strictly positive} routing cost
+$C(r,q)$ and selects $\arg\min_q \ln C(r,q)$.
+Positivity is not an after-the-fact assertion---it is a \textbf{representation
+invariant}: costs live in log-space, composition is log-addition, and invalid
+signals can only move a target toward \emph{more} expensive, never cheaper.
+
+This document is the mathematical companion to
+\texttt{spec/demiurge.tex}~\S4 and the reference implementation
+\texttt{crates/demiurge-cost}.
+Requirement IDs (\texttt{DEMI-COST-POS}, etc.) tie claims to tests.
+
+\section{Preliminaries}
+
+Fix a request context $r$ (tokens, tenant, routing key blocks) and a
+candidate backend $q$ in a phase pool.
+Let $\mathbb{R}_{++} = (0,\infty)$.
+
+\begin{definition}[Log-cost representation]
+A \emph{cost} is a finite real $\ell = \ln C$ with $C \in \mathbb{R}_{++}$.
+Comparison uses $\ell$ only; linear values $C = e^{\ell}$ are for display.
+\end{definition}
+
+We write $\oplus$ for log-space composition (ordinary addition on logs):
+\[
+  \ell_1 \oplus \ell_2 \;=\; \ell_1 + \ell_2,
+  \qquad
+  C_1 \otimes C_2 \;=\; e^{\ell_1 + \ell_2}.
+\]
+
+\section{Factor algebra}
+
+The analytic cost is a multiplicative product in linear space, subject to
+the domain constraints below:
+\begin{equation}\label{eq:product}
+  C(r,q)
+  \;=\;
+  T_{\mathrm{core}}(r,q)
+  \;\cdot\;
+  \prod_{m} B_m
+  \;\cdot\;
+  \prod_{c} D_c
+  \;\cdot\;
+  \delta,
+\end{equation}
+In implementation, Equation~\eqref{eq:product} becomes
+\begin{equation}\label{eq:logcompose}
+  \ln C
+  \;=\;
+  \ln T_{\mathrm{core}}
+  \;+\;
+  \sum_m \ln B_m
+  \;+\;
+  \sum_c \ln D_c
+  \;+\;
+  \ln \delta,
+\end{equation}
+with the corrector term omitted when $\delta = 1$ (identity).
+
+\subsection{Primitive factors}
+
+\begin{definition}[Time core]
+$T_{\mathrm{core}} \in \mathbb{R}_{++}$ is the dimensional anchor (seconds).
+Constructor \texttt{TimeCore} rejects non-finite and non-positive values.
+\end{definition}
+
+\begin{definition}[Barrier]
+$B \in [1, \infty)$ is a multiplicative \emph{penalty}.
+Invalid input clamps to $B = \texttt{f64::MAX}$ (fail-expensive).
+\end{definition}
+
+\begin{definition}[Discount]
+$D \in (0, 1]$ is a multiplicative \emph{reward}; it can only decrease cost.
+Invalid input clamps to $D = 1$ (neutral---no unearned reward).
+\end{definition}
+
+\begin{definition}[Corrector]
+$\delta \in [1-\alpha,\, 1+\alpha]$ with canonical $\alpha = 0.20$.
+Production routing currently uses $\delta = 1$; shadow training estimates
+bounded $\delta$ offline.
+\end{definition}
+
+The sole constructor \texttt{compose(core, barriers, discounts, corrector)}
+returns \texttt{Cost\{ ln \}}.
+
+\subsection{Composition operator}
+
+\begin{theorem}[Strict positivity]\label{thm:pos}
+If $T_{\mathrm{core}} > 0$, each $B_m \ge 1$, each $D_c \in (0,1]$, and
+$\delta > 0$, then $C(r,q) > 0$.
+Moreover, if all factor logs are finite, $\ln C$ is finite.
+\end{theorem}
+
+\begin{proof}
+Every factor is strictly positive by domain.
+Products of strictly positive reals are strictly positive.
+Log-space: finite sum of finite terms; $e^{\ln C} > 0$.
+\end{proof}
+
+\begin{property}[No underflow / sign flip]
+Unlike a linear product $\prod_i x_i$ with many small discounts,
+log-addition cannot underflow to $0$ or change sign when discounts
+approach~$0^+$.
+Property tests sweep $n \in [1,256]$ factors at \texttt{f64::MIN\_POSITIVE}
+(\texttt{cost\_log\_is\_finite\_at\_extremes}).
+\end{property}
+
+\begin{theorem}[Monotonicity of barriers and discounts]
+Holding other factors fixed:
+(i)~increasing any $B_m$ increases $\ln C$;
+(ii)~decreasing any $D_c$ (stronger reward) decreases $\ln C$.
+\end{theorem}
+
+\begin{proof}
+$\partial \ln C / \partial \ln B_m = 1 > 0$;
+$\partial \ln C / \partial \ln D_c = 1$ with $D_c \le 1$.
+\end{proof}
+
+\section{Fail-expensive semantics}
+
+Telemetry on the microsecond routing path can be missing or corrupt.
+Demiurge adopts a \textbf{fail-expensive} policy: invalid signals never
+\emph{cheapen} a target.
+
+\begin{definition}[Fail-expensive clamp]
+Let $\mathrm{clamp}_T(x)$ map invalid $x$ to $T_{\max}$ (the largest finite
+representable time, e.g., \texttt{f64::MAX} seconds).
+Let $\mathrm{clamp}_B(x)$ map invalid $x$ to $B_{\max}$.
+Let $\mathrm{clamp}_D(x)$ map invalid $x$ to $1$.
+\end{definition}
+
+\begin{theorem}[Invalid signals never cheapen]\label{thm:fail}
+For any valid baseline cost $C_0$ built from valid factors:
+\[
+  C(\mathrm{clamp}_T(\mathrm{NaN}), \ldots) \;\ge\; C_0,
+  \qquad
+  C(\ldots, \mathrm{clamp}_D(\mathrm{NaN}), \ldots) \;\ge\; C_0,
+\]
+when the invalid factor is the only perturbation.
+\end{theorem}
+
+\begin{proof}
+If the baseline $C_0$ contains a valid discount $D_c \in (0,1)$, clamping
+the invalid telemetry to $1$ removes this discount, yielding
+$C = C_0 / D_c \ge C_0$. Equality holds only if the baseline factor was
+already $1$.
+\end{proof}
+
+Violations increment \texttt{FACTOR\_CLAMP\_EVENTS} (process-global health gauge).
+
+\section{Corrector envelope}
+
+The learned multiplier $\delta$ adjusts analytic cost within a fixed band.
+
+\begin{theorem}[Corrector bound]\label{thm:corr}
+For any valid composition with identity corrector $\delta = 1$ and clamped
+$\delta' \in [1-\alpha, 1+\alpha]$,
+\[
+  \bigl|\ln C' - \ln C\bigr|
+  \;\le\;
+  \max\bigl\{|\ln(1+\alpha)|,\, |\ln(1-\alpha)|\bigr\}.
+\]
+\end{theorem}
+
+Thus the corrector cannot arbitrarily rescale cost; it operates within a
+multiplicative envelope independent of fleet scale.
+With $\alpha = 0.20$, the relative adjustment is at most $\pm 20\%$.
+
+\section{Domain extensions}
+
+The core algebra is extended by \emph{derived barriers and discounts} that
+remain within the same composition law~\eqref{eq:logcompose}.
+
+\subsection{Queue pressure}
+
+Live in-flight load on backend~$q$ enters as
+\begin{equation}
+  B_{\mathrm{queue}} = 1 + n_{\mathrm{inflight}}(q).
+\end{equation}
+This is a barrier ($\ge 1$) and is monotonic in occupancy.
+
+\subsection{Fleet $\Phi$ memory barrier}
+
+KV reservation uses block-aligned accounting with metadata and fragmentation:
+\begin{align*}
+  \tau &= \left\lceil \frac{\text{prompt tokens}}{\text{block}} \right\rceil \cdot \text{block}, \\
+  \text{payload} &= \tau \cdot \text{bytes\_per\_token}, \\
+  \text{reserved} &= \text{payload} \cdot (1 + \eta_{\mathrm{meta}} + \eta_{\mathrm{frag}}).
+\end{align*}
+
+Fleet pressure uses \textbf{aggregate} occupancy, not a sum of per-request
+p90 headroom (requirement \texttt{DEMI-BARRIER-PHI}):
+\[
+  F = F_{\mathrm{live}} + \Delta p_{90},
+  \qquad
+  \text{not } F_{\mathrm{live}} + N \cdot \Delta p_{90}.
+\]
+
+Utilization $u = F / \text{capacity} \in [0,1)$ yields the barrier
+\begin{equation}\label{eq:phi}
+  B_\Phi(u) = \frac{1}{1-u},
+\end{equation}
+monotone in $u$, with $B_\Phi \to \infty$ as $u \to 1^{-}$ (hard memory wall).
+
+\subsection{Warmth discount}
+
+A warmth hit of strength $s \in (0,1]$ maps to
+\begin{equation}
+  D_{\mathrm{warm}}(s) = 1 - s \cdot \rho_{\max},
+  \qquad
+  \rho_{\max} = 0.85.
+\end{equation}
+Miss ($s \le 0$) applies \emph{no} discount---stale AP state fails toward
+neutral, not toward cheap.
+
+\subsection{Cross-node transfer}
+
+Disaggregated prefill$\to$decode placement with distinct labels incurs
+\begin{equation}
+  B_{\mathrm{xfer}} = \max(1,\, \pi_{\mathrm{transfer}}),
+  \qquad
+  \pi_{\mathrm{transfer}} = 1.05 \;\text{(canonical)}.
+\end{equation}
+
+A \textbf{shadow} RDMA model logs analytic transfer time
+\[
+  t_{\mathrm{rdma}} = t_{\mathrm{base}}(\mathrm{distance}) + \frac{\text{bytes}}{\text{bandwidth}},
+\]
+with discrete topology distance (node $<$ rack $<$ cluster $<$ cross-cluster).
+Routing still uses $B_{\mathrm{xfer}}$; shadow $\ln t_{\mathrm{rdma}}$ is
+telemetry only (\texttt{DEMI-RDMA-COST-SHADOW}).
+
+\subsection{Pool-ratio scaling}
+
+The control plane publishes prefill share $\pi \in (0,1)$.
+Let $T_0$ denote the unscaled time core returned by the ordinary composition
+(before pool-ratio modulation).
+Service time cores scale inversely with pool pressure:
+\begin{equation}
+  T_{\mathrm{core}}^{\mathrm{pf}} = T_0 \cdot \frac{1-\pi}{\pi},
+  \qquad
+  T_{\mathrm{core}}^{\mathrm{dc}} = T_0 \cdot \frac{\pi}{1-\pi}.
+\end{equation}
+High $\pi$ (prefill-heavy fleet) raises decode-relative cost and lowers
+prefill-relative cost---biasing min-cost selection without breaking
+positivity.
+
+\section{Decision-makers}
+
+The cost algebra answers \emph{how expensive} a candidate placement is.
+\textbf{Decision-makers} are the discrete policies that consume $\ln C$ and
+commit actions: admit or shed, colocate or disaggregate, pick a backend,
+reserve KV bytes, or republish fleet ratio~$\pi$.
+They are grouped by plane and latency budget (Table~\ref{tab:deciders}).
+
+\begin{table}[t]
+  \centering
+  \caption{Decision-makers and their objectives}
+  \label{tab:deciders}
+  \small
+  \begin{tabular}{@{}p{2.1cm}p{2.4cm}p{2.6cm}p{4.8cm}@{}}
+    \toprule
+    Agent & Plane & Trigger & Decision rule \\
+    \midrule
+    Admit/Shed & Data & Connection arrival & Token bucket: pass or \texttt{503} \\
+    Path classifier & Router & HTTP head parsed & Colocated, disaggregated, or decode-only \\
+    \textsc{SelectPrefill} & Router & Disaggregated route & $\arg\min_p \ln C_{\mathrm{pf}}$ \\
+    \textsc{SelectDecode} & Router & Prefill complete & $\arg\min_d \ln C_{\mathrm{dc}}(\cdot \mid p)$ \\
+    KV ledger & Control & Decode admit & Reserve if $F + \Delta p_{90} \le \text{cap}$; else reject \\
+    Pool rebalancer & Control & Periodic / trace & Publish $\pi$ if $|\pi^* - \pi| > \varepsilon$ and cooldown \\
+    Length predictor & Control & Observed prompts & Fleet $p90$ increment for $\Phi$ (not direct pick) \\
+    Migration gate & Control & Cutover attempt & Commit iff $\widehat{t}_{\mathrm{stall}} \le \varepsilon \cdot \mathrm{ITL}$ \\
+    Corrector trainer & Control (shadow) & Offline batch & $\delta \in [1\!\pm\!\alpha]$; no live actuation yet \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Decision-makers that \emph{optimize} placement share one rule: compare
+\textbf{only} $\ln C$ (never linear $C$). Hard gates (admit shed, KV reject,
+migration abort) sit \emph{outside} min-cost and fail closed.
+
+\subsection{Admission and overload shed}
+
+Before any routing score is evaluated, the data plane may shed load.
+Userspace \texttt{AdmitBucket} and kernel XDP token buckets enforce a burst
+capacity $B_{\mathrm{admit}}$; exhaustion returns HTTP~503 without entering
+the routing loop.
+When pool ratio~$\pi$ actuates, admit capacity rescales with $\pi$ so overload
+protection tracks fleet pressure.
+For instance, the token bucket refill rate for the prefill admission gate is
+multiplied by $\pi$, and for the decode gate by $1-\pi$.
+This is a \textbf{boolean gate}, not a min-cost problem---but it precedes every
+cost-based decision-maker below.
+
+\subsection{Path classifier}
+
+\texttt{Route} classifies each request into a \textbf{path} before backend
+selection (\texttt{ALG-ROUTE}):
+
+\begin{enumerate}[nosep]
+  \item \textbf{Decode-only} --- client declares decode phase; pick
+        $\arg\min_{d} \ln C_{\mathrm{dc}}$ only.
+  \item \textbf{Colocated fast path} --- prompt tokens
+        $\le \tau_{\mathrm{short}}$ and no warmth override; pick
+        $\arg\min_{q} \ln C_{\mathrm{colocated}}(r,q)$ on a single pool;
+        no hand-off handle (\texttt{DEMI-SHORT-FASTPATH}).
+  \item \textbf{Disaggregated} --- long context, warmth override, or unknown
+        length (conservatively above $\tau_{\mathrm{short}}$); async prefill
+        then decode in \textsc{OnPrefillComplete}.
+\end{enumerate}
+
+Warmth override fires when hit strength
+$s \ge \texttt{routing.short\_context\_warmth\_override}$ on a remote prefill
+target, forcing disaggregation despite a short prompt.
+
+\subsection{Minimum-cost selection}
+
+Within a phase pool,
+\begin{equation}
+  q^\star = \arg\min_{q \in \mathcal{Q}} \ln C(r,q).
+\end{equation}
+Implementation compares \texttt{Cost::ln()} only (\texttt{DEMI-ROUTE-MINCOST}).
+Live inflight count enters via $B_{\mathrm{queue}} = 1 + n_{\mathrm{inflight}}$;
+published $\pi$ scales $T_{\mathrm{core}}$ through \texttt{pool\_core\_scale}.
+
+\subsection{Greedy pairing}
+
+Joint prefill$\to$decode placement is approximated (\texttt{DEMI-PAIR-GREEDY}):
+\begin{enumerate}[nosep]
+  \item $p^\star = \arg\min_p \ln C_{\mathrm{pf}}(r,p)$;
+  \item $d^\star = \arg\min_d \ln C_{\mathrm{dc}}(r,d \mid p^\star)$,
+        including $B_{\mathrm{xfer}}$ when $\mathrm{label}(p^\star) \neq \mathrm{label}(d)$.
+\end{enumerate}
+An oracle joint minimizer is not computed online; pairing regret
+$C_{\mathrm{greedy}} - C_{\mathrm{oracle}}$ is tracked in shadow for telemetry.
+
+\subsection{KV reservation gate}
+
+Decode placement after prefill requires a valid hand-off handle
+(\texttt{DEMI-KV-HANDOFF}).
+The reservation ledger admits a request only if fleet marginal occupancy
+$F + \Delta p_{90}$ fits decode-pool capacity; otherwise
+\textsc{SelectDecode} is never reached (\texttt{KvAdmitRejected}).
+The $\Phi$ barrier $B_\Phi(F/c)$ from Equation~\eqref{eq:phi} is injected
+into decode costs when pressure is elevated---a \emph{soft} bias inside
+min-cost, distinct from the hard ledger reject.
+
+The length predictor supplies $\Delta p_{90}$ from a rolling window of prompt
+lengths (fleet aggregate, not per-request sum) (\texttt{DEMI-BARRIER-PHI}).
+
+\subsection{Pool-ratio rebalancer}
+
+The rebalancer computes target prefill share:
+\begin{align*}
+  d_{\mathrm{pf}} &= w_q Q_{\mathrm{pf}} + w_s S_{\mathrm{pf}}(1 - \mathrm{FP\_share}), \\
+  d_{\mathrm{dc}} &= w_q Q_{\mathrm{dc}} + w_{kv} \mathrm{KV}_{\mathrm{dc}} + w_s S_{\mathrm{dc}}, \\
+  \pi^* &= d_{\mathrm{pf}} / (d_{\mathrm{pf}} + d_{\mathrm{dc}}).
+\end{align*}
+Here, $Q$ denotes queue length, $S$ service-time pressure, $\mathrm{KV}_{\mathrm{dc}}$
+KV-cache occupancy, and $\mathrm{FP\_share}$ the fraction of false-positive warmth
+predictions.
+Actuation publishes $\pi$ to the RCU dataplane snapshot only when
+$|\pi^* - \pi| > \texttt{rebalance\_hysteresis}$ and cooldown elapsed
+(\texttt{DEMI-POOL-RATIO}).
+\textbf{Shadow mode} computes and logs $\pi^*$ but never mutates $\pi$---the
+default until explicit actuation is enabled.
+Published $\pi$ reshapes all min-cost decision-makers through
+$T_{\mathrm{core}}^{\mathrm{pf}}$ and $T_{\mathrm{core}}^{\mathrm{dc}}$ without
+changing the composition law itself.
+
+\subsection{Migration cutover gate (planned)}
+
+Live decode migration uses a \textbf{budget gate}, not min-cost:
+cutover commits only if estimated stall
+$\widehat{t}_{\mathrm{stall}} \le \varepsilon \cdot \mathrm{ITL}$
+(\texttt{DEMI-MIG-SUBITL}); otherwise placement reverts.
+Reservation bytes transfer atomically on commit and release on abort.
+
+\subsection{Corrector graduation (shadow)}
+
+Production routing fixes $\delta = 1$.
+Shadow mode logs $(\text{features}, \ln C, t_{\mathrm{obs}})$; offline training
+proposes $\delta \in [1-\alpha, 1+\alpha]$.
+Promotion to live actuation is a separate decision-maker
+(\texttt{DEMI-CORR-GRAD}, planned) gated on clamp rate and goodput---it does
+not bypass Theorems~\ref{thm:pos}--\ref{thm:corr}.
+
+\subsection{Decision pipeline}
+
+Figure~\ref{fig:pipeline} summarizes the shipped path on a disaggregated request.
+
+\begin{figure}[ht]
+  \centering
+  \small
+  \begin{tabular}{@{}c@{\ $\to$\ }c@{\ $\to$\ }c@{\ $\to$\ }c@{\ $\to$\ }c@{}}
+    Admit & Classify & \textsc{SelectPrefill} & Prefill async &
+    \textsc{SelectDecode} \\
+  \end{tabular}\\[0.6em]
+  \begin{tabular}{@{}c@{\ $\to$\ }c@{\ $\to$\ }c@{}}
+    KV reserve & Forward decode & Release on close
+  \end{tabular}\\[0.4em]
+  {\small Rebalancer $\to$ $\pi$ actuation runs concurrently on the control plane.}
+  \caption{Disaggregated request decision pipeline (control-plane rebalancer runs concurrently).}
+  \label{fig:pipeline}
+\end{figure}
+
+\section{Verification}
+
+The algebra is enforced by construction and by tests:
+
+\begin{table}[h]
+  \centering
+  \caption{Algebraic invariants and enforcement}
+  \label{tab:verify}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    Requirement & Claim & Enforcement \\
+    \midrule
+    \texttt{DEMI-COST-POS} & $C > 0$ always & Log representation + proptest \\
+    \texttt{DEMI-CORR-CLAMP} & $\delta \in [1\!\pm\!\alpha]$ & \texttt{Corrector::new} \\
+    \texttt{DEMI-FAIL-EXPENSIVE} & Invalid $\not\to$ cheaper & Unit + clamp policy \\
+    \texttt{DEMI-BARRIER-PHI} & Fleet aggregate $\Phi$ & \texttt{phi\_barrier\_marginal} \\
+    \texttt{DEMI-WARM-DISCOUNT} & $D \in (0,1]$ bounded & \texttt{warmth\_discount} \\
+    \texttt{DEMI-ROUTE-MINCOST} & $\arg\min \ln C$ & Router \texttt{pick} / pairing \\
+    \texttt{DEMI-PAIR-GREEDY} & Two-stage pf$\to$dc & \texttt{select\_prefill\_target} \\
+    \texttt{DEMI-POOL-RATIO} & Hysteresis on $\pi$ & \texttt{PoolRebalancer} \\
+    \texttt{BENCH-COMPOSE-8} & Hot \texttt{compose} (4 barriers, 2 discounts) & Median $\le 50$\,ns/op gate \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+CPU bench gates (\texttt{design/bench-gates.toml}) pin median ns/op for
+\texttt{compose}, \texttt{Backend::cost}, \texttt{select\_64}, and derived
+paths---regressions fail CI Gate Track~A.
+
+\section{Implementation map}
+
+\begin{table}[h]
+  \centering
+  \caption{\texttt{demiurge-cost} module map}
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    Module & Role \\
+    \midrule
+    \texttt{lib.rs} & \texttt{TimeCore}, \texttt{BarrierFactor}, \texttt{Discount}, \texttt{Corrector}, \texttt{compose} \\
+    \texttt{kv.rs} & \texttt{kv\_breakdown}, \texttt{phi\_barrier}, \texttt{phi\_barrier\_marginal} \\
+    \texttt{warmth.rs} & \texttt{warmth\_discount} \\
+    \texttt{rdma.rs} & Topology distance, shadow transfer time and barrier \\
+    \texttt{generated\_params.rs} & Canonical $\alpha$, KV fractions, RDMA ladder \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Router integration (\texttt{demiurge-router}) calls \texttt{compose} on the
+warm path when barriers or discounts are active; otherwise it uses the
+closed form \texttt{ln\_base + ln(pool\_scale) + ln(queue)}.
+
+\section{Related work}
+
+\textbf{Product-form QoS.} Multiplicative utility and log-additive noise
+appear in networking and economics; Demiurge instantiates them for
+cache-aware inference routing with explicit fail-expensive semantics.
+
+\textbf{Consistent hashing / power-of-two.} Connection-agnostic policies are
+deliberately avoided where KV warmth dominates.
+
+\textbf{Learned schedulers.} The corrector is a \emph{bounded residual} on
+$\ln C$, not a free-form score---preserving Theorem~\ref{thm:pos} under
+graduation (\texttt{DEMI-CORR-GRAD}, planned).
+
+\section{Conclusion}
+
+Demiurge routing algebra treats cost as an element of
+$(\mathbb{R}_{++}, \times)$, implemented as $(\mathbb{R}, +)$ on logs.
+Barriers penalize ($\ge 1$), discounts reward ($\le 1$), correctors adjust
+within $[1\!\pm\!\alpha]$, and invalid telemetry fails expensive.
+Extensions ($\Phi$, warmth, transfer, $\pi$-scaling) are ordinary factors in
+the same composition law.
+\textbf{Decision-makers} consume $\ln C$: min-cost pickers for placement,
+boolean gates for admit/shed and KV capacity, hysteresis actuation for~$\pi$,
+and budget gates for migration.
+The spec remains the contract; this note is the concise algebraic spine.
+
+\appendix
+
+\section{Canonical parameters (excerpt)}
+
+Generated from \texttt{design/demiurge.params.toml}:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+  \toprule
+  Symbol / key & Value \\
+  \midrule
+  $\alpha$ (\texttt{corrector.alpha}) & $0.20$ \\
+  $\eta_{\mathrm{meta}}$ & $0.08$ \\
+  $\eta_{\mathrm{frag}}$ & $0.05$ \\
+  $\pi_{\mathrm{transfer}}$ & $1.05$ \\
+  $\tau_{\mathrm{short}}$ tokens & $512$ \\
+  $\rho_{\max}$ (warmth) & $0.85$ \\
+  RDMA link & $200$\,Gbps (shadow) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+\bibitem{spec}
+Demiurge Project.
+\textit{Demiurge design specification} (\texttt{spec/demiurge.tex}).
+\bibitem{cost}
+Demiurge Project.
+\textit{demiurge-cost} crate reference implementation.
+\url{https://github.com/fxdv/demiurge/tree/main/crates/demiurge-cost}
+\bibitem{params}
+\textit{design/demiurge.params.toml} --- single source of truth for constants.
+\end{thebibliography}
+
+\end{document}
