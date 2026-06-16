@@ -52,7 +52,7 @@ Track C — Fleet, GPU & economics →  real accelerator fleets, actuation, migr
 |-------|----------|--------|-----------|--------|
 | **A — macOS & local dev** | macOS (primary), portable Rust | **0–5 proof** | `./scripts/gate.sh`, `pre-release.sh`, tagged macOS release | **done** |
 | **A — remaining (portable)** | macOS + trace replay | fleet pilot, corrector shadow, HandoffTransport | `cargo xtask fleet-pilot` | **done** |
-| **B — Linux production** | Linux x86_64 | **5+** dataplane | `bpf` workflow, `publish-linux.yml` → `linux-nightly`, `track-b-verify.sh` | **in progress** (engineering path ✅; exit gates open) |
+| **B — Linux production** | Linux x86_64 | **5+** dataplane | Gate Track B job, `publish-linux.yml` → `linux-nightly`, `track-b-verify.sh` | **in progress** (engineering path ✅; exit gates open) |
 | **C — Fleet & GPU** | Linux + GPU fleet | **6–8**, RDMA prod, π actuation at scale | measured on reference hardware | planned |
 
 **What runs where**
@@ -704,8 +704,9 @@ Run after `./scripts/gate.sh` or `./scripts/pre-release.sh` when tuning or befor
 # Track B — Linux production dataplane
 
 **Platform:** Linux x86_64 only (XDP, `io_uring`, real NIC path). CI:
-[`publish-linux.yml`](.github/workflows/publish-linux.yml) (after green `ci` on `main`, weekly
-Mon 06:00 UTC + dispatch → rolling **`linux-nightly`**), [`bpf.yml`](.github/workflows/bpf.yml) (eBPF compile).
+[`gate.yml`](.github/workflows/gate.yml) Track B job (BPF + XDP veth),
+[`publish-linux.yml`](.github/workflows/publish-linux.yml) (after green Gate on `main`, weekly
+Mon 06:00 UTC + dispatch → rolling **`linux-nightly`**).
 
 ## Phase 5+ — Kernel dataplane — **in progress**
 
@@ -722,7 +723,7 @@ x86_64 p99 budget) remain open.
 
 | Crate / module | Shipped |
 |----------------|---------|
-| `bpf/admit_shed.bpf.c` | XDP token-bucket shed; CI via `bpf.yml` → `target/bpf/admit_shed.o` |
+| `bpf/admit_shed.bpf.c` | XDP token-bucket shed; CI via Gate Track B → `target/bpf/admit_shed.o` |
 | `demiurge-dataplane` | `XdpAdmitShed` via aya — load, attach, map seed/reseed; veth tests incl. packet shed |
 | `demiurge-router` | `AdmitMode`, `with_kernel_admit()`, actuation BPF map sync, env flags |
 | `demiurge-dataplane` | `IoUringProxySession` (production TCP recv/send), `IoUringForwarder::copy_between` |
@@ -741,7 +742,7 @@ x86_64 p99 budget) remain open.
 
 **Exit gate — production**
 
-- [x] XDP program **compiles** in CI (`bpf` workflow → `target/bpf/admit_shed.o`).
+- [x] XDP program **compiles** in CI (Gate Track B → `target/bpf/admit_shed.o`).
 - [x] `linux-nightly` rolling release green on Ubuntu.
 - [x] Runtime XDP attach + map sync on Linux (veth smoke + router integration; packet shed test).
 - [x] `BENCH-IOURING-FWD` gate passes (reused-ring micro-bench; proxy `copy_between` shipped).

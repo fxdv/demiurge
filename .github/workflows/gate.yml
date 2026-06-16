@@ -1,0 +1,80 @@
+name: Gate
+
+# Primary CI — mirrors ./scripts/gate.sh in parallel jobs:
+#   Verify → Track A · bench & load ∥ Track B · BPF & XDP ∥ Spec · PDF (when design/spec changes)
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify
+    uses: ./.github/workflows/gate-phase.yml
+    with:
+      label: static checks & build
+      phase: quality
+
+  track-a:
+    name: Track A
+    needs: verify
+    uses: ./.github/workflows/gate-phase.yml
+    with:
+      label: bench & load
+      phase: track-a
+      skip_release_build: true
+
+  track-b:
+    name: Track B
+    needs: verify
+    uses: ./.github/workflows/gate-phase.yml
+    with:
+      label: BPF & XDP
+      phase: track-b
+      skip_release_build: true
+
+  spec:
+    name: Spec
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            spec:
+              - 'spec/**'
+              - 'design/**'
+              - '.github/workflows/gate.yml'
+              - '.github/workflows/gate-phase.yml'
+
+      - name: Skip (no spec/design changes)
+        if: steps.changes.outputs.spec != 'true'
+        run: echo "No spec/design changes — skipping PDF build."
+
+      - uses: ./.github/actions/setup-rust
+        if: steps.changes.outputs.spec == 'true'
+
+      - name: Regenerate spec inputs
+        if: steps.changes.outputs.spec == 'true'
+        run: cargo xtask gen
+
+      - name: Compile spec
+        if: steps.changes.outputs.spec == 'true'
+        uses: xu-cheng/latex-action@v3
+        with:
+          working_directory: spec
+          root_file: demiurge.tex
+
+      - name: Upload PDF
+        if: steps.changes.outputs.spec == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: demiurge-spec
+          path: spec/demiurge.pdf
+          if-no-files-found: error

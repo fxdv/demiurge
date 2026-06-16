@@ -195,7 +195,7 @@ lines += [
     "## Traceability",
     "",
     f"- Full commit: `{commit_full}`",
-    "- Spec: `spec/demiurge.tex` (formal contract; PDF via CI `spec` workflow)",
+    "- Spec: `spec/demiurge.tex` (formal contract; PDF via Gate · Spec job)",
     f"- Requirements: `design/requirements.toml` — see lint line in product doc header",
     "",
     "## License",

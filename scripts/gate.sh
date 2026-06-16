@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Local gate — mirrors CI (conformance + quality + regression).
+# Local gate — mirrors CI Gate workflow (Verify + Track A + Track B; Spec optional).
 #
 #   ./scripts/gate.sh              # full CI mirror (default; pre-push hook)
 #   ./scripts/gate.sh --quick      # inner loop: gen, drift, lint, fmt, clippy, test
-#   ./scripts/gate.sh --ci-quality # CI quality job (conformance + fmt/clippy/test/release)
-#   ./scripts/gate.sh --ci-regression  # CI regression (bench, load, fleet-pilot, Track B)
+#   ./scripts/gate.sh --ci-quality     # CI verify job (conformance + fmt/clippy/test/release)
+#   ./scripts/gate.sh --ci-track-a     # CI Track A (bench, load smoke, fleet-pilot)
+#   ./scripts/gate.sh --ci-track-b     # CI Track B (BPF, XDP veth, kernel load — Linux)
+#   ./scripts/gate.sh --ci-regression  # Track A + Track B (local full gate; CI runs jobs in parallel)
 #
 # Set GATE_SKIP_RELEASE_BUILD=1 to skip release build in --ci-regression (artifact reuse).
 set -euo pipefail
@@ -22,6 +24,8 @@ for arg in "$@"; do
     --quick) QUICK=1 ;;
     --ci-conformance) CI_PHASE=conformance ;;
     --ci-quality) CI_PHASE=quality ;;
+    --ci-track-a) CI_PHASE=track-a ;;
+    --ci-track-b) CI_PHASE=track-b ;;
     --ci-regression) CI_PHASE=regression ;;
     -h | --help)
       sed -n '1,12p' "$0"
@@ -29,7 +33,9 @@ for arg in "$@"; do
       echo "  --quick            skip release build, bench gates, load smoke, fleet-pilot, Track B, spec PDF"
       echo "  --ci-conformance   gen + drift + lint (design-conformance)"
       echo "  --ci-quality       conformance + fmt + clippy + test + release build"
-      echo "  --ci-regression    bench-gate + load smoke + fleet-pilot + Track B (Linux)"
+      echo "  --ci-track-a       bench-gate + load smoke + fleet-pilot"
+      echo "  --ci-track-b       BPF + XDP veth + p5 tests + LOAD-TRACK-B-KERNEL (Linux)"
+      echo "  --ci-regression    --ci-track-a then --ci-track-b (sequential; CI runs in parallel)"
       exit 0
       ;;
     *)
@@ -74,11 +80,15 @@ run_quality() {
   test -x "${CARGO_TARGET_DIR:-target}/release/xtask"
 }
 
-run_regression() {
+ensure_release_build() {
   if [[ "$GATE_SKIP_RELEASE_BUILD" != "1" ]]; then
     bold "build (release workspace)"
     cargo build --release --workspace
   fi
+}
+
+run_track_a() {
+  ensure_release_build
 
   bold "CPU bench gates (release hot paths)"
   cargo run --release -q --package xtask -- bench-gate
@@ -88,13 +98,37 @@ run_regression() {
 
   bold "Track A fleet pilot (shadow π* + corrector shadow)"
   cargo run --release -q --package xtask -- fleet-pilot
+}
 
-  if [[ "$(uname -s)" == "Linux" ]]; then
-    bold "Track B gate (required on Linux — BPF + XDP veth smoke)"
-    ./scripts/track-b-gate.sh
-  else
+run_track_b() {
+  ensure_release_build
+
+  if [[ "$(uname -s)" != "Linux" ]]; then
     echo "skip Track B gate — macOS (see Track B below)"
+    return 0
   fi
+
+  bold "Track B gate (BPF compile + XDP veth smoke)"
+  ./scripts/track-b-gate.sh
+
+  bold "router Track B dataplane tests"
+  cargo test -p demiurge-router --test p5_dataplane
+
+  bold "Track B kernel load (LOAD-TRACK-B-KERNEL)"
+  as_root() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+      "$@"
+    else
+      sudo -E env PATH="$PATH" "$@"
+    fi
+  }
+  as_root env GATE_SKIP_RELEASE_BUILD=1 \
+    cargo run --release -q --package xtask -- load-bench --scenario LOAD-TRACK-B-KERNEL
+}
+
+run_regression() {
+  run_track_a
+  run_track_b
 }
 
 run_spec_optional() {
@@ -147,9 +181,27 @@ case "$CI_PHASE" in
     demiurge_pass "QUALITY PASSED"
     exit 0
     ;;
+  track-a)
+    demiurge_banner "DEMIURGE · verification gate" \
+      "mode    CI · Track A" \
+      "repo    $(_ui_git_ref)" \
+      "host    $(_ui_host_tag)"
+    run_track_a
+    demiurge_pass "TRACK A PASSED"
+    exit 0
+    ;;
+  track-b)
+    demiurge_banner "DEMIURGE · verification gate" \
+      "mode    CI · Track B" \
+      "repo    $(_ui_git_ref)" \
+      "host    $(_ui_host_tag)"
+    run_track_b
+    demiurge_pass "TRACK B PASSED"
+    exit 0
+    ;;
   regression)
     demiurge_banner "DEMIURGE · verification gate" \
-      "mode    CI · regression" \
+      "mode    CI · regression (Track A + B)" \
       "repo    $(_ui_git_ref)" \
       "host    $(_ui_host_tag)"
     run_regression

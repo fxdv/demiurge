@@ -1,11 +1,11 @@
 name: publish-linux
 
 # Linux release artifact + rolling `linux-nightly` GitHub Release.
-# Runs after green `ci` on main, weekly (Mon 06:00 UTC), or manual dispatch.
+# Runs after green Gate on main, weekly (Mon 06:00 UTC), or manual dispatch.
 
 on:
   workflow_run:
-    workflows: [ci]
+    workflows: [Gate]
     types: [completed]
     branches: [main]
   schedule:

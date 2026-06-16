@@ -78,23 +78,21 @@ release) and on demand via the **release** workflow for tagged semver builds.
 
 | Workflow | What it enforces |
 |----------|------------------|
-| `ci` | **Quality** (gen/drift/lint + fmt/clippy/test/release build); **Regression** (CPU bench gates + load smoke + `LOAD-TRACK-B-IOURING` + root `LOAD-TRACK-B-KERNEL` + fleet-pilot + Track B gate) |
-| `spec` | the design PDF compiles from regenerated inputs |
-| `publish-linux` | Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) after green `ci` on `main`, weekly Mon 06:00 UTC, or manual dispatch |
-| `release` | manual semver tag release (Linux artifact + one-pager) |
-| `bpf` | compile XDP `admit_shed.bpf.c` on Ubuntu + `track-b-gate.sh` (veth smoke) |
+| [`gate.yml`](.github/workflows/gate.yml) | **Verify** (gen/drift/lint + fmt/clippy/test/release build); **Track A** (CPU bench gates + load smoke + fleet-pilot); **Track B** (BPF compile + XDP veth + p5 tests + `LOAD-TRACK-B-KERNEL`); **Spec · PDF** when `spec/` or `design/` changes |
+| [`publish-linux.yml`](.github/workflows/publish-linux.yml) | Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) after green Gate on `main`, weekly Mon 06:00 UTC, or manual dispatch |
+| [`release.yml`](.github/workflows/release.yml) | manual semver tag release (Linux artifact + one-pager) |
 
 All workflows share [`.github/actions/setup-rust`](.github/actions/setup-rust/) (toolchain + cache).
-CI phases call [`.github/workflows/gate-reusable.yml`](.github/workflows/gate-reusable.yml) → `./scripts/gate.sh --ci-*`.
-Local `./scripts/gate.sh` mirrors **ci quality + regression**; `--quick` skips release bench/load/Track B.
+Gate jobs call [`.github/workflows/gate-phase.yml`](.github/workflows/gate-phase.yml) → `./scripts/gate.sh --ci-*`.
+Local `./scripts/gate.sh` mirrors **Verify + Track A + Track B** (sequential); `--quick` skips release bench/load/Track B.
 
 ### CI structure
 
 | Item | Status |
 |------|--------|
 | Shared `setup-rust` action | done |
-| Reusable `gate-reusable.yml` → `gate.sh --ci-*` | done |
-| Design-conformance merged into `ci` quality job | done |
-| Release `target/release/` artifact reuse (quality → regression) | done |
-| `publish-linux` on every green `main` `ci` | done |
+| Reusable `gate-phase.yml` → `gate.sh --ci-*` | done |
+| Design-conformance in Verify job | done |
+| Release `target/release/` artifact reuse (Verify → Track A/B) | done |
+| `publish-linux` on every green `main` Gate | done |
 | `scripts/publish.sh` → `publish.env` for release workflows | done |

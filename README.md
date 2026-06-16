@@ -4,8 +4,7 @@
 
 **A phase-aware, cache-locality-first load balancer for inference fleets**
 
-[![ci](https://github.com/fxdv/demiurge/actions/workflows/ci.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/ci.yml)
-[![spec](https://github.com/fxdv/demiurge/actions/workflows/spec.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/spec.yml)
+[![Gate](https://github.com/fxdv/demiurge/actions/workflows/gate.yml/badge.svg)](https://github.com/fxdv/demiurge/actions/workflows/gate.yml)
 [![invariant: C&gt;0](https://img.shields.io/badge/invariant-C%3E0%20by%20construction-005aa0)](spec/demiurge.tex)
 [![license](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)](#license)
 
@@ -139,10 +138,11 @@ spec/demiurge.tex            ──►  cargo xtask spec ──►  spec/demiurg
 
 | Plate | Command | CI |
 |-------|---------|-----|
-| Single source of truth | `cargo xtask gen` | drift check in `gate.sh` |
-| Traceability pipe | `cargo xtask lint` | ci quality job |
-| Spec PDF | `cargo xtask spec` | spec workflow |
-| CPU gates | `cargo xtask bench-gate` | ci workflow |
+| Single source of truth | `cargo xtask gen` | Verify job |
+| Traceability pipe | `cargo xtask lint` | Verify job |
+| Spec PDF | `cargo xtask spec` | Spec · PDF job (design/spec changes) |
+| CPU gates | `cargo xtask bench-gate` | Track A job |
+| BPF / XDP | `./scripts/track-b-gate.sh` | Track B job |
 
 Cost is log-composed and positive by construction (`C>0`); property tests and bench gates enforce it. Details: [`spec/demiurge.tex`](spec/demiurge.tex) §4.
 

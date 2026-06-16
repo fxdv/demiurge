@@ -6,9 +6,9 @@
 #
 # Local full suite: ./scripts/load-bench.sh
 # Real stress:      ./scripts/load-stress.sh  (stress=true scenarios, zero errors)
-# CI regression: gate.sh and .github/workflows/ci.yml run `load-bench --ci`.
+# CI regression: gate.sh and .github/workflows/gate.yml run `load-bench --ci`.
 # CI scenarios: LOAD-CI-SMOKE, LOAD-TRACK-B-IOURING (Linux).
-# LOAD-TRACK-B-KERNEL runs in CI via a separate root step (see gate-reusable.yml).
+# LOAD-TRACK-B-KERNEL runs in CI Track B job (see gate-phase.yml).
 # Optional soft gates (max_p99_ms): advisory on full runs; enforced with `--ci`.
 
 [settings]
