@@ -151,7 +151,9 @@ impl Discount {
     }
 
     /// Fail-expensive: an invalid reward saturates to the neutral `1.0` (no
-    /// discount). It never grants an unearned (cheapening) reward.
+    /// discount). It never grants an unearned reward; relative to a baseline
+    /// that already includes a valid discount, clamping removes the reward and
+    /// can only increase cost.
     pub fn clamped(x: f64) -> Self {
         if x.is_finite() && x > 0.0 && x <= 1.0 {
             Self(x)
