@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use aya::maps::Array;
 use aya::maps::MapError;
 use aya::programs::{Xdp, XdpFlags};
-use aya::{Ebpf, EbpfError};
+use aya::{Ebpf, EbpfError, Pod};
 
 use super::{XdpAdmitShed, XdpAttachError, OBJECT_FILE, PROGRAM_NAME};
 
@@ -19,6 +19,8 @@ struct AdmitMapState {
     capacity: u64,
     shed_total: u64,
 }
+
+unsafe impl Pod for AdmitMapState {}
 
 fn xdp_attach_flags() -> XdpFlags {
     match std::env::var("DEMIURGE_XDP_FLAGS").as_deref() {
