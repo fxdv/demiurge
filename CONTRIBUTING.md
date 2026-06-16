@@ -78,12 +78,13 @@ release) and on demand via the **release** workflow for tagged semver builds.
 
 | Workflow | What it enforces |
 |----------|------------------|
-| [`gate.yml`](.github/workflows/gate.yml) | **Verify** (gen/drift/lint + fmt/clippy/test/release build); **Track A** (CPU bench gates + load smoke + fleet-pilot); **Track B** (BPF compile + XDP veth + p5 tests + `LOAD-TRACK-B-KERNEL`); **Spec · PDF** when `spec/` or `design/` changes |
+| [`gate.yml`](.github/workflows/gate.yml) | **Policy** (PR-only: same-PR coupling + CLA); **Verify** (gen/drift/lint + fmt/clippy/test/release build); **Track A** (CPU bench gates + load smoke + fleet-pilot); **Track B** (BPF compile + XDP veth + p5 tests + `LOAD-TRACK-B-KERNEL`); **Spec · PDF** when `spec/` or `design/` changes |
 | [`publish-linux.yml`](.github/workflows/publish-linux.yml) | Linux tarball + rolling [`linux-nightly`](https://github.com/fxdv/demiurge/releases/tag/linux-nightly) after green Gate on `main`, weekly Mon 06:00 UTC, or manual dispatch |
 | [`release.yml`](.github/workflows/release.yml) | manual semver tag release (Linux artifact + one-pager) |
 
 All workflows share [`.github/actions/setup-rust`](.github/actions/setup-rust/) (toolchain + cache).
 Gate jobs call [`.github/workflows/gate-phase.yml`](.github/workflows/gate-phase.yml) → `./scripts/gate.sh --ci-*`.
+PR-only policy: [`scripts/pr-policy.sh`](scripts/pr-policy.sh) (same-PR file coupling + CLA acknowledgment).
 Local `./scripts/gate.sh` mirrors **Verify + Track A + Track B** (sequential); `--quick` skips release bench/load/Track B.
 
 ### CI structure
