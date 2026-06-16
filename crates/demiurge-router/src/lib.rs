@@ -5,6 +5,7 @@
 //! **Phase 4:** Greedy pf→dc pairing on the disaggregated path ([DEMI-PAIR-GREEDY]).
 //! **Phase 5:** RCU routing table + admit shed on the live TCP path ([DEMI-DP-RCU], [DEMI-XDP-SHED]).
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -15,15 +16,15 @@ use std::time::Duration;
 use demiurge_control::{
     export_pool_pressure, pairing_regret_targets, AdmitError, CorrectorShadowLog,
     CorrectorShadowSample, LengthPredictor, PairingTarget, PoolPressure, PoolRebalancer,
-    RebalancerMode, ReservationGuard, ReservationLedger,
+    RdmaCostShadowLog, RdmaCostShadowSample, RebalancerMode, ReservationGuard, ReservationLedger,
 };
 use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
 use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
 use demiurge_cost::ROUTING_TRANSFER_PENALTY;
 use demiurge_cost::{
-    compose, kv_breakdown, warmth_discount, BarrierFactor, Corrector, Cost, TimeCore,
-    DATAPLANE_ADMIT_BURST, DATAPLANE_RCU_HEARTBEAT_MS, DATAPLANE_RCU_STALE_ALERT_MS,
-    POOL_ACTUATION_ENABLED,
+    compose, kv_breakdown, rdma_distance, rdma_transfer_ln, warmth_discount, BarrierFactor,
+    Corrector, Cost, TimeCore, TopologyId, DATAPLANE_ADMIT_BURST, DATAPLANE_RCU_HEARTBEAT_MS,
+    DATAPLANE_RCU_STALE_ALERT_MS, POOL_ACTUATION_ENABLED,
 };
 use demiurge_dataplane::{admit_capacity_for_pi, AdmitBucket, DataPlaneSnapshot};
 use demiurge_handoff::{
@@ -126,6 +127,7 @@ impl std::error::Error for RouteError {}
 pub struct Backend {
     pub label: String,
     pub addr: SocketAddr,
+    topology: TopologyId,
     base_service_seconds: f64,
     /// ln(base_service_seconds) — valid bases only; invalid inputs fail-expensive at construction.
     ln_base: f64,
@@ -139,6 +141,15 @@ fn queue_ln(inflight: usize) -> f64 {
 
 impl Backend {
     pub fn new(label: impl Into<String>, addr: SocketAddr, base_service_seconds: f64) -> Arc<Self> {
+        Self::new_with_topology(label, addr, base_service_seconds, TopologyId::default())
+    }
+
+    pub fn new_with_topology(
+        label: impl Into<String>,
+        addr: SocketAddr,
+        base_service_seconds: f64,
+        topology: TopologyId,
+    ) -> Arc<Self> {
         let ln_base = if base_service_seconds.is_finite() && base_service_seconds > 0.0 {
             base_service_seconds.ln()
         } else {
@@ -147,10 +158,15 @@ impl Backend {
         Arc::new(Self {
             label: label.into(),
             addr,
+            topology,
             base_service_seconds,
             ln_base,
             inflight: AtomicUsize::new(0),
         })
+    }
+
+    pub fn topology(&self) -> &TopologyId {
+        &self.topology
     }
 
     pub fn inflight(&self) -> usize {
@@ -466,6 +482,7 @@ pub struct ControlMetrics {
     pub fastpath_misroute_mean: f64,
     pub fastpath_misroute_samples: u64,
     pub corrector_shadow_samples: u64,
+    pub rdma_cost_shadow_samples: u64,
 }
 
 #[derive(Debug)]
@@ -476,6 +493,7 @@ struct ControlPlane {
     regret_samples: u64,
     last_pi_star: f64,
     corrector_shadow: CorrectorShadowLog,
+    rdma_cost_shadow: RdmaCostShadowLog,
     fastpath_misroute_sum: f64,
     fastpath_misroute_samples: u64,
 }
@@ -489,6 +507,7 @@ impl Default for ControlPlane {
             regret_samples: 0,
             last_pi_star: 0.5,
             corrector_shadow: CorrectorShadowLog::new(4096),
+            rdma_cost_shadow: RdmaCostShadowLog::new(4096),
             fastpath_misroute_sum: 0.0,
             fastpath_misroute_samples: 0,
         }
@@ -728,6 +747,7 @@ impl Router {
             fastpath_misroute_mean: misroute_mean,
             fastpath_misroute_samples: cp.fastpath_misroute_samples,
             corrector_shadow_samples: cp.corrector_shadow.len() as u64,
+            rdma_cost_shadow_samples: cp.rdma_cost_shadow.len() as u64,
         }
     }
 
@@ -737,6 +757,23 @@ impl Router {
             .expect("control plane")
             .corrector_shadow
             .samples()
+    }
+
+    pub fn rdma_cost_shadow_samples(&self) -> Vec<RdmaCostShadowSample> {
+        self.control
+            .lock()
+            .expect("control plane")
+            .rdma_cost_shadow
+            .samples()
+    }
+
+    fn topology_for_label(&self, label: &str) -> TopologyId {
+        self.prefill
+            .iter()
+            .chain(self.decode.iter())
+            .find(|b| b.label == label)
+            .map(|b| b.topology().clone())
+            .unwrap_or_default()
     }
 
     fn tick_control(
@@ -864,7 +901,34 @@ impl Router {
     }
 }
 
+pub fn parse_topology_map(spec: &str) -> Result<HashMap<String, TopologyId>, String> {
+    let mut out = HashMap::new();
+    for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (label, rest) = item
+            .split_once('@')
+            .ok_or_else(|| format!("bad topology spec {item:?}; want label@node/rack/cluster"))?;
+        let parts: Vec<&str> = rest.split('/').collect();
+        if parts.len() != 3 {
+            return Err(format!(
+                "bad topology spec {item:?}; want label@node/rack/cluster"
+            ));
+        }
+        out.insert(
+            label.to_string(),
+            TopologyId::new(parts[0], parts[1], parts[2]),
+        );
+    }
+    Ok(out)
+}
+
 pub fn parse_pool(spec: &str) -> Result<Vec<Arc<Backend>>, String> {
+    parse_pool_with_topology(spec, &HashMap::new())
+}
+
+pub fn parse_pool_with_topology(
+    spec: &str,
+    topology: &HashMap<String, TopologyId>,
+) -> Result<Vec<Arc<Backend>>, String> {
     let mut out = Vec::new();
     for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let parts: Vec<&str> = item.split('@').collect();
@@ -879,7 +943,8 @@ pub fn parse_pool(spec: &str) -> Result<Vec<Arc<Backend>>, String> {
         let secs: f64 = parts[2]
             .parse()
             .map_err(|e| format!("bad seconds {:?}: {e}", parts[2]))?;
-        out.push(Backend::new(parts[0], addr, secs));
+        let topo = topology.get(parts[0]).cloned().unwrap_or_default();
+        out.push(Backend::new_with_topology(parts[0], addr, secs, topo));
     }
     Ok(out)
 }
@@ -1097,6 +1162,15 @@ fn record_corrector_shadow(router: &Router, sample: CorrectorShadowSample) {
         .record(sample);
 }
 
+fn record_rdma_cost_shadow(router: &Router, sample: RdmaCostShadowSample) {
+    router
+        .control
+        .lock()
+        .expect("control plane")
+        .rdma_cost_shadow
+        .record(sample);
+}
+
 /// Decode placement after prefill; requires valid hand-off when KV pool is wired.
 /// [ALG-ROUTE] [DEMI-KV-HANDOFF]
 pub struct DecodePlacement {
@@ -1162,8 +1236,9 @@ pub fn on_prefill_complete(
     .or_else(|| router.pick_colocated())
     .ok_or(RouteError::NoBackend)?;
 
-    if let Some(h) = handoff {
+    if let Some(mut h) = handoff {
         if let Some(reg) = &router.handoffs {
+            h.decode_label = Some(backend.label.clone());
             reg.publish(h.clone());
             let transport = router
                 .handoff_transport
@@ -1172,6 +1247,23 @@ pub fn on_prefill_complete(
                 .unwrap_or_else(Router::default_handoff_transport);
             let outcome = transport.transfer(&h, signals.prefill_wall);
             reg.record_transfer(outcome.bytes, outcome.wall);
+
+            if prefill_label != backend.label {
+                let pf_topo = router.topology_for_label(prefill_label);
+                let dc_topo = backend.topology().clone();
+                record_rdma_cost_shadow(
+                    router,
+                    RdmaCostShadowSample {
+                        pf_label: prefill_label.to_string(),
+                        dc_label: backend.label.clone(),
+                        distance: rdma_distance(&pf_topo, &dc_topo),
+                        kv_bytes: h.byte_len,
+                        analytic_transfer_ln: rdma_transfer_ln(h.byte_len, &pf_topo, &dc_topo),
+                        flat_penalty_ln: ROUTING_TRANSFER_PENALTY.ln(),
+                        observed_transfer_secs: outcome.wall.as_secs_f64(),
+                    },
+                );
+            }
         }
     }
 

@@ -1,6 +1,9 @@
 //! Pluggable KV hand-off transport (TCP proof default; mock RDMA for Track A).
 
+use std::collections::HashMap;
 use std::time::Duration;
+
+use demiurge_cost::{rdma_distance, rdma_transfer_seconds, TopologyId};
 
 use crate::HandoffDescriptor;
 
@@ -58,6 +61,38 @@ impl HandoffTransport for MockRdmaTransport {
     }
 }
 
+/// Bandwidth + topology-aware mock RDMA (shadow ground truth for transfer cost model).
+#[derive(Debug, Clone)]
+pub struct ModeledRdmaTransport {
+    topology: HashMap<String, TopologyId>,
+}
+
+impl ModeledRdmaTransport {
+    pub fn new(topology: HashMap<String, TopologyId>) -> Self {
+        Self { topology }
+    }
+}
+
+impl HandoffTransport for ModeledRdmaTransport {
+    fn transfer(&self, desc: &HandoffDescriptor, _prefill_wall: Duration) -> TransferOutcome {
+        let pf = self
+            .topology
+            .get(&desc.source_label)
+            .cloned()
+            .unwrap_or_default();
+        let dc_label = desc
+            .decode_label
+            .as_deref()
+            .unwrap_or(desc.source_label.as_str());
+        let dc = self.topology.get(dc_label).cloned().unwrap_or_default();
+        let seconds = rdma_transfer_seconds(desc.byte_len, rdma_distance(&pf, &dc));
+        TransferOutcome {
+            bytes: desc.byte_len,
+            wall: Duration::from_secs_f64(seconds),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +104,7 @@ mod tests {
             kv_handle: KvHandle::new(),
             byte_len: 8192,
             source_label: "pf0".into(),
+            decode_label: None,
         }
     }
 
@@ -87,5 +123,24 @@ mod tests {
         let out = t.transfer(&sample_desc(), Duration::from_millis(99));
         assert_eq!(out.bytes, 8192);
         assert_eq!(out.wall, Duration::from_micros(40));
+    }
+
+    #[test]
+    fn modeled_rdma_transport_matches_analytic() {
+        let mut topo = HashMap::new();
+        topo.insert("pf0".into(), TopologyId::new("n0", "r0", "cA"));
+        topo.insert("dc1".into(), TopologyId::new("n1", "r0", "cA"));
+        let t = ModeledRdmaTransport::new(topo);
+        let mut desc = sample_desc();
+        desc.source_label = "pf0".into();
+        desc.decode_label = Some("dc1".into());
+        desc.byte_len = 1_048_576;
+        let out = t.transfer(&desc, Duration::ZERO);
+        let distance = rdma_distance(
+            &TopologyId::new("n0", "r0", "cA"),
+            &TopologyId::new("n1", "r0", "cA"),
+        );
+        let expected = rdma_transfer_seconds(desc.byte_len, distance);
+        assert!((out.wall.as_secs_f64() - expected).abs() < 1e-9);
     }
 }

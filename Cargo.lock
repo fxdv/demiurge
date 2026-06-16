@@ -158,6 +158,9 @@ dependencies = [
 [[package]]
 name = "demiurge-handoff"
 version = "0.1.0"
+dependencies = [
+ "demiurge-cost",
+]
 
 [[package]]
 name = "demiurge-router"

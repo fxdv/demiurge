@@ -28,11 +28,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod generated_params;
 mod kv;
+mod rdma;
 mod warmth;
 pub use generated_params::*;
 pub use kv::{
     fleet_marginal_bytes, fleet_marginal_bytes_wrong, kv_breakdown, percentile90, phi_barrier,
     phi_barrier_marginal, KvBreakdown,
+};
+pub use rdma::{
+    rdma_distance, rdma_transfer_barrier, rdma_transfer_ln, rdma_transfer_seconds, TopologyId,
 };
 pub use warmth::warmth_discount;
 

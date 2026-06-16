@@ -31,6 +31,22 @@ short_context_warmth_override = 0.15
 # Cross-node KV transfer barrier when pf label != dc label (Phase 4 pairing).
 transfer_penalty = 1.05
 
+# RDMA topology distance ladder (shadow cost model; production routing still flat penalty).
+[topology]
+rdma_same_node = 0
+rdma_same_rack = 1
+rdma_same_cluster = 2
+rdma_cross_cluster = 10
+
+# Analytic RDMA transfer time: base_latency[distance tier] + bytes / link_bw.
+[rdma]
+link_gbps = 200.0
+base_latency_same_node_us = 5
+base_latency_same_rack_us = 15
+base_latency_same_cluster_us = 40
+base_latency_cross_cluster_us = 500
+min_barrier = 1.0
+
 # Phase 2 — KV overhead accounting (shipped)
 [kv]
 metadata_overhead_fraction = 0.08

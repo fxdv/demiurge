@@ -56,7 +56,8 @@ Linux today with mock TCP backends, userspace dataplane proofs, and CI gates.
         shadow pool rebalancer (\req{DEMI-POOL-RATIO}); fleet shadow replay
         (\req{DEMI-FLEET-SHADOW}); trace-driven fleet simulation spinoff
         (\req{DEMI-FLEET-SIM}); fast-path telemetry export
-        (\req{DEMI-FASTPATH-TELEM}); corrector shadow logging
+        (\req{DEMI-FASTPATH-TELEM}); RDMA transfer cost shadow
+        (\req{DEMI-RDMA-COST-SHADOW}); corrector shadow logging
         (\req{DEMI-CORR-SHADOW}).
   \item \textbf{Phase~5 (proof)} --- RCU routing snapshot on the live TCP path
         (\req{DEMI-DP-RCU}); userspace admit-bucket shed before L7
@@ -259,7 +260,10 @@ proceeds without it \req{DEMI-KV-HANDOFF}. Each completed transfer records byte
 length and prefill I/O wall time; operators report p50/p99 aggregates
 \req{DEMI-KV-TRANSFER-TELEM}. Transport is pluggable via
 \texttt{HandoffTransport} (TCP header pass-through default; mock RDMA for local
-proof) \req{DEMI-HANDOFF-XPORT}.
+proof) \req{DEMI-HANDOFF-XPORT}. Disaggregated pf$\to$dc placement logs a
+shadow RDMA transfer model (topology distance + bytes/bandwidth) alongside the
+flat cross-node penalty; routing still uses the flat barrier
+\req{DEMI-RDMA-COST-SHADOW}.
 
 \subsection{Greedy Pairing}\label{sec:pairing}
 Joint pf$\to$dc placement is approximated greedily: fix prefill target,

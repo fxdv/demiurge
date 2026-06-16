@@ -8,6 +8,7 @@ mod fleet_sim;
 mod pairing;
 mod predictor;
 mod pressure;
+mod rdma_cost_shadow;
 mod rebalancer;
 mod scored;
 
@@ -29,6 +30,7 @@ pub use pairing::{
 };
 pub use predictor::LengthPredictor;
 pub use pressure::{export_pool_pressure, PoolPressure};
+pub use rdma_cost_shadow::{eval_transfer_ratio_median, RdmaCostShadowLog, RdmaCostShadowSample};
 pub use rebalancer::{PoolRebalancer, RebalancerMode};
 pub use scored::ScoredBackend;
 

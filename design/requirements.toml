@@ -243,6 +243,21 @@ tests = [
 ]
 
 [[requirement]]
+id = "DEMI-RDMA-COST-SHADOW"
+kind = "normative"
+status = "implemented"
+phase = 4
+section = "control"
+summary = "Shadow RDMA transfer cost: topology distance + bytes/bw analytic vs observed transfer."
+requires_test = true
+tests = [
+    "rdma_distance_same_node_is_zero",
+    "rdma_transfer_monotonic_in_bytes",
+    "modeled_rdma_transport_matches_analytic",
+    "rdma_cost_shadow_records_on_disagg_handoff",
+]
+
+[[requirement]]
 id = "DEMI-HANDOFF-XPORT"
 kind = "structural"
 status = "implemented"

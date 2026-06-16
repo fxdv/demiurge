@@ -8,7 +8,8 @@
 mod transport;
 
 pub use transport::{
-    HandoffTransport, HeaderPassthroughTransport, MockRdmaTransport, TransferOutcome,
+    HandoffTransport, HeaderPassthroughTransport, MockRdmaTransport, ModeledRdmaTransport,
+    TransferOutcome,
 };
 
 use std::collections::HashMap;
@@ -54,6 +55,8 @@ pub struct HandoffDescriptor {
     pub kv_handle: KvHandle,
     pub byte_len: u64,
     pub source_label: String,
+    /// Decode pool label (set by router before transfer for topology-aware transports).
+    pub decode_label: Option<String>,
 }
 
 impl HandoffDescriptor {
@@ -84,6 +87,7 @@ pub fn parse_prefill_handoff(
         kv_handle: kv_handle?,
         byte_len: byte_len?,
         source_label: source_label.to_string(),
+        decode_label: None,
     })
 }
 
@@ -203,6 +207,7 @@ mod tests {
             kv_handle: KvHandle::new(),
             byte_len: 4096,
             source_label: "pf0".into(),
+            decode_label: None,
         });
         let h = reg.take(1).expect("handoff");
         assert!(h.is_valid());

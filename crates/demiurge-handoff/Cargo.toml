@@ -7,3 +7,4 @@ repository.workspace = true
 description = "KV cache hand-off descriptors and registry for Demiurge prefill→decode."
 
 [dependencies]
+demiurge-cost = { path = "../demiurge-cost" }

@@ -4,6 +4,7 @@
 //!   DEMIURGE_LISTEN        listen address           (default 127.0.0.1:8080)
 //!   DEMIURGE_PREFILL       prefill pool spec         label@host:port@seconds,...
 //!   DEMIURGE_DECODE        decode pool spec          label@host:port@seconds,...
+//!   DEMIURGE_TOPOLOGY       label@node/rack/cluster,... (optional RDMA shadow)
 //!   DEMIURGE_ADMIT_MODE    userspace | xdp | hybrid  (default userspace)
 //!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux)
 //!   DEMIURGE_IOURING       1 for io_uring recv/send on production TCP proxy (Linux)
@@ -15,7 +16,9 @@ use std::process::exit;
 use std::sync::Arc;
 
 use demiurge_dataplane::AdmitMode;
-use demiurge_router::{parse_pool, print_startup_banner, serve, Router};
+use demiurge_router::{
+    parse_pool_with_topology, parse_topology_map, print_startup_banner, serve, Router,
+};
 
 fn main() {
     if let Err(e) = run() {
@@ -27,8 +30,15 @@ fn main() {
 /// Parse env, bind listen socket, build router — everything before the accept loop.
 fn configure() -> Result<(TcpListener, Arc<Router>), String> {
     let listen = std::env::var("DEMIURGE_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".into());
-    let prefill = parse_pool(&std::env::var("DEMIURGE_PREFILL").unwrap_or_default())?;
-    let decode = parse_pool(&std::env::var("DEMIURGE_DECODE").unwrap_or_default())?;
+    let topology = parse_topology_map(&std::env::var("DEMIURGE_TOPOLOGY").unwrap_or_default())?;
+    let prefill = parse_pool_with_topology(
+        &std::env::var("DEMIURGE_PREFILL").unwrap_or_default(),
+        &topology,
+    )?;
+    let decode = parse_pool_with_topology(
+        &std::env::var("DEMIURGE_DECODE").unwrap_or_default(),
+        &topology,
+    )?;
 
     if prefill.is_empty() && decode.is_empty() {
         return Err(
