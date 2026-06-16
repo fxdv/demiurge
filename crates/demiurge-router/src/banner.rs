@@ -7,7 +7,7 @@ use demiurge_dataplane::AdmitMode;
 
 use crate::{Phase, Router};
 
-const W: usize = 76;
+const W: usize = 120;
 
 fn visible_len(s: &str) -> usize {
     let mut chars = s.chars().peekable();

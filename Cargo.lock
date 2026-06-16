@@ -127,6 +127,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "demiurge-auth"
+version = "0.1.0"
+
+[[package]]
 name = "demiurge-control"
 version = "0.1.0"
 dependencies = [

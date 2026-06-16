@@ -85,7 +85,9 @@ export DEMIURGE_XDP_IFACE=eth0
 export DEMIURGE_TOPOLOGY='pf0@node0/rack0/cluster0,dc0@node0/rack0/cluster0,pf1@node1/rack1/cluster0,dc1@node2/rack1/cluster0'
 
 # Router binary: production RDMA transport = Track C (not yet default)
-# Today: LOAD-RDMA-TOPO uses ModeledRdmaTransport in harden/load scenarios
+export DEMIURGE_HANDOFF_TRANSPORT=modeled_rdma   # tcp | mock_rdma | modeled_rdma
+export DEMIURGE_RDMA_ROUTING=1                   # topology-aware decode placement
+# Today: LOAD-RDMA-TOPO uses ModeledRdmaTransport + rdma_routing in harden/load scenarios
 ```
 
 ---
@@ -99,6 +101,27 @@ export DEMIURGE_TOPOLOGY='pf0@node0/rack0/cluster0,dc0@node0/rack0/cluster0,pf1@
 | `hybrid` | optional | XDP if attached, else userspace | **recommended prod rollout** |
 
 Both buckets are **reseeded together** on π actuation so fallback capacity matches kernel — this is sync, not double admission.
+
+### XDP reseed semantics (best-effort)
+
+The BPF map stores `{ tokens, capacity, shed_total }` in one struct write on reseed (see `xdp_linux.rs`).
+In-flight XDP handlers may decrement `tokens` concurrently — same best-effort contract as userspace
+`AdmitBucket::reseed`. Reseed preserves `shed_total`; only capacity/tokens are refreshed.
+
+### Hybrid rollout playbook
+
+1. Build BPF: `./scripts/build-bpf.sh` → `target/bpf/admit_shed.o`
+2. Set `DEMIURGE_ADMIT_MODE=hybrid`, attach XDP on **client NIC only** (`DEMIURGE_XDP_IFACE=eth0`)
+3. Enable π actuation: `DEMIURGE_REBALANCER_ACTUATE=1` (userspace + kernel buckets reseed together)
+4. Optional L7: `DEMIURGE_IOURING=1`
+5. KV / RDMA (shadow today): `DEMIURGE_TOPOLOGY=...`, `DEMIURGE_HANDOFF_TRANSPORT=modeled_rdma`, `DEMIURGE_RDMA_ROUTING=1`
+6. Validate: `./scripts/track-b-gate.sh` (veth) → `./scripts/verify.sh track-b` → production NIC load (exit gate)
+
+### Stress / port recovery
+
+Scenarios with `isolate_recovery = true` spawn isolated subprocesses and pause **30s** between runs
+so ephemeral TCP ports are released. See `LOAD-STRESS-*` and `LOAD-RDMA-TOPO` in `load-bench.toml`.
+Run full stress locally: `./scripts/load-stress.sh` or `./scripts/verify.sh stress`.
 
 ---
 

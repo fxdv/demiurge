@@ -11,8 +11,7 @@
 #   ./scripts/verify.sh track-a              Track A metrics + load + stress
 #   ./scripts/verify.sh track-b [--quick]    Track B (Linux only)
 #   ./scripts/verify.sh pre-release          nightly / linux-nightly validation
-#   ./scripts/verify.sh full                   gate + load + stress + harden report
-#   ./scripts/verify.sh full                 gate + harden + load + stress (platform-aware)
+#   ./scripts/verify.sh full                 gate + load + stress + harden + 'sim
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,7 +28,10 @@ usage() {
   echo "  target/harden-verify/            die-hard pseudo + markdown report"
   echo "  target/track-a-verify/           Track A report.md"
   echo "  target/track-b-verify/           Track B report.md (Linux)"
-  echo "  target/load-bench/               load + stress + harden JSON/pseudo"
+  echo "  target/load-bench/               load + stress + harden + sim JSON/pseudo"
+  echo "  target/reports/                  sim disclosure archive (sim-latest.*)"
+  echo ""
+  echo "Layout: DEMIURGE_UI_WIDTH / DEMIURGE_PSEUDO_WIDTH (default 120, max 200)"
 }
 
 cmd=${1:-list}
@@ -90,6 +92,8 @@ case "$cmd" in
     ./scripts/load-stress.sh
     "$VERIFY_DIR/tier4-load.sh"
     "$VERIFY_DIR/harden-all.sh" --skip-load --with-stress
+    ./scripts/apostrophe-sim.sh
+    ./scripts/generate-sim-report.sh --skip-run
     if [[ "$(uname -s)" == "Linux" ]]; then
       echo ""
       echo "Track B extras (Linux): ./scripts/verify.sh track-b --quick"
@@ -97,7 +101,7 @@ case "$cmd" in
       echo ""
       echo "Track A extras (macOS): ./scripts/verify.sh track-a"
     fi
-    demiurge_pass "FULL VERIFY PASSED (gate + load + stress + harden report)"
+    demiurge_pass "FULL VERIFY PASSED (gate + load + stress + harden + 'sim)"
     ;;
   *)
     echo "unknown verify command: $cmd (try: ./scripts/verify.sh list)" >&2

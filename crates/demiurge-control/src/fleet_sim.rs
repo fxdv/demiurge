@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::fleet_pilot::{replay_fleet_pilot, FleetPilotReport, TraceWindow};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SimBaseKnobs {
     pub concurrency: u32,
     pub requests_per_worker: u32,
@@ -19,6 +19,7 @@ pub struct SimBaseKnobs {
     pub base_decode_delay_us: u64,
     pub long_prompt_tokens: u64,
     pub long_prompt_tokens_heavy: u64,
+    pub request_style: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,7 +125,7 @@ pub fn window_knobs(w: &TraceWindow, base: &SimBaseKnobs) -> WindowKnobs {
     let load = (0.45 + w.q_prefill + w.q_decode).clamp(0.5, 2.0);
     let concurrency = ((f64::from(base.concurrency) * load).round() as u32).clamp(4, 64);
 
-    let request_style = "mixed_tokens".into();
+    let request_style = base.request_style.clone();
 
     let long_prompt_tokens = if w.prefill_heavy {
         base.long_prompt_tokens_heavy
@@ -170,7 +171,9 @@ pub fn jitter_delay_us(delay_us: u64, jitter_us: u64, salt: u64) -> u64 {
 pub fn eval_fleet_sim_gate(
     pilot: &FleetPilotReport,
     live: &[FleetWindowResult],
-    min_correlation: f64,
+    min_shadow_correlation: f64,
+    min_live_correlation: Option<f64>,
+    max_heavy_graceful_rate: Option<f64>,
 ) -> FleetSimReport {
     let held_live: Vec<_> = live.iter().filter(|w| w.held_out).collect();
     let live_values: Vec<f64> = held_live.iter().map(|w| w.dataplane_pi).collect();
@@ -189,8 +192,27 @@ pub fn eval_fleet_sim_gate(
         .sum();
     let load_separation = heavy_total > light_total;
 
-    let gate_pass =
-        pilot.gate_pass && pilot.heldout_correlation >= min_correlation && load_separation;
+    let shadow_pass = pilot.gate_pass && pilot.heldout_correlation >= min_shadow_correlation;
+
+    let heavy_graceful: u64 = live
+        .iter()
+        .filter(|w| w.prefill_heavy)
+        .map(|w| w.errors_graceful)
+        .sum();
+    let heavy_shed_rate = if heavy_total > 0 {
+        heavy_graceful as f64 / heavy_total as f64
+    } else {
+        0.0
+    };
+    let heavy_shed_pass = max_heavy_graceful_rate
+        .map(|max| heavy_shed_rate <= max)
+        .unwrap_or(true);
+
+    let live_pass = min_live_correlation
+        .map(|min| live_corr >= min)
+        .unwrap_or(true);
+
+    let gate_pass = shadow_pass && load_separation && live_pass && heavy_shed_pass;
 
     FleetSimReport {
         windows: live.len(),
@@ -208,6 +230,7 @@ pub fn shadow_pilot_for_trace(windows: &[TraceWindow], min_correlation: f64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fleet_pilot::FleetPilotReport;
 
     #[test]
     fn window_knobs_prefill_heavy_raises_fraction() {
@@ -218,6 +241,7 @@ mod tests {
             base_decode_delay_us: 50,
             long_prompt_tokens: 512,
             long_prompt_tokens_heavy: 2048,
+            request_style: "mixed_tokens".into(),
         };
         let heavy = TraceWindow {
             ts_ms: 0,
@@ -250,5 +274,48 @@ mod tests {
         let d0 = tier_delay_us(0, 4, 100, 1.0);
         let d3 = tier_delay_us(3, 4, 100, 1.0);
         assert!(d3 > d0);
+    }
+
+    #[test]
+    fn heavy_window_shed_gate() {
+        let pilot = FleetPilotReport {
+            train_windows: 0,
+            heldout_windows: 2,
+            heldout_correlation: 0.5,
+            heldout_mean_pi_heavy: 0.8,
+            heldout_mean_pi_light: 0.2,
+            gate_pass: true,
+            replays: vec![],
+        };
+        let live = vec![
+            FleetWindowResult {
+                ts_ms: 0,
+                prefill_heavy: true,
+                held_out: true,
+                ok: 18,
+                errors: 2,
+                errors_graceful: 2,
+                errors_hard: 0,
+                p99_us: 100,
+                dataplane_pi: 0.8,
+                pi_star: 0.8,
+            },
+            FleetWindowResult {
+                ts_ms: 1,
+                prefill_heavy: false,
+                held_out: true,
+                ok: 10,
+                errors: 0,
+                errors_graceful: 0,
+                errors_hard: 0,
+                p99_us: 50,
+                dataplane_pi: 0.2,
+                pi_star: 0.2,
+            },
+        ];
+        let pass = eval_fleet_sim_gate(&pilot, &live, 0.45, None, Some(0.25));
+        assert!(pass.gate_pass);
+        let fail = eval_fleet_sim_gate(&pilot, &live, 0.45, None, Some(0.09));
+        assert!(!fail.gate_pass);
     }
 }

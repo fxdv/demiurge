@@ -26,9 +26,10 @@ are valid too). Use L3 Docker when you want the same environment as `linux-night
 
 | Tier | ID | What it simulates |
 |------|-----|-------------------|
-| **L1** | `SIM-FLEET-REPLAY` | Trace windows drive concurrency, prefill mix, token profile |
+| **L1** | `SIM-FLEET-REPLAY` | Trace windows drive concurrency, prefill mix, token profile; live π actuation from trace pressure |
 | **L2** | `SIM-FLEET-HETERO` | Tier-skewed backend delays, jitter, remote netem |
-| **L3** | Docker | Linux privileged container (`scripts/apostrophe-sim/docker-compose.yml`) |
+| **L-KV** | `SIM-FLEET-KV` | Heavy-only trace + tight decode pool → graceful KV shed (503) |
+| **L3** | Docker | `./scripts/linux-vm/docker-track-b.sh sim` (linux-nightly optional) |
 
 ## Run
 

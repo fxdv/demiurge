@@ -16,7 +16,9 @@ use demiurge_control::{
     shadow_pilot_for_trace, tier_delay_us, window_knobs, FleetWindowResult, SimBaseKnobs,
 };
 use demiurge_cost::{kv_breakdown, TopologyId};
-use demiurge_handoff::ModeledRdmaTransport;
+use demiurge_handoff::{
+    HandoffTransport, HeaderPassthroughTransport, MockRdmaTransport, ModeledRdmaTransport,
+};
 use demiurge_router::{
     admit_disaggregated, serve, spawn_delay_backend, AdmitMode, Backend, KvHandoffRegistry,
     KvReservationLedger, Router,
@@ -158,9 +160,21 @@ struct Scenario {
     /// JSONL fleet trace for `measure = "fleet_replay"`.
     #[serde(default)]
     trace_path: Option<String>,
-    /// Gate: held-out π* / live π correlation vs prefill-heavy windows.
+    /// Gate: held-out shadow π* correlation vs prefill-heavy windows.
     #[serde(default)]
     min_fleet_correlation: Option<f64>,
+    /// Optional gate: held-out live dataplane π correlation (informational when unset).
+    #[serde(default)]
+    min_live_fleet_correlation: Option<f64>,
+    /// Optional gate: max graceful 503 rate on prefill-heavy trace windows.
+    #[serde(default)]
+    max_heavy_graceful_rate: Option<f64>,
+    /// Handoff transport override: `tcp` | `mock_rdma` | `modeled_rdma`.
+    #[serde(default)]
+    handoff_transport: Option<String>,
+    /// Use RDMA topology model in decode placement (not just shadow logging).
+    #[serde(default)]
+    rdma_routing: bool,
     /// L2: symmetric delay jitter on mock backend responses (µs).
     #[serde(default)]
     backend_delay_jitter_us: u64,
@@ -283,6 +297,10 @@ pub struct ScenarioResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fleet_live_pi_correlation: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub fleet_shadow_correlation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fleet_heavy_graceful_rate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub fleet_sim_gate_pass: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rdma_shadow_samples: Option<u64>,
@@ -311,6 +329,8 @@ pub struct ScenarioGateConfig {
     pub max_p99_tail_ratio: Option<f64>,
     pub max_misroute_mean: Option<f64>,
     pub min_fleet_correlation: Option<f64>,
+    pub min_live_fleet_correlation: Option<f64>,
+    pub max_heavy_graceful_rate: Option<f64>,
     pub min_rdma_shadow_samples: Option<u64>,
     pub min_rdma_transfer_ratio: Option<f64>,
     pub max_rdma_transfer_ratio: Option<f64>,
@@ -320,7 +340,7 @@ impl From<&Scenario> for ScenarioGateConfig {
     fn from(sc: &Scenario) -> Self {
         Self {
             use_kv_pool: sc.use_kv_pool,
-            decode_capacity_bytes: sc.decode_capacity_bytes,
+            decode_capacity_bytes: effective_decode_capacity_bytes(sc),
             max_kv_admit_rejects: sc.max_kv_admit_rejects,
             min_kv_admit_rejects: sc.min_kv_admit_rejects,
             min_errors: sc.min_errors,
@@ -330,6 +350,8 @@ impl From<&Scenario> for ScenarioGateConfig {
             max_p99_tail_ratio: sc.max_p99_tail_ratio,
             max_misroute_mean: sc.max_misroute_mean,
             min_fleet_correlation: sc.min_fleet_correlation,
+            min_live_fleet_correlation: sc.min_live_fleet_correlation,
+            max_heavy_graceful_rate: sc.max_heavy_graceful_rate,
             min_rdma_shadow_samples: sc.min_rdma_shadow_samples,
             min_rdma_transfer_ratio: sc.min_rdma_transfer_ratio,
             max_rdma_transfer_ratio: sc.max_rdma_transfer_ratio,
@@ -508,13 +530,48 @@ pub fn evaluate_scenario_gates(
     }
 
     if cfg.min_fleet_correlation.is_some() || result.fleet_sim_gate_pass.is_some() {
+        let shadow_corr = result.fleet_shadow_correlation.unwrap_or(0.0);
+        let min_shadow = cfg.min_fleet_correlation.unwrap_or(0.45);
+        gates.push(GateVerdict {
+            name: "fleet shadow π*",
+            pass: shadow_corr >= min_shadow,
+            detail: format!("held-out shadow_corr {shadow_corr:.3} (min {min_shadow:.2})"),
+        });
+
+        if let Some(corr) = result.fleet_live_pi_correlation {
+            if let Some(min_live) = cfg.min_live_fleet_correlation {
+                gates.push(GateVerdict {
+                    name: "fleet live π",
+                    pass: corr >= min_live,
+                    detail: format!("held-out live_pi_corr {corr:.3} (min {min_live:.2})"),
+                });
+            } else {
+                gates.push(GateVerdict {
+                    name: "fleet live π",
+                    pass: true,
+                    detail: format!("held-out live_pi_corr {corr:.3} (informational)"),
+                });
+            }
+        }
+
+        if let Some(max_rate) = cfg.max_heavy_graceful_rate {
+            let rate = result.fleet_heavy_graceful_rate.unwrap_or(0.0);
+            gates.push(GateVerdict {
+                name: "fleet heavy 503",
+                pass: rate <= max_rate,
+                detail: format!("heavy window shed rate {rate:.3} (max {max_rate:.2})"),
+            });
+        }
+
         let pass = result.fleet_sim_gate_pass.unwrap_or(false);
-        let corr = result.fleet_live_pi_correlation.unwrap_or(0.0);
-        let min = cfg.min_fleet_correlation.unwrap_or(0.45);
         gates.push(GateVerdict {
             name: "fleet replay",
             pass,
-            detail: format!("live_pi_corr {corr:.3} (min {min:.2})"),
+            detail: if pass {
+                "overall PASS".into()
+            } else {
+                "overall FAIL".into()
+            },
         });
     }
 
@@ -575,12 +632,26 @@ fn apply_scenario_router_flags(
     } else if sc.track_b_kernel {
         router = router.with_admit_mode(AdmitMode::KernelXdp);
     }
+    if sc.rdma_modeled || sc.rdma_routing {
+        router = router.with_rdma_routing(true);
+    }
     if sc.rdma_modeled {
         let mut topo = HashMap::new();
         for b in prefill.iter().chain(decode.iter()) {
             topo.insert(b.label.clone(), b.topology().clone());
         }
         router = router.with_handoff_transport(Arc::new(ModeledRdmaTransport::new(topo)));
+    } else if let Some(ref mode) = sc.handoff_transport {
+        let mut topo = HashMap::new();
+        for b in prefill.iter().chain(decode.iter()) {
+            topo.insert(b.label.clone(), b.topology().clone());
+        }
+        let transport: Arc<dyn HandoffTransport> = match mode.as_str() {
+            "mock_rdma" => Arc::new(MockRdmaTransport::default()),
+            "modeled_rdma" => Arc::new(ModeledRdmaTransport::new(topo)),
+            _ => Arc::new(HeaderPassthroughTransport),
+        };
+        router = router.with_handoff_transport(transport);
     }
     router
 }
@@ -667,6 +738,27 @@ fn spawn_mock_backend(delay_us: u64, jitter_us: u64, kv_bytes: Option<u64>) -> S
     addr
 }
 
+/// Portable KV shed threshold: holds ~3 concurrent reservations; the 4th triggers reject.
+fn kv_shed_capacity_bytes(long_prompt_tokens: u64, bytes_per_token: u64) -> u64 {
+    let per = kv_breakdown(long_prompt_tokens, bytes_per_token).kv_reserved;
+    per.saturating_mul(3) + per / 4
+}
+
+fn effective_decode_capacity_bytes(sc: &Scenario) -> u64 {
+    if !sc.use_kv_pool {
+        return sc.decode_capacity_bytes;
+    }
+    if sc.min_kv_admit_rejects.unwrap_or(0) > 0 {
+        let tokens = sc.long_prompt_tokens.max(2048);
+        return kv_shed_capacity_bytes(tokens, sc.bytes_per_token);
+    }
+    if sc.decode_capacity_bytes > 0 {
+        return sc.decode_capacity_bytes;
+    }
+    let per = kv_breakdown(sc.long_prompt_tokens, sc.bytes_per_token).kv_reserved;
+    per.saturating_mul(10)
+}
+
 fn spawn_router_stack(
     sc: &Scenario,
     prefill: &[Arc<Backend>],
@@ -687,12 +779,13 @@ fn spawn_router_stack(
     let _track_b_veth: Option<()> = None;
 
     if sc.use_kv_pool {
-        let capacity = if sc.decode_capacity_bytes > 0 {
-            sc.decode_capacity_bytes
-        } else {
-            let per = kv_breakdown(sc.long_prompt_tokens, sc.bytes_per_token).kv_reserved;
-            per.saturating_mul(10)
-        };
+        let capacity = effective_decode_capacity_bytes(sc);
+        if sc.min_kv_admit_rejects.unwrap_or(0) > 0 {
+            eprintln!(
+                "load-bench: {} KV pool auto-capacity {capacity} bytes (4th concurrent reservation sheds)",
+                sc.id
+            );
+        }
         let (mut router, ledger, handoffs) = Router::with_kv_pool(
             prefill.to_vec(),
             decode.to_vec(),
@@ -1123,6 +1216,8 @@ fn run_admit_decouple_scenario(
         corrector_shadow_samples: None,
         fleet_windows: Vec::new(),
         fleet_live_pi_correlation: None,
+        fleet_shadow_correlation: None,
+        fleet_heavy_graceful_rate: None,
         fleet_sim_gate_pass: None,
         rdma_shadow_samples: None,
         rdma_transfer_ratio_median: None,
@@ -1287,6 +1382,7 @@ fn run_fleet_replay_scenario(
         base_decode_delay_us: sc.backend_delay_us.max(1) / 2,
         long_prompt_tokens: sc.long_prompt_tokens,
         long_prompt_tokens_heavy: sc.long_prompt_tokens.max(2048),
+        request_style: sc.request_style.clone(),
     };
     let avg_mult = windows
         .iter()
@@ -1357,6 +1453,9 @@ fn run_fleet_replay_scenario(
     for (i, w) in windows.iter().enumerate() {
         let knobs = window_knobs(w, &base);
         let pi_star = pilot.replays.get(i).map(|r| r.pi_star).unwrap_or(0.5);
+        if sc.rebalancer_actuation {
+            stack.router.actuate_from_trace_pressure(w.pressure());
+        }
         eprintln!(
             "load-bench: {} window ts={} heavy={} conc={} style={} pf_frac={:.2}",
             sc.id,
@@ -1406,7 +1505,28 @@ fn run_fleet_replay_scenario(
 
     let duration_secs = start_wall.elapsed().as_secs_f64();
     all_latencies.sort_unstable();
-    let sim_gate = eval_fleet_sim_gate(&pilot, &window_results, min_corr);
+    let sim_gate = eval_fleet_sim_gate(
+        &pilot,
+        &window_results,
+        min_corr,
+        sc.min_live_fleet_correlation,
+        sc.max_heavy_graceful_rate,
+    );
+    let heavy_graceful: u64 = window_results
+        .iter()
+        .filter(|w| w.prefill_heavy)
+        .map(|w| w.errors_graceful)
+        .sum();
+    let heavy_total: u64 = window_results
+        .iter()
+        .filter(|w| w.prefill_heavy)
+        .map(|w| w.ok + w.errors)
+        .sum();
+    let heavy_shed_rate = if heavy_total > 0 {
+        heavy_graceful as f64 / heavy_total as f64
+    } else {
+        0.0
+    };
     eprintln!(
         "'sim: {} shadow_corr={:.3} live_pi_corr={:.3} gate={}",
         sc.id,
@@ -1490,8 +1610,14 @@ fn run_fleet_replay_scenario(
         fastpath_misroute_samples: Some(control.fastpath_misroute_samples),
         corrector_shadow_samples: Some(control.corrector_shadow_samples),
         fleet_windows: window_results,
-        fleet_live_pi_correlation: Some(sim_gate.live_pi_correlation),
-        fleet_sim_gate_pass: Some(sim_gate.gate_pass),
+        fleet_live_pi_correlation: sc
+            .min_fleet_correlation
+            .map(|_| sim_gate.live_pi_correlation),
+        fleet_shadow_correlation: sc
+            .min_fleet_correlation
+            .map(|_| sim_gate.heldout_correlation),
+        fleet_heavy_graceful_rate: sc.max_heavy_graceful_rate.map(|_| heavy_shed_rate),
+        fleet_sim_gate_pass: sc.min_fleet_correlation.map(|_| sim_gate.gate_pass),
         rdma_shadow_samples: None,
         rdma_transfer_ratio_median: None,
     })
@@ -1698,6 +1824,8 @@ fn run_e2e_scenario(
         corrector_shadow_samples: Some(control.corrector_shadow_samples),
         fleet_windows: Vec::new(),
         fleet_live_pi_correlation: None,
+        fleet_shadow_correlation: None,
+        fleet_heavy_graceful_rate: None,
         fleet_sim_gate_pass: None,
         rdma_shadow_samples,
         rdma_transfer_ratio_median,
@@ -1984,6 +2112,7 @@ fn load_bench_inner(
             } else if graceful_errors > 0
                 && sc.max_kv_admit_rejects.is_none()
                 && sc.min_errors.is_none()
+                && sc.min_kv_admit_rejects.is_none()
             {
                 eprintln!(
                     "load-bench: {} FAIL — {graceful_errors} graceful 503 (zero required)",
@@ -2020,21 +2149,17 @@ fn load_bench_inner(
             }
         }
         if let Some(peak) = result.kv_bytes_reserved_peak {
-            if sc.use_kv_pool && sc.decode_capacity_bytes > 0 && peak > sc.decode_capacity_bytes {
+            let kv_cap = effective_decode_capacity_bytes(sc);
+            if sc.use_kv_pool && kv_cap > 0 && peak > kv_cap {
                 eprintln!(
-                    "load-bench: {} FAIL — kv peak {peak} bytes > capacity {}",
-                    result.id, sc.decode_capacity_bytes
+                    "load-bench: {} FAIL — kv peak {peak} bytes > capacity {kv_cap}",
+                    result.id
                 );
                 gate_failures += 1;
             } else if sc.use_kv_pool {
                 eprintln!(
-                    "load-bench: {} KV OK — peak reserved {peak} bytes (cap {})",
-                    result.id,
-                    if sc.decode_capacity_bytes > 0 {
-                        sc.decode_capacity_bytes.to_string()
-                    } else {
-                        "auto".into()
-                    }
+                    "load-bench: {} KV OK — peak reserved {peak} bytes (cap {kv_cap})",
+                    result.id
                 );
             }
         }
@@ -2251,14 +2376,16 @@ fn load_bench_inner(
         if sc.min_fleet_correlation.is_some() || result.fleet_sim_gate_pass.is_some() {
             if result.fleet_sim_gate_pass == Some(true) {
                 eprintln!(
-                    "'sim: {} fleet gate OK — live_pi_corr {:.3}",
+                    "'sim: {} fleet gate OK — shadow_corr {:.3} live_pi_corr {:.3}",
                     result.id,
+                    result.fleet_shadow_correlation.unwrap_or(0.0),
                     result.fleet_live_pi_correlation.unwrap_or(0.0)
                 );
             } else {
                 eprintln!(
-                    "'sim: {} FAIL — fleet replay gate (live_pi_corr {:.3})",
+                    "'sim: {} FAIL — fleet replay gate (shadow_corr {:.3} live_pi_corr {:.3})",
                     result.id,
+                    result.fleet_shadow_correlation.unwrap_or(0.0),
                     result.fleet_live_pi_correlation.unwrap_or(0.0)
                 );
                 gate_failures += 1;

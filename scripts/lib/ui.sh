@@ -4,8 +4,9 @@
 #
 #   DEMIURGE_BANNER=1  force banner even when stdout is not a TTY (e.g. tee)
 #   DEMIURGE_BANNER=0  never print banner
+#   DEMIURGE_UI_WIDTH=120  console box width (default 120)
 
-DEMIURGE_UI_WIDTH="${DEMIURGE_UI_WIDTH:-72}"
+DEMIURGE_UI_WIDTH="${DEMIURGE_UI_WIDTH:-120}"
 
 _ui_should_banner() {
   case "${DEMIURGE_BANNER:-}" in

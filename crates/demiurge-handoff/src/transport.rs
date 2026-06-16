@@ -1,6 +1,7 @@
 //! Pluggable KV hand-off transport (TCP proof default; mock RDMA for Track A).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use demiurge_cost::{rdma_distance, rdma_transfer_seconds, TopologyId};
@@ -90,6 +91,21 @@ impl HandoffTransport for ModeledRdmaTransport {
             bytes: desc.byte_len,
             wall: Duration::from_secs_f64(seconds),
         }
+    }
+}
+
+/// Select handoff transport from `DEMIURGE_HANDOFF_TRANSPORT` (router binary startup).
+pub fn handoff_transport_from_env(
+    topology: HashMap<String, TopologyId>,
+) -> Arc<dyn HandoffTransport> {
+    match std::env::var("DEMIURGE_HANDOFF_TRANSPORT")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mock_rdma" => Arc::new(MockRdmaTransport::default()),
+        "modeled_rdma" => Arc::new(ModeledRdmaTransport::new(topology)),
+        _ => Arc::new(HeaderPassthroughTransport),
     }
 }
 
