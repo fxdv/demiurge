@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tier 4 — harden load scenarios (LOAD-KV-EXHAUST, LOAD-IOURING-LARGE-BODY on Linux).
+# Tier 4 — harden load scenarios (LOAD-KV-EXHAUST, LOAD-RDMA-TOPO, LOAD-IOURING-LARGE-BODY on Linux).
 set -euo pipefail
 # shellcheck source=common.sh
 source "$(dirname "$0")/common.sh"

@@ -9,9 +9,16 @@ use aya::{Ebpf, EbpfError};
 
 use super::{XdpAdmitShed, XdpAttachError, OBJECT_FILE, PROGRAM_NAME};
 
-const KEY_TOKENS: u32 = 0;
-const KEY_CAPACITY: u32 = 1;
-const KEY_SHED_TOTAL: u32 = 2;
+const STATE_KEY: u32 = 0;
+
+/// Layout must match `struct demi_admit_state` in `bpf/admit_shed.bpf.c`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct AdmitMapState {
+    tokens: u64,
+    capacity: u64,
+    shed_total: u64,
+}
 
 fn xdp_attach_flags() -> XdpFlags {
     match std::env::var("DEMIURGE_XDP_FLAGS").as_deref() {
@@ -41,29 +48,50 @@ fn map_io(stage: &str, err: MapError) -> XdpAttachError {
     XdpAttachError::LoadFailed(format!("{stage}: {err}"))
 }
 
-fn seed_admit_state(bpf: &mut Ebpf, capacity: u64) -> Result<(), XdpAttachError> {
-    let cap = capacity.max(1);
-    let map_handle = bpf
-        .map_mut("admit_state")
-        .ok_or_else(|| XdpAttachError::LoadFailed("admit_state map missing".into()))?;
-    let mut map: Array<_, u64> = Array::try_from(map_handle)
-        .map_err(|e| XdpAttachError::LoadFailed(format!("admit_state array: {e}")))?;
-    map.set(KEY_TOKENS, cap, 0)
-        .map_err(|e| map_io("seed tokens", e))?;
-    map.set(KEY_CAPACITY, cap, 0)
-        .map_err(|e| map_io("seed capacity", e))?;
-    map.set(KEY_SHED_TOTAL, 0, 0)
-        .map_err(|e| map_io("seed shed_total", e))?;
-    Ok(())
-}
-
-fn read_map(bpf: &Ebpf, key: u32) -> Result<u64, XdpAttachError> {
+fn read_admit_state(bpf: &Ebpf) -> Result<AdmitMapState, XdpAttachError> {
     let map_handle = bpf
         .map("admit_state")
         .ok_or_else(|| XdpAttachError::LoadFailed("admit_state map missing".into()))?;
-    let map: Array<_, u64> = Array::try_from(map_handle)
+    let map: Array<_, AdmitMapState> = Array::try_from(map_handle)
         .map_err(|e| XdpAttachError::LoadFailed(format!("admit_state array: {e}")))?;
-    map.get(&key, 0).map_err(|e| map_io("map get", e))
+    map.get(&STATE_KEY, 0)
+        .map_err(|e| map_io("read admit_state", e))
+}
+
+fn write_admit_state(bpf: &mut Ebpf, state: AdmitMapState) -> Result<(), XdpAttachError> {
+    let map_handle = bpf
+        .map_mut("admit_state")
+        .ok_or_else(|| XdpAttachError::LoadFailed("admit_state map missing".into()))?;
+    let mut map: Array<_, AdmitMapState> = Array::try_from(map_handle)
+        .map_err(|e| XdpAttachError::LoadFailed(format!("admit_state array: {e}")))?;
+    map.set(STATE_KEY, state, 0)
+        .map_err(|e| map_io("write admit_state", e))
+}
+
+/// Initial attach: one map write seeds tokens/capacity; shed starts at zero.
+fn seed_admit_state(bpf: &mut Ebpf, capacity: u64) -> Result<(), XdpAttachError> {
+    let cap = capacity.max(1);
+    write_admit_state(
+        bpf,
+        AdmitMapState {
+            tokens: cap,
+            capacity: cap,
+            shed_total: 0,
+        },
+    )
+}
+
+/// Actuation refill: single struct write; preserve shed telemetry (matches userspace `AdmitBucket::reseed`).
+fn reseed_admit_state(bpf: &mut Ebpf, capacity: u64) -> Result<(), XdpAttachError> {
+    let cap = capacity.max(1);
+    let mut state = read_admit_state(bpf).unwrap_or(AdmitMapState {
+        tokens: cap,
+        capacity: cap,
+        shed_total: 0,
+    });
+    state.tokens = cap;
+    state.capacity = cap;
+    write_admit_state(bpf, state)
 }
 
 pub fn attach(iface: &str, capacity: u64) -> Result<XdpAdmitShed, XdpAttachError> {
@@ -104,19 +132,19 @@ impl XdpAdmitShed {
     }
 
     pub fn available(&self) -> Result<u64, XdpAttachError> {
-        read_map(&self.bpf, KEY_TOKENS)
+        Ok(read_admit_state(&self.bpf)?.tokens)
     }
 
     pub fn capacity(&self) -> Result<u64, XdpAttachError> {
-        read_map(&self.bpf, KEY_CAPACITY)
+        Ok(read_admit_state(&self.bpf)?.capacity)
     }
 
     pub fn shed_total(&self) -> Result<u64, XdpAttachError> {
-        read_map(&self.bpf, KEY_SHED_TOTAL)
+        Ok(read_admit_state(&self.bpf)?.shed_total)
     }
 
     pub fn reseed(&mut self, capacity: u64) -> Result<(), XdpAttachError> {
-        seed_admit_state(&mut self.bpf, capacity)
+        reseed_admit_state(&mut self.bpf, capacity)
     }
 
     pub fn object_path() -> PathBuf {

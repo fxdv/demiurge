@@ -288,6 +288,22 @@ pub fn render(
                 ))
             );
         }
+        if let Some(n) = s.rdma_shadow_samples {
+            let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
+            let _ = writeln!(out, "{}", pad_line("RDMA COST SHADOW"));
+            let _ = writeln!(
+                out,
+                "{}",
+                pad_line(&format!("  shadow samples ....... {:>12}", n))
+            );
+            if let Some(ratio) = s.rdma_transfer_ratio_median {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    pad_line(&format!("  transfer ratio median {:>12.3}", ratio))
+                );
+            }
+        }
         if !s.fleet_windows.is_empty() {
             let _ = writeln!(out, "╟{}╢", "─".repeat(W - 2));
             let _ = writeln!(out, "{}", pad_line("'sim FLEET WINDOWS (live replay)"));

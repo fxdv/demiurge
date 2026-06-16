@@ -1,5 +1,6 @@
 //! Local TCP load scenarios against a live demiurge-router stack.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -11,10 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use demiurge_control::{
-    eval_fleet_sim_gate, jitter_delay_us, load_fleet_trace, shadow_pilot_for_trace, tier_delay_us,
-    window_knobs, FleetWindowResult, SimBaseKnobs,
+    eval_fleet_sim_gate, eval_transfer_ratio_median, jitter_delay_us, load_fleet_trace,
+    shadow_pilot_for_trace, tier_delay_us, window_knobs, FleetWindowResult, SimBaseKnobs,
 };
-use demiurge_cost::kv_breakdown;
+use demiurge_cost::{kv_breakdown, TopologyId};
+use demiurge_handoff::ModeledRdmaTransport;
 use demiurge_router::{
     admit_disaggregated, serve, spawn_delay_backend, AdmitMode, Backend, KvHandoffRegistry,
     KvReservationLedger, Router,
@@ -168,6 +170,18 @@ struct Scenario {
     /// L3: extra delay on upper backend tiers (simulated cross-node netem, µs).
     #[serde(default)]
     sim_netem_us: u64,
+    /// Modeled RDMA handoff transport + per-backend topology (shadow cost samples).
+    #[serde(default)]
+    rdma_modeled: bool,
+    /// Minimum RDMA cost-shadow samples (disagg handoffs with topology distance).
+    #[serde(default)]
+    min_rdma_shadow_samples: Option<u64>,
+    /// Minimum median observed/predicted transfer ratio (modeled transport ≈ 1.0).
+    #[serde(default)]
+    min_rdma_transfer_ratio: Option<f64>,
+    /// Maximum median observed/predicted transfer ratio.
+    #[serde(default)]
+    max_rdma_transfer_ratio: Option<f64>,
 }
 
 fn default_prefill_fraction() -> f64 {
@@ -270,6 +284,10 @@ pub struct ScenarioResult {
     pub fleet_live_pi_correlation: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fleet_sim_gate_pass: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rdma_shadow_samples: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rdma_transfer_ratio_median: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -293,6 +311,9 @@ pub struct ScenarioGateConfig {
     pub max_p99_tail_ratio: Option<f64>,
     pub max_misroute_mean: Option<f64>,
     pub min_fleet_correlation: Option<f64>,
+    pub min_rdma_shadow_samples: Option<u64>,
+    pub min_rdma_transfer_ratio: Option<f64>,
+    pub max_rdma_transfer_ratio: Option<f64>,
 }
 
 impl From<&Scenario> for ScenarioGateConfig {
@@ -309,6 +330,9 @@ impl From<&Scenario> for ScenarioGateConfig {
             max_p99_tail_ratio: sc.max_p99_tail_ratio,
             max_misroute_mean: sc.max_misroute_mean,
             min_fleet_correlation: sc.min_fleet_correlation,
+            min_rdma_shadow_samples: sc.min_rdma_shadow_samples,
+            min_rdma_transfer_ratio: sc.min_rdma_transfer_ratio,
+            max_rdma_transfer_ratio: sc.max_rdma_transfer_ratio,
         }
     }
 }
@@ -494,6 +518,35 @@ pub fn evaluate_scenario_gates(
         });
     }
 
+    if let Some(min_n) = cfg.min_rdma_shadow_samples {
+        let n = result.rdma_shadow_samples.unwrap_or(0);
+        gates.push(GateVerdict {
+            name: "RDMA shadow samples",
+            pass: n >= min_n,
+            detail: format!("{n} (min {min_n})"),
+        });
+    }
+
+    if let Some(min_r) = cfg.min_rdma_transfer_ratio {
+        if let Some(ratio) = result.rdma_transfer_ratio_median {
+            gates.push(GateVerdict {
+                name: "RDMA transfer ratio min",
+                pass: ratio >= min_r,
+                detail: format!("{ratio:.3} (min {min_r:.3})"),
+            });
+        }
+    }
+
+    if let Some(max_r) = cfg.max_rdma_transfer_ratio {
+        if let Some(ratio) = result.rdma_transfer_ratio_median {
+            gates.push(GateVerdict {
+                name: "RDMA transfer ratio max",
+                pass: ratio <= max_r,
+                detail: format!("{ratio:.3} (max {max_r:.3})"),
+            });
+        }
+    }
+
     gates
 }
 
@@ -506,7 +559,12 @@ struct RouterStack {
     _track_b_veth: Option<crate::track_b_load::TrackBVeth>,
 }
 
-fn apply_scenario_router_flags(mut router: Router, sc: &Scenario) -> Router {
+fn apply_scenario_router_flags(
+    mut router: Router,
+    sc: &Scenario,
+    prefill: &[Arc<Backend>],
+    decode: &[Arc<Backend>],
+) -> Router {
     if sc.io_uring || sc.track_b_kernel {
         router = router.with_io_uring(true);
     }
@@ -516,6 +574,13 @@ fn apply_scenario_router_flags(mut router: Router, sc: &Scenario) -> Router {
         }
     } else if sc.track_b_kernel {
         router = router.with_admit_mode(AdmitMode::KernelXdp);
+    }
+    if sc.rdma_modeled {
+        let mut topo = HashMap::new();
+        for b in prefill.iter().chain(decode.iter()) {
+            topo.insert(b.label.clone(), b.topology().clone());
+        }
+        router = router.with_handoff_transport(Arc::new(ModeledRdmaTransport::new(topo)));
     }
     router
 }
@@ -637,7 +702,7 @@ fn spawn_router_stack(
         if sc.rebalancer_actuation {
             router = router.with_rebalancer_actuation(true);
         }
-        router = apply_scenario_router_flags(router, sc);
+        router = apply_scenario_router_flags(router, sc, prefill, decode);
         #[cfg(target_os = "linux")]
         if let Some(ref veth) = track_b_veth {
             router = veth.attach_router(router)?;
@@ -674,7 +739,7 @@ fn spawn_router_stack(
         if sc.rebalancer_actuation {
             router = router.with_rebalancer_actuation(true);
         }
-        router = apply_scenario_router_flags(router, sc);
+        router = apply_scenario_router_flags(router, sc, prefill, decode);
         #[cfg(target_os = "linux")]
         if let Some(ref veth) = track_b_veth {
             router = veth.attach_router(router)?;
@@ -713,6 +778,29 @@ fn build_pool(count: u32, prefix: &str, sc: &Scenario, kv_bytes: Option<u64>) ->
     build_pool_calibrated(count, prefix, sc, kv_bytes, sc.backend_delay_us, 1.0)
 }
 
+fn bench_backend_topology(prefix: &str, i: u32, count: u32) -> TopologyId {
+    let nodes = count.max(3);
+    let node = format!("n{}", i % nodes);
+    let rack = format!("r{}", (i / nodes.max(1)) % 2);
+    let cluster = if prefix != "pf" && !i.is_multiple_of(2) {
+        "cB"
+    } else {
+        "cA"
+    };
+    TopologyId::new(node, rack, cluster)
+}
+
+fn rdma_result_fields(router: &Router) -> (Option<u64>, Option<f64>) {
+    let samples = router.rdma_cost_shadow_samples();
+    if samples.is_empty() {
+        return (Some(0), Some(1.0));
+    }
+    (
+        Some(samples.len() as u64),
+        Some(eval_transfer_ratio_median(&samples)),
+    )
+}
+
 fn build_pool_calibrated(
     count: u32,
     prefix: &str,
@@ -743,7 +831,12 @@ fn build_pool_calibrated(
             } else {
                 format!("{prefix}{i}")
             };
-            Backend::new(label, addr, cost)
+            let topology = if sc.rdma_modeled {
+                bench_backend_topology(prefix, i, count)
+            } else {
+                TopologyId::default()
+            };
+            Backend::new_with_topology(label, addr, cost, topology)
         })
         .collect()
 }
@@ -1031,6 +1124,8 @@ fn run_admit_decouple_scenario(
         fleet_windows: Vec::new(),
         fleet_live_pi_correlation: None,
         fleet_sim_gate_pass: None,
+        rdma_shadow_samples: None,
+        rdma_transfer_ratio_median: None,
     })
 }
 
@@ -1397,6 +1492,8 @@ fn run_fleet_replay_scenario(
         fleet_windows: window_results,
         fleet_live_pi_correlation: Some(sim_gate.live_pi_correlation),
         fleet_sim_gate_pass: Some(sim_gate.gate_pass),
+        rdma_shadow_samples: None,
+        rdma_transfer_ratio_median: None,
     })
 }
 
@@ -1478,8 +1575,7 @@ fn run_e2e_scenario(
                     let seq =
                         seq_base + u64::from(w) * u64::from(requests_per_worker) + u64::from(r);
                     let prefill = match request_style.as_str() {
-                        "long_tokens" => true,
-                        "short_tokens" => false,
+                        "long_tokens" | "short_tokens" => true,
                         _ => (seq % 100) as f64 / 100.0 < prefill_fraction,
                     };
                     let _slot = inflight.as_ref().map(|g| g.enter());
@@ -1541,6 +1637,11 @@ fn run_e2e_scenario(
     } else {
         None
     };
+    let (rdma_shadow_samples, rdma_transfer_ratio_median) = if sc.rdma_modeled {
+        rdma_result_fields(&stack.router)
+    } else {
+        (None, None)
+    };
 
     Ok(ScenarioResult {
         id: sc.id.clone(),
@@ -1598,6 +1699,8 @@ fn run_e2e_scenario(
         fleet_windows: Vec::new(),
         fleet_live_pi_correlation: None,
         fleet_sim_gate_pass: None,
+        rdma_shadow_samples,
+        rdma_transfer_ratio_median,
     })
 }
 
@@ -2011,6 +2114,61 @@ fn load_bench_inner(
                 result.fastpath_misroute_samples.unwrap_or(0),
                 result.corrector_shadow_samples.unwrap_or(0),
             );
+        }
+        if sc.rdma_modeled {
+            eprintln!(
+                "load-bench: {} RDMA shadow — samples={} ratio_median={:.3}",
+                result.id,
+                result.rdma_shadow_samples.unwrap_or(0),
+                result.rdma_transfer_ratio_median.unwrap_or(1.0),
+            );
+        }
+        if let Some(min_n) = sc.min_rdma_shadow_samples {
+            let n = result.rdma_shadow_samples.unwrap_or(0);
+            if n < min_n {
+                eprintln!(
+                    "load-bench: {} FAIL — RDMA shadow samples {n} < min {min_n}",
+                    result.id
+                );
+                gate_failures += 1;
+            } else {
+                eprintln!(
+                    "load-bench: {} RDMA shadow OK — samples {n} ≥ {min_n}",
+                    result.id
+                );
+            }
+        }
+        if let Some(min_r) = sc.min_rdma_transfer_ratio {
+            if let Some(ratio) = result.rdma_transfer_ratio_median {
+                if ratio < min_r {
+                    eprintln!(
+                        "load-bench: {} FAIL — RDMA ratio {ratio:.3} < min {min_r:.3}",
+                        result.id
+                    );
+                    gate_failures += 1;
+                } else {
+                    eprintln!(
+                        "load-bench: {} RDMA ratio OK — {ratio:.3} ≥ {min_r:.3}",
+                        result.id
+                    );
+                }
+            }
+        }
+        if let Some(max_r) = sc.max_rdma_transfer_ratio {
+            if let Some(ratio) = result.rdma_transfer_ratio_median {
+                if ratio > max_r {
+                    eprintln!(
+                        "load-bench: {} FAIL — RDMA ratio {ratio:.3} > max {max_r:.3}",
+                        result.id
+                    );
+                    gate_failures += 1;
+                } else {
+                    eprintln!(
+                        "load-bench: {} RDMA ratio OK — {ratio:.3} ≤ {max_r:.3}",
+                        result.id
+                    );
+                }
+            }
         }
         if let Some(min_pi) = sc.min_dataplane_pi {
             if let Some(observed) = result.dataplane_pi {

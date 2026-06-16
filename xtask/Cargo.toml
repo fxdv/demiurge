@@ -9,6 +9,7 @@ demiurge-cost = { path = "../crates/demiurge-cost" }
 demiurge-router = { path = "../crates/demiurge-router" }
 demiurge-state = { path = "../crates/demiurge-state" }
 demiurge-control = { path = "../crates/demiurge-control" }
+demiurge-handoff = { path = "../crates/demiurge-handoff" }
 demiurge-dataplane = { path = "../crates/demiurge-dataplane" }
 toml = "0.8"
 regex = "1"

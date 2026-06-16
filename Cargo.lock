@@ -880,6 +880,7 @@ dependencies = [
  "demiurge-control",
  "demiurge-cost",
  "demiurge-dataplane",
+ "demiurge-handoff",
  "demiurge-router",
  "demiurge-state",
  "regex",

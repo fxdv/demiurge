@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#334155"/>
+    </marker>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#e2e8f0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="960" height="720" fill="url(#sky)"/>
+  <text x="480" y="36" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">Demiurge topologies  ELI5</text>
+  <text x="480" y="58" text-anchor="middle" font-size="13" fill="#475569">Two different jobs: who gets in (admit) vs how KV moves (hand-off)</text>
+
+  <!-- Clients -->
+  <g transform="translate(40, 100)">
+    <rect x="0" y="0" width="120" height="72" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="60" y="32" text-anchor="middle" font-size="14" font-weight="600" fill="#1e3a8a">Clients</text>
+    <text x="60" y="52" text-anchor="middle" font-size="11" fill="#1e40af">HTTP / TCP API</text>
+  </g>
+
+  <!-- Front door NIC -->
+  <g transform="translate(200, 88)">
+    <rect x="0" y="0" width="150" height="96" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+    <text x="75" y="24" text-anchor="middle" font-size="12" font-weight="700" fill="#92400e">Front door NIC</text>
+    <text x="75" y="42" text-anchor="middle" font-size="11" fill="#78350f">Ethernet (client ingress)</text>
+    <text x="75" y="62" text-anchor="middle" font-size="10" fill="#78350f">eth0 / bond0</text>
+    <text x="75" y="82" text-anchor="middle" font-size="10" font-weight="600" fill="#b45309">NOT InfiniBand</text>
+  </g>
+
+  <!-- Bouncer box - admit -->
+  <g transform="translate(390, 72)">
+    <rect x="0" y="0" width="200" height="128" rx="12" fill="#fff" stroke="#64748b" stroke-width="2"/>
+    <text x="100" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">Bouncer (admit)</text>
+    <text x="100" y="40" text-anchor="middle" font-size="11" fill="#475569">Pick ONE per packet</text>
+
+    <rect x="14" y="52" width="78" height="64" rx="8" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="53" y="72" text-anchor="middle" font-size="10" font-weight="700" fill="#166534">Kernel</text>
+    <text x="53" y="88" text-anchor="middle" font-size="9" fill="#166534">XDP BPF</text>
+    <text x="53" y="104" text-anchor="middle" font-size="9" fill="#166534">token bucket</text>
+
+    <rect x="108" y="52" width="78" height="64" rx="8" fill="#e0e7ff" stroke="#4f46e5" stroke-width="1.5"/>
+    <text x="147" y="72" text-anchor="middle" font-size="10" font-weight="700" fill="#3730a3">Userspace</text>
+    <text x="147" y="88" text-anchor="middle" font-size="9" fill="#3730a3">AdmitBucket</text>
+    <text x="147" y="104" text-anchor="middle" font-size="9" fill="#3730a3">fallback</text>
+  </g>
+
+  <!-- Router -->
+  <g transform="translate(630, 88)">
+    <rect x="0" y="0" width="140" height="96" rx="10" fill="#f3e8ff" stroke="#9333ea" stroke-width="2"/>
+    <text x="70" y="28" text-anchor="middle" font-size="14" font-weight="700" fill="#581c87">Router</text>
+    <text x="70" y="48" text-anchor="middle" font-size="11" fill="#6b21a8">route � KV ledger</text>
+    <text x="70" y="66" text-anchor="middle" font-size="11" fill="#6b21a8">� actuation � RCU</text>
+    <text x="70" y="84" text-anchor="middle" font-size="10" fill="#7e22ce">L7 proxy (io_uring opt)</text>
+  </g>
+
+  <!-- Prefill / Decode -->
+  <g transform="translate(800, 72)">
+    <rect x="0" y="0" width="120" height="56" rx="8" fill="#fce7f3" stroke="#db2777" stroke-width="1.5"/>
+    <text x="60" y="24" text-anchor="middle" font-size="12" font-weight="600" fill="#9d174d">Prefill pool</text>
+    <text x="60" y="42" text-anchor="middle" font-size="10" fill="#9d174d">GPU nodes</text>
+    <rect x="0" y="68" width="120" height="56" rx="8" fill="#fce7f3" stroke="#db2777" stroke-width="1.5"/>
+    <text x="60" y="92" text-anchor="middle" font-size="12" font-weight="600" fill="#9d174d">Decode pool</text>
+    <text x="60" y="110" text-anchor="middle" font-size="10" fill="#9d174d">GPU nodes</text>
+  </g>
+
+  <!-- Arrows north-south -->
+  <line x1="160" y1="136" x2="200" y2="136" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="350" y1="136" x2="390" y2="136" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="590" y1="136" x2="630" y2="136" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="770" y1="120" x2="800" y2="100" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="770" y1="152" x2="800" y2="152" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- East-west KV lane -->
+  <rect x="40" y="240" width="880" height="200" rx="14" fill="#fff" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="60" y="268" font-size="14" font-weight="700" fill="#0f172a">Back alley  KV hand-off (prefill � decode)</text>
+  <text x="60" y="288" font-size="11" fill="#64748b">Separate from client admit. This is where InfiniBand lives.</text>
+
+  <!-- TCP truck -->
+  <g transform="translate(80, 310)">
+    <rect x="0" y="0" width="200" height="100" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+    <text x="100" y="28" text-anchor="middle" font-size="13" font-weight="700" fill="#065f46">Today: TCP proof</text>
+    <text x="100" y="50" text-anchor="middle" font-size="11" fill="#047857">HeaderPassthroughTransport</text>
+    <text x="100" y="70" text-anchor="middle" font-size="10" fill="#047857">Track A / B shipped</text>
+    <text x="100" y="88" text-anchor="middle" font-size="10" fill="#047857">mock + load-bench</text>
+  </g>
+
+  <!-- IB truck -->
+  <g transform="translate(320, 310)">
+    <rect x="0" y="0" width="240" height="100" rx="10" fill="#eff6ff" stroke="#0284c7" stroke-width="2"/>
+    <text x="120" y="28" text-anchor="middle" font-size="13" font-weight="700" fill="#075985">Target: RDMA / IB</text>
+    <text x="120" y="50" text-anchor="middle" font-size="11" fill="#0369a1">HandoffTransport (Track C)</text>
+    <text x="120" y="70" text-anchor="middle" font-size="10" fill="#0369a1">ib0 / RoCE fabric</text>
+    <text x="120" y="88" text-anchor="middle" font-size="10" fill="#0369a1">DEMIURGE_TOPOLOGY shadow</text>
+  </g>
+
+  <!-- Topology labels -->
+  <g transform="translate(600, 310)">
+    <rect x="0" y="0" width="280" height="100" rx="10" fill="#fafafa" stroke="#71717a" stroke-width="1.5"/>
+    <text x="140" y="26" text-anchor="middle" font-size="12" font-weight="700" fill="#27272a">Topology ladder (RDMA shadow)</text>
+    <text x="20" y="50" font-size="10" fill="#52525b">same node � same rack � same cluster � cross cluster</text>
+    <text x="20" y="68" font-size="10" fill="#52525b">label@node/rack/cluster in DEMIURGE_TOPOLOGY</text>
+    <text x="20" y="86" font-size="10" fill="#52525b">feeds routing cost + DEMI-RDMA-COST-SHADOW</text>
+  </g>
+
+  <path d="M 280 360 L 320 360" stroke="#0284c7" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="300" y="352" text-anchor="middle" font-size="9" fill="#0284c7">planned</text>
+
+  <!-- Hybrid callout -->
+  <g transform="translate(40, 470)">
+    <rect x="0" y="0" width="420" height="110" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="2"/>
+    <text x="16" y="24" font-size="13" font-weight="700" fill="#92400e">Hybrid mode (recommended for prod rollout)</text>
+    <text x="16" y="46" font-size="11" fill="#78350f">" XDP attached on client NIC � kernel bouncer only (no double-count)</text>
+    <text x="16" y="64" font-size="11" fill="#78350f">" XDP missing / dev Mac � userspace bouncer only</text>
+    <text x="16" y="82" font-size="11" fill="#78350f">" sync_admit_capacity keeps both buckets aligned for � actuation  not dual admit</text>
+    <text x="16" y="100" font-size="11" fill="#78350f">" IB hand-off does NOT replace front-door admit</text>
+  </g>
+
+  <!-- Legend tracks -->
+  <g transform="translate(490, 470)">
+    <rect x="0" y="0" width="430" height="110" rx="10" fill="#fff" stroke="#cbd5e1" stroke-width="1.5"/>
+    <text x="16" y="24" font-size="13" font-weight="700" fill="#0f172a">Development tracks</text>
+    <text x="16" y="46" font-size="11" fill="#334155">A  macOS / portable proof (userspace admit, TCP KV)</text>
+    <text x="16" y="64" font-size="11" fill="#334155">B  Linux prod dataplane (XDP + io_uring on client NIC)</text>
+    <text x="16" y="82" font-size="11" fill="#334155">C  GPU fleet + production RDMA KV on IB fabric</text>
+    <text x="16" y="100" font-size="11" fill="#334155">'sim  trace replay, mock fleet (no GPU, no XDP required)</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="480" y="620" text-anchor="middle" font-size="11" fill="#64748b">See design/topologies/README.md for env matrix � spec �Development Tracks</text>
+  <text x="480" y="640" text-anchor="middle" font-size="10" fill="#94a3b8">Honest scope: production NIC XDP under load + production IB RDMA = open exit gates</text>
+</svg>

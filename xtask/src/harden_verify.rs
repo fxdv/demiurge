@@ -14,6 +14,15 @@ fn scenario_passes(s: &ScenarioResult) -> bool {
         let rejects = s.kv_admit_rejects.unwrap_or(0);
         return rejects >= 100 && s.errors <= s.total_requests;
     }
+    if s.id.contains("ADMIT-FLOOD") {
+        // Intentional userspace admit shed (503); load-bench gates min_errors + max cap.
+        return s.errors >= 50 && s.errors <= s.total_requests && s.ok > 0;
+    }
+    if s.id.contains("RDMA-TOPO") {
+        let samples = s.rdma_shadow_samples.unwrap_or(0);
+        let ratio = s.rdma_transfer_ratio_median.unwrap_or(0.0);
+        return s.errors == 0 && samples >= 50 && (0.95..=1.05).contains(&ratio);
+    }
     s.errors == 0 || s.kv_admit_rejects.unwrap_or(0) >= s.errors
 }
 
@@ -91,10 +100,18 @@ pub fn harden_verify(skip_load: bool, skip_tests: bool) -> Result<(), Box<dyn st
             }
             let rejects = s.kv_admit_rejects.unwrap_or(0);
             let status = scenario_status(s);
-            let detail = if s.id.contains("KV-EXHAUST") {
+            let detail = if s.id.contains("KV-EXHAUST") || s.id.contains("ADMIT-FLOOD") {
                 format!(
                     "graceful_rejects={}/{} kv_rejects={rejects}",
                     s.errors, s.total_requests
+                )
+            } else if s.id.contains("RDMA-TOPO") {
+                format!(
+                    "shadow_samples={} ratio={:.3} ok={}/{}",
+                    s.rdma_shadow_samples.unwrap_or(0),
+                    s.rdma_transfer_ratio_median.unwrap_or(1.0),
+                    s.ok,
+                    s.total_requests
                 )
             } else {
                 format!(

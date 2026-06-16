@@ -88,6 +88,7 @@ case "$cmd" in
     ./scripts/gate.sh
     ./scripts/load-bench.sh
     ./scripts/load-stress.sh
+    "$VERIFY_DIR/tier4-load.sh"
     "$VERIFY_DIR/harden-all.sh" --skip-load --with-stress
     if [[ "$(uname -s)" == "Linux" ]]; then
       echo ""
