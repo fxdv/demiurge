@@ -1,0 +1,72 @@
+{
+  "archive_id": "finland-track-b-2026-06-20",
+  "host": {
+    "hostname": "finland.fxdv.cc",
+    "address": "82.26.171.22",
+    "arch": "x86_64",
+    "virt": "kvm",
+    "vcpu": 2,
+    "ram_gib": 7.7,
+    "disk_root_gib": 92,
+    "os": "Ubuntu 24.04.4 LTS",
+    "kernel": "6.8.0-124-generic",
+    "nic": "ens1",
+    "nic_driver": "e1000",
+    "nic_model": "Intel 82540EM (emulated)"
+  },
+  "run": {
+    "duration_minutes": 6,
+    "scope": "gate + load + stress + harden + bpf",
+    "verdict": "PASS",
+    "hard_errors": 0,
+    "graceful_rejects": 540,
+    "total_requests": 28792
+  },
+  "confidence": {
+    "track_b_engineering_path": "high",
+    "track_b_exit_gates": "open",
+    "notes": [
+      "XDP smoke on veth PASS; ens1 not load-tested under hybrid XDP",
+      "No CP-stall p99 measurement on this run",
+      "KVM e1000 is lab NIC, not bare-metal production reference"
+    ]
+  },
+  "bpf": {
+    "object": "admit_shed.o",
+    "bytes": 7080,
+    "xdp_veth_smoke": "PASS"
+  },
+  "cpu_bench_gates": [
+    {"id": "BENCH-COMPOSE-8", "median_ns": 22, "p95_ns": 25, "limit_ns": 50, "headroom_pct": 127},
+    {"id": "BENCH-SELECT-64", "median_ns": 332, "p95_ns": 367, "limit_ns": 1000, "headroom_pct": 201},
+    {"id": "BENCH-BACKEND-COST", "median_ns": 3, "p95_ns": 5, "limit_ns": 8, "headroom_pct": 167},
+    {"id": "BENCH-CLASSIFY", "median_ns": 91, "p95_ns": 107, "limit_ns": 350, "headroom_pct": 285},
+    {"id": "BENCH-ROUTE-DISPATCH", "median_ns": 100, "p95_ns": 105, "limit_ns": 350, "headroom_pct": 250},
+    {"id": "BENCH-KV-RESERVE", "median_ns": 9, "p95_ns": 11, "limit_ns": 200, "headroom_pct": 2122},
+    {"id": "BENCH-WARM-LOOKUP", "median_ns": 81, "p95_ns": 86, "limit_ns": 500, "headroom_pct": 517},
+    {"id": "BENCH-PAIR-GREEDY", "median_ns": 723, "p95_ns": 769, "limit_ns": 5000, "headroom_pct": 592},
+    {"id": "BENCH-REBALANCE", "median_ns": 25, "p95_ns": 27, "limit_ns": 800, "headroom_pct": 3100},
+    {"id": "BENCH-RCU-SNAPSHOT", "median_ns": 3, "p95_ns": 3, "limit_ns": 50, "headroom_pct": 1567},
+    {"id": "BENCH-IOURING-FWD", "median_ns": 369, "p95_ns": 376, "limit_ns": 1500, "headroom_pct": 307}
+  ],
+  "load_bench": {
+    "scenarios": 13,
+    "requests": 7060,
+    "errors": 0,
+    "p99_ms_min": 4.4,
+    "p99_ms_max": 19.7
+  },
+  "stress": {
+    "scenarios": 4,
+    "requests": 21200,
+    "hard_errors": 0,
+    "graceful_rejects": 363,
+    "p99_ms_max": 16.3
+  },
+  "harden": {
+    "scenarios": 3,
+    "requests": 532,
+    "graceful_rejects": 177,
+    "p99_ms_max": 7.9
+  }
+}
