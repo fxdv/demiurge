@@ -14,6 +14,7 @@ use std::time::Duration;
 /// Prefill backend that blocks until [`LatchBackend::release`] is called.
 ///
 /// Useful for measuring disaggregated-path latency decoupling.
+#[must_use]
 pub fn spawn_latch_prefill_backend() -> (SocketAddr, LatchBackend) {
     let latch = Arc::new((Mutex::new(false), Condvar::new()));
     let latch2 = Arc::clone(&latch);
@@ -55,6 +56,7 @@ impl LatchBackend {
 /// Backend that replies with a single-byte body identifying itself by `marker`.
 ///
 /// Used in routing tests to assert which backend was chosen.
+#[must_use]
 pub fn spawn_marker_backend(marker: u8) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -75,6 +77,7 @@ pub fn spawn_marker_backend(marker: u8) -> SocketAddr {
 }
 
 /// Backend that accepts then immediately resets the connection (fault injection).
+#[must_use]
 pub fn spawn_rst_backend() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -90,6 +93,7 @@ pub fn spawn_rst_backend() -> SocketAddr {
 /// Backend that returns a fixed-size HTTP body.
 ///
 /// Used in io_uring and large-response tests.
+#[must_use]
 pub fn spawn_large_body_backend(body_bytes: usize) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -118,6 +122,7 @@ pub fn spawn_large_body_backend(body_bytes: usize) -> SocketAddr {
 }
 
 /// Backend that sleeps for `delay` before responding (timing tests).
+#[must_use]
 pub fn spawn_delay_backend(delay: Duration) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");

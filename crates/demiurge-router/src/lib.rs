@@ -69,11 +69,13 @@ pub enum Phase {
 pub struct RequestId(u64);
 
 impl RequestId {
+    #[must_use]
     pub fn new() -> Self {
         Self(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
     }
 
-    pub fn raw(self) -> u64 {
+    #[must_use]
+    pub const fn raw(self) -> u64 {
         self.0
     }
 }
@@ -174,6 +176,7 @@ impl Backend {
         })
     }
 
+    #[must_use]
     pub fn topology(&self) -> &TopologyId {
         &self.topology
     }
@@ -733,39 +736,48 @@ impl Router {
         userspace.saturating_add(kernel)
     }
 
-    pub fn rebalancer_actuation(&self) -> bool {
+    #[must_use]
+    pub const fn rebalancer_actuation(&self) -> bool {
         self.rebalancer_actuation
     }
 
+    #[must_use]
     pub fn dataplane(&self) -> &Arc<RcuRoutingTable> {
         &self.dataplane
     }
 
+    #[must_use]
     pub fn admit_bucket(&self) -> &Arc<AdmitBucket> {
         &self.admit
     }
 
+    #[must_use]
     pub fn dataplane_pi(&self) -> f64 {
         self.dataplane.read_pi()
     }
 
+    #[must_use]
     pub fn dataplane_age_ms(&self) -> u64 {
         self.dataplane.age_ms()
     }
 
+    #[must_use]
     pub fn state(&self) -> Option<&StateSnapshot> {
         self.state.as_ref()
     }
 
+    #[must_use]
     pub fn ledger(&self) -> Option<&Arc<ReservationLedger>> {
         self.ledger.as_ref()
     }
 
+    #[must_use]
     pub fn handoffs(&self) -> Option<&Arc<HandoffRegistry>> {
         self.handoffs.as_ref()
     }
 
-    pub fn bytes_per_token(&self) -> u64 {
+    #[must_use]
+    pub const fn bytes_per_token(&self) -> u64 {
         self.bytes_per_token
     }
 
@@ -1239,6 +1251,7 @@ pub struct DecodePlacement {
 }
 
 impl DecodePlacement {
+    #[must_use]
     pub fn backend(&self) -> &Arc<Backend> {
         &self.backend
     }
