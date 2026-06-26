@@ -27,6 +27,12 @@ pub struct KvBreakdown {
 /// kv_fragment = kv_payload × fragmentation_slack
 /// kv_reserved = kv_payload + kv_metadata + kv_fragment
 /// ```
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss, // token counts never exceed 2^52 in practice
+    clippy::cast_possible_truncation, // ceil() is always non-negative; values fit u64
+    clippy::cast_sign_loss // ditto
+)]
 pub fn kv_breakdown(prompt_tokens: u64, bytes_per_token: u64) -> KvBreakdown {
     let block = CACHE_BLOCK_TOKENS.max(1);
     let kv_tokens = prompt_tokens.div_ceil(block) * block;
@@ -45,6 +51,12 @@ pub fn kv_breakdown(prompt_tokens: u64, bytes_per_token: u64) -> KvBreakdown {
 }
 
 /// 90th percentile of a non-empty sample (nearest-rank).
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss, // sample counts never exceed 2^52
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn percentile90(mut samples: Vec<u64>) -> u64 {
     if samples.is_empty() {
         return 0;
@@ -58,11 +70,13 @@ pub fn percentile90(mut samples: Vec<u64>) -> u64 {
 ///
 /// Uses **one** p90 increment on top of live fleet reservation — never
 /// `fleet_reserved + n × p90` ([DEMI-BARRIER-PHI]).
+#[must_use]
 pub fn fleet_marginal_bytes(fleet_reserved: u64, p90_increment: u64) -> u64 {
     fleet_reserved.saturating_add(p90_increment)
 }
 
 /// Wrong pattern explicitly rejected by [DEMI-BARRIER-PHI].
+#[must_use]
 pub fn fleet_marginal_bytes_wrong(fleet_reserved: u64, p90_increment: u64, n: u64) -> u64 {
     fleet_reserved.saturating_add(p90_increment.saturating_mul(n))
 }
@@ -70,6 +84,8 @@ pub fn fleet_marginal_bytes_wrong(fleet_reserved: u64, p90_increment: u64, n: u6
 /// Φ memory-pressure barrier from fleet utilization in `[0, 1)`.
 ///
 /// Monotonic: higher reserved/capacity → higher penalty (≥ 1).
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // byte counts at token scale fit f64 mantissa
 pub fn phi_barrier(fleet_reserved: u64, capacity_bytes: u64) -> BarrierFactor {
     if capacity_bytes == 0 {
         return BarrierFactor::clamped(f64::MAX);
@@ -80,6 +96,7 @@ pub fn phi_barrier(fleet_reserved: u64, capacity_bytes: u64) -> BarrierFactor {
 }
 
 /// Φ barrier using fleet-aggregate marginal occupancy ([DEMI-BARRIER-PHI]).
+#[must_use]
 pub fn phi_barrier_marginal(
     fleet_reserved: u64,
     p90_increment: u64,

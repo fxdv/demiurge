@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -45,8 +45,14 @@ pub use demiurge_handoff::{
 pub use demiurge_state::{BackendSnapshot, StatePlane, StateSnapshot, WarmthMap};
 
 mod banner;
+/// Reusable TCP backend stubs for integration tests.
+pub mod testutil;
 
 pub use banner::print_startup_banner;
+pub use testutil::{
+    spawn_delay_backend, spawn_large_body_backend, spawn_latch_prefill_backend,
+    spawn_marker_backend, spawn_rst_backend, LatchBackend,
+};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -63,11 +69,13 @@ pub enum Phase {
 pub struct RequestId(u64);
 
 impl RequestId {
+    #[must_use]
     pub fn new() -> Self {
         Self(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
     }
 
-    pub fn raw(self) -> u64 {
+    #[must_use]
+    pub const fn raw(self) -> u64 {
         self.0
     }
 }
@@ -103,11 +111,13 @@ pub enum RoutePath {
     DecodeOnly(Arc<Backend>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteError {
     NoBackend,
     HandoffMissing,
     KvAdmitRejected,
+    /// Prefill backend I/O failed — the error message is preserved for logging.
+    PrefillIo(String),
 }
 
 impl std::fmt::Display for RouteError {
@@ -116,6 +126,7 @@ impl std::fmt::Display for RouteError {
             RouteError::NoBackend => write!(f, "no backend available for route"),
             RouteError::HandoffMissing => write!(f, "prefill completed without KV hand-off"),
             RouteError::KvAdmitRejected => write!(f, "decode pool rejected KV reservation"),
+            RouteError::PrefillIo(msg) => write!(f, "prefill I/O error: {msg}"),
         }
     }
 }
@@ -165,6 +176,7 @@ impl Backend {
         })
     }
 
+    #[must_use]
     pub fn topology(&self) -> &TopologyId {
         &self.topology
     }
@@ -724,39 +736,48 @@ impl Router {
         userspace.saturating_add(kernel)
     }
 
-    pub fn rebalancer_actuation(&self) -> bool {
+    #[must_use]
+    pub const fn rebalancer_actuation(&self) -> bool {
         self.rebalancer_actuation
     }
 
+    #[must_use]
     pub fn dataplane(&self) -> &Arc<RcuRoutingTable> {
         &self.dataplane
     }
 
+    #[must_use]
     pub fn admit_bucket(&self) -> &Arc<AdmitBucket> {
         &self.admit
     }
 
+    #[must_use]
     pub fn dataplane_pi(&self) -> f64 {
         self.dataplane.read_pi()
     }
 
+    #[must_use]
     pub fn dataplane_age_ms(&self) -> u64 {
         self.dataplane.age_ms()
     }
 
+    #[must_use]
     pub fn state(&self) -> Option<&StateSnapshot> {
         self.state.as_ref()
     }
 
+    #[must_use]
     pub fn ledger(&self) -> Option<&Arc<ReservationLedger>> {
         self.ledger.as_ref()
     }
 
+    #[must_use]
     pub fn handoffs(&self) -> Option<&Arc<HandoffRegistry>> {
         self.handoffs.as_ref()
     }
 
-    pub fn bytes_per_token(&self) -> u64 {
+    #[must_use]
+    pub const fn bytes_per_token(&self) -> u64 {
         self.bytes_per_token
     }
 
@@ -1230,6 +1251,7 @@ pub struct DecodePlacement {
 }
 
 impl DecodePlacement {
+    #[must_use]
     pub fn backend(&self) -> &Arc<Backend> {
         &self.backend
     }
@@ -1360,8 +1382,13 @@ pub fn admit_disaggregated(router: &Router, head: &[u8]) -> Result<Duration, Rou
             request_id,
             prompt_tokens,
         } => {
-            let _worker =
-                dispatch_prefill(prefill, head.to_vec(), request_id, prompt_tokens, |_, _| {});
+            let _worker = dispatch_prefill(
+                prefill,
+                head.to_vec(),
+                request_id,
+                prompt_tokens,
+                |_, _r| {},
+            );
         }
         RoutePath::Colocated(_) | RoutePath::DecodeOnly(_) => {
             return Err(RouteError::NoBackend);
@@ -1371,16 +1398,19 @@ pub fn admit_disaggregated(router: &Router, head: &[u8]) -> Result<Duration, Rou
 }
 
 /// Dispatch prefill I/O on a worker thread; invoke `on_complete` when done.
+///
+/// The callback receives the raw I/O outcome so callers can distinguish a
+/// network failure (`Err`) from a successful but empty response (`Ok(vec![])`).
 pub fn dispatch_prefill(
     prefill: Arc<Backend>,
     head: Vec<u8>,
     request_id: RequestId,
     prompt_tokens: u64,
-    on_complete: impl FnOnce(PrefillSignals, Vec<u8>) + Send + 'static,
+    on_complete: impl FnOnce(PrefillSignals, io::Result<Vec<u8>>) + Send + 'static,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let started = std::time::Instant::now();
-        let response = run_prefill_io(&prefill, &head).unwrap_or_default();
+        let response = run_prefill_io(&prefill, &head);
         let prefill_wall = started.elapsed();
         on_complete(
             PrefillSignals {
@@ -1511,7 +1541,15 @@ fn handle_disaggregated(
         head.clone(),
         request_id,
         prompt_tokens,
-        move |signals, response| {
+        move |signals, io_result| {
+            let response = match io_result {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("demiurge: prefill I/O error for {prefill_label}: {e}");
+                    let _ = done_tx.send(Err(RouteError::PrefillIo(e.to_string())));
+                    return;
+                }
+            };
             let placement = match on_prefill_complete(&router2, &signals, &response, &prefill_label)
             {
                 Ok(p) => p,
@@ -1529,7 +1567,12 @@ fn handle_disaggregated(
         .map_err(|_| io::Error::other("prefill channel"))?
     {
         Ok(p) => p,
-        Err(RouteError::NoBackend | RouteError::HandoffMissing | RouteError::KvAdmitRejected) => {
+        Err(
+            RouteError::NoBackend
+            | RouteError::HandoffMissing
+            | RouteError::KvAdmitRejected
+            | RouteError::PrefillIo(_),
+        ) => {
             let _ =
                 client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             return Ok(());
@@ -1547,17 +1590,20 @@ fn handle_disaggregated(
     result
 }
 
+/// Read a `DEMIURGE_*` env var as a boolean flag, falling back to `default`.
+/// Accepted truthy values: `"1"`, `"true"`, `"yes"`.
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(default)
+}
+
 fn rebalancer_actuation_enabled() -> bool {
-    if let Ok(v) = std::env::var("DEMIURGE_REBALANCER_ACTUATE") {
-        return matches!(v.as_str(), "1" | "true" | "yes");
-    }
-    POOL_ACTUATION_ENABLED
+    env_bool("DEMIURGE_REBALANCER_ACTUATE", POOL_ACTUATION_ENABLED)
 }
 
 fn rdma_routing_enabled() -> bool {
-    std::env::var("DEMIURGE_RDMA_ROUTING")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    env_bool("DEMIURGE_RDMA_ROUTING", false)
 }
 
 fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
@@ -1617,9 +1663,12 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
             #[cfg(target_os = "linux")]
             io_uring_session.as_mut(),
         ),
-        Err(RouteError::NoBackend)
-        | Err(RouteError::HandoffMissing)
-        | Err(RouteError::KvAdmitRejected) => {
+        Err(
+            RouteError::NoBackend
+            | RouteError::HandoffMissing
+            | RouteError::KvAdmitRejected
+            | RouteError::PrefillIo(_),
+        ) => {
             let _ =
                 client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             Ok(())
@@ -1636,119 +1685,4 @@ pub fn serve(listener: TcpListener, router: Arc<Router>) -> io::Result<()> {
         });
     }
     Ok(())
-}
-
-/// Test helper: prefill backend that blocks until `release()` is called.
-pub fn spawn_latch_prefill_backend() -> (SocketAddr, LatchBackend) {
-    let latch = Arc::new((Mutex::new(false), Condvar::new()));
-    let latch2 = Arc::clone(&latch);
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 2048];
-            let _ = s.read(&mut buf);
-            let (lock, cv) = &*latch2;
-            let mut started = lock.lock().expect("lock");
-            while !*started {
-                started = cv.wait(started).expect("wait");
-            }
-            let _ = s.write_all(
-                b"HTTP/1.1 200 OK\r\nx-demiurge-prefill-done: 1\r\nx-demiurge-kv-handle: 1\r\nx-demiurge-kv-bytes: 4096\r\ncontent-length: 0\r\n\r\n",
-            );
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    (addr, LatchBackend { latch })
-}
-
-pub struct LatchBackend {
-    latch: Arc<(Mutex<bool>, Condvar)>,
-}
-
-impl LatchBackend {
-    pub fn release(&self) {
-        let (lock, cv) = &*self.latch;
-        *lock.lock().expect("lock") = true;
-        cv.notify_all();
-    }
-}
-
-/// Test helper: marker backend for E2E proxy tests.
-pub fn spawn_marker_backend(marker: u8) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 1024];
-            let _ = s.read(&mut buf);
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\n{}",
-                marker as char
-            );
-            let _ = s.write_all(resp.as_bytes());
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    addr
-}
-
-/// Backend that accepts then resets without sending HTTP (proxy fault injection).
-pub fn spawn_rst_backend() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(s) = conn else { continue };
-            drop(s);
-        }
-    });
-    addr
-}
-
-/// Backend returning a fixed-size HTTP body (io_uring / large-response tests).
-pub fn spawn_large_body_backend(body_bytes: usize) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 1024];
-            let _ = s.read(&mut buf);
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {body_bytes}\r\nconnection: close\r\n\r\n"
-            );
-            let _ = s.write_all(head.as_bytes());
-            let chunk = vec![b'x'; 64 * 1024];
-            let mut sent = 0usize;
-            while sent < body_bytes {
-                let n = chunk.len().min(body_bytes - sent);
-                if s.write_all(&chunk[..n]).is_err() {
-                    break;
-                }
-                sent += n;
-            }
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    addr
-}
-
-/// Sleep backend for timing tests.
-pub fn spawn_delay_backend(delay: Duration) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 2048];
-            let _ = s.read(&mut buf);
-            thread::sleep(delay);
-            let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    addr
 }

@@ -171,11 +171,12 @@ The analytic routing cost is a product of a strictly-positive time core and
 dimensionless factors:
 \[
   C(r,q) \;=\; T_{\text{core}}(r,q)\;\cdot\;\prod_m B_m\;\cdot\;\prod_c D_c\;\cdot\;\delta,
-  \qquad B_m \ge 1,\; D_c \in (0,1],\; \delta \in [1-\alpha,\,1+\alpha].
+  \qquad B_m \ge 1,\; D_c \in (0,1],\; \delta \in [1-\alpha,\,1+\alpha],\; \alpha \in [0,1).
 \]
 
 \subsection{Positivity}\label{sec:cost-pos}
-Because $T_{\text{core}}>0$ and every factor is strictly positive, $C(r,q)>0$ by
+Because $T_{\text{core}}>0$ and every factor is strictly positive --- $B_m\ge 1$,
+$D_c\in(0,1]$, and $\delta\ge 1-\alpha>0$ since $\alpha<1$ --- $C(r,q)>0$ by
 construction \req{DEMI-COST-POS}. The implementation stores $\ln C$ and composes
 by adding logs, so the guarantee survives floating point: comparisons use the
 exact log; there is no linear product to underflow to zero or flip sign.

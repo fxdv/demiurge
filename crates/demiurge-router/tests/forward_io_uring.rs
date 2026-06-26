@@ -2,35 +2,16 @@
 #![cfg(target_os = "linux")]
 
 use std::io::{Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use demiurge_dataplane::IoUringProxySession;
-use demiurge_router::{serve, spawn_large_body_backend, Backend, Router};
+use demiurge_router::{serve, spawn_large_body_backend, spawn_marker_backend, Backend, Router};
 
 fn harden_report(tier: u8, id: &str, status: &str, detail: &str) {
     eprintln!("HARDEN_REPORT tier={tier} id={id} status={status} detail={detail}");
-}
-
-fn spawn_marker_backend(marker: u8) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 1024];
-            let _ = s.read(&mut buf);
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: 1\r\nconnection: close\r\n\r\n{}",
-                marker as char
-            );
-            let _ = s.write_all(resp.as_bytes());
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    addr
 }
 
 #[test]

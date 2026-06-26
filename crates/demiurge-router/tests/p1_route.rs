@@ -19,7 +19,7 @@ fn route_returns_before_prefill_complete() {
     let completed2 = Arc::clone(&completed);
 
     let dispatch_at = Instant::now();
-    let worker = dispatch_prefill(prefill, head, RequestId::new(), 2048, move |_, _| {
+    let worker = dispatch_prefill(prefill, head, RequestId::new(), 2048, move |_, _r| {
         completed2.store(true, Ordering::SeqCst);
     });
 
