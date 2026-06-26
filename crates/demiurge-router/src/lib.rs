@@ -1382,8 +1382,13 @@ pub fn admit_disaggregated(router: &Router, head: &[u8]) -> Result<Duration, Rou
             request_id,
             prompt_tokens,
         } => {
-            let _worker =
-                dispatch_prefill(prefill, head.to_vec(), request_id, prompt_tokens, |_, _r| {});
+            let _worker = dispatch_prefill(
+                prefill,
+                head.to_vec(),
+                request_id,
+                prompt_tokens,
+                |_, _r| {},
+            );
         }
         RoutePath::Colocated(_) | RoutePath::DecodeOnly(_) => {
             return Err(RouteError::NoBackend);
@@ -1681,4 +1686,3 @@ pub fn serve(listener: TcpListener, router: Arc<Router>) -> io::Result<()> {
     }
     Ok(())
 }
-
