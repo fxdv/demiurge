@@ -103,11 +103,13 @@ pub enum RoutePath {
     DecodeOnly(Arc<Backend>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteError {
     NoBackend,
     HandoffMissing,
     KvAdmitRejected,
+    /// Prefill backend I/O failed — the error message is preserved for logging.
+    PrefillIo(String),
 }
 
 impl std::fmt::Display for RouteError {
@@ -116,6 +118,7 @@ impl std::fmt::Display for RouteError {
             RouteError::NoBackend => write!(f, "no backend available for route"),
             RouteError::HandoffMissing => write!(f, "prefill completed without KV hand-off"),
             RouteError::KvAdmitRejected => write!(f, "decode pool rejected KV reservation"),
+            RouteError::PrefillIo(msg) => write!(f, "prefill I/O error: {msg}"),
         }
     }
 }
@@ -1361,7 +1364,7 @@ pub fn admit_disaggregated(router: &Router, head: &[u8]) -> Result<Duration, Rou
             prompt_tokens,
         } => {
             let _worker =
-                dispatch_prefill(prefill, head.to_vec(), request_id, prompt_tokens, |_, _| {});
+                dispatch_prefill(prefill, head.to_vec(), request_id, prompt_tokens, |_, _r| {});
         }
         RoutePath::Colocated(_) | RoutePath::DecodeOnly(_) => {
             return Err(RouteError::NoBackend);
@@ -1371,16 +1374,19 @@ pub fn admit_disaggregated(router: &Router, head: &[u8]) -> Result<Duration, Rou
 }
 
 /// Dispatch prefill I/O on a worker thread; invoke `on_complete` when done.
+///
+/// The callback receives the raw I/O outcome so callers can distinguish a
+/// network failure (`Err`) from a successful but empty response (`Ok(vec![])`).
 pub fn dispatch_prefill(
     prefill: Arc<Backend>,
     head: Vec<u8>,
     request_id: RequestId,
     prompt_tokens: u64,
-    on_complete: impl FnOnce(PrefillSignals, Vec<u8>) + Send + 'static,
+    on_complete: impl FnOnce(PrefillSignals, io::Result<Vec<u8>>) + Send + 'static,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let started = std::time::Instant::now();
-        let response = run_prefill_io(&prefill, &head).unwrap_or_default();
+        let response = run_prefill_io(&prefill, &head);
         let prefill_wall = started.elapsed();
         on_complete(
             PrefillSignals {
@@ -1511,7 +1517,15 @@ fn handle_disaggregated(
         head.clone(),
         request_id,
         prompt_tokens,
-        move |signals, response| {
+        move |signals, io_result| {
+            let response = match io_result {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("demiurge: prefill I/O error for {prefill_label}: {e}");
+                    let _ = done_tx.send(Err(RouteError::PrefillIo(e.to_string())));
+                    return;
+                }
+            };
             let placement = match on_prefill_complete(&router2, &signals, &response, &prefill_label)
             {
                 Ok(p) => p,
@@ -1529,7 +1543,12 @@ fn handle_disaggregated(
         .map_err(|_| io::Error::other("prefill channel"))?
     {
         Ok(p) => p,
-        Err(RouteError::NoBackend | RouteError::HandoffMissing | RouteError::KvAdmitRejected) => {
+        Err(
+            RouteError::NoBackend
+            | RouteError::HandoffMissing
+            | RouteError::KvAdmitRejected
+            | RouteError::PrefillIo(_),
+        ) => {
             let _ =
                 client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             return Ok(());
@@ -1617,9 +1636,12 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
             #[cfg(target_os = "linux")]
             io_uring_session.as_mut(),
         ),
-        Err(RouteError::NoBackend)
-        | Err(RouteError::HandoffMissing)
-        | Err(RouteError::KvAdmitRejected) => {
+        Err(
+            RouteError::NoBackend
+            | RouteError::HandoffMissing
+            | RouteError::KvAdmitRejected
+            | RouteError::PrefillIo(_),
+        ) => {
             let _ =
                 client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             Ok(())
