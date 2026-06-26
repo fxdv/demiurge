@@ -1,4 +1,15 @@
 //! Local TCP load scenarios against a live demiurge-router stack.
+//!
+//! ## File layout
+//!
+//! | Lines (approx) | Section |
+//! |---|---|
+//! | 1 – 220        | **Config** — `LoadBenchFile`, `LoadSettings`, `Scenario` and serde defaults |
+//! | 221 – 608      | **Results & gating** — `ScenarioResult`, `LoadBenchReport`, gate evaluation |
+//! | 609 – 1060     | **Backend & router builders** — `RouterStack`, pool helpers, backend stubs |
+//! | 1061 – 1125    | **Concurrency primitives** — `ConcurrencyGate`, `percentile`, `PeakGuard` |
+//! | 1126 – 1833    | **Scenario runners** — `run_scenario`, fleet-replay, admit-decouple, e2e |
+//! | 1834 – EOF     | **Entry-points & reporting** — `load_bench`, `load_report`, I/O helpers |
 
 use std::collections::HashMap;
 use std::fs;
@@ -26,6 +37,8 @@ use demiurge_router::{
 use serde::{Deserialize, Serialize};
 
 const LOAD_BENCH: &str = "design/load-bench.toml";
+
+// ─── Config ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct LoadBenchFile {
@@ -217,6 +230,8 @@ fn default_long_tokens() -> u64 {
 fn default_measure() -> String {
     "e2e".into()
 }
+
+// ─── Results & gating ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioResult {
@@ -606,6 +621,8 @@ pub fn evaluate_scenario_gates(
 
     gates
 }
+
+// ─── Backend & router builders ───────────────────────────────────────────────
 
 struct RouterStack {
     addr: SocketAddr,
@@ -1051,6 +1068,8 @@ fn one_request(
     }
 }
 
+// ─── Concurrency primitives ──────────────────────────────────────────────────
+
 fn percentile(sorted: &[u64], p: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -1115,6 +1134,8 @@ impl PeakGuard {
         self.peak.load(Ordering::Relaxed)
     }
 }
+
+// ─── Scenario runners ────────────────────────────────────────────────────────
 
 fn run_scenario(sc: &Scenario, warmup: u32) -> Result<ScenarioResult, Box<dyn std::error::Error>> {
     if sc.measure == "fleet_replay" {
@@ -1833,6 +1854,8 @@ fn run_e2e_scenario(
         rdma_transfer_ratio_median,
     })
 }
+
+// ─── Entry-points & reporting ────────────────────────────────────────────────
 
 pub fn report_paths(report_dir: &str) -> (PathBuf, PathBuf) {
     let dir = PathBuf::from(report_dir);

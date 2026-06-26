@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -45,8 +45,14 @@ pub use demiurge_handoff::{
 pub use demiurge_state::{BackendSnapshot, StatePlane, StateSnapshot, WarmthMap};
 
 mod banner;
+/// Reusable TCP backend stubs for integration tests.
+pub mod testutil;
 
 pub use banner::print_startup_banner;
+pub use testutil::{
+    spawn_delay_backend, spawn_large_body_backend, spawn_latch_prefill_backend,
+    spawn_marker_backend, spawn_rst_backend, LatchBackend,
+};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -1663,117 +1669,3 @@ pub fn serve(listener: TcpListener, router: Arc<Router>) -> io::Result<()> {
     Ok(())
 }
 
-/// Test helper: prefill backend that blocks until `release()` is called.
-pub fn spawn_latch_prefill_backend() -> (SocketAddr, LatchBackend) {
-    let latch = Arc::new((Mutex::new(false), Condvar::new()));
-    let latch2 = Arc::clone(&latch);
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 2048];
-            let _ = s.read(&mut buf);
-            let (lock, cv) = &*latch2;
-            let mut started = lock.lock().expect("lock");
-            while !*started {
-                started = cv.wait(started).expect("wait");
-            }
-            let _ = s.write_all(
-                b"HTTP/1.1 200 OK\r\nx-demiurge-prefill-done: 1\r\nx-demiurge-kv-handle: 1\r\nx-demiurge-kv-bytes: 4096\r\ncontent-length: 0\r\n\r\n",
-            );
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    (addr, LatchBackend { latch })
-}
-
-pub struct LatchBackend {
-    latch: Arc<(Mutex<bool>, Condvar)>,
-}
-
-impl LatchBackend {
-    pub fn release(&self) {
-        let (lock, cv) = &*self.latch;
-        *lock.lock().expect("lock") = true;
-        cv.notify_all();
-    }
-}
-
-/// Test helper: marker backend for E2E proxy tests.
-pub fn spawn_marker_backend(marker: u8) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 1024];
-            let _ = s.read(&mut buf);
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\n{}",
-                marker as char
-            );
-            let _ = s.write_all(resp.as_bytes());
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    addr
-}
-
-/// Backend that accepts then resets without sending HTTP (proxy fault injection).
-pub fn spawn_rst_backend() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(s) = conn else { continue };
-            drop(s);
-        }
-    });
-    addr
-}
-
-/// Backend returning a fixed-size HTTP body (io_uring / large-response tests).
-pub fn spawn_large_body_backend(body_bytes: usize) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 1024];
-            let _ = s.read(&mut buf);
-            let head = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: {body_bytes}\r\nconnection: close\r\n\r\n"
-            );
-            let _ = s.write_all(head.as_bytes());
-            let chunk = vec![b'x'; 64 * 1024];
-            let mut sent = 0usize;
-            while sent < body_bytes {
-                let n = chunk.len().min(body_bytes - sent);
-                if s.write_all(&chunk[..n]).is_err() {
-                    break;
-                }
-                sent += n;
-            }
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    addr
-}
-
-/// Sleep backend for timing tests.
-pub fn spawn_delay_backend(delay: Duration) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 2048];
-            let _ = s.read(&mut buf);
-            thread::sleep(delay);
-            let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    addr
-}
