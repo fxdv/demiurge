@@ -1,30 +1,10 @@
 use std::io::{Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use demiurge_router::{select, serve, Backend, Router};
-
-/// A trivial backend that replies with a fixed one-byte body identifying itself.
-fn spawn_marker_backend(marker: u8) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            let Ok(mut s) = conn else { continue };
-            let mut buf = [0u8; 1024];
-            let _ = s.read(&mut buf); // consume the forwarded head
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\n{}",
-                marker as char
-            );
-            let _ = s.write_all(resp.as_bytes());
-            let _ = s.shutdown(Shutdown::Write);
-        }
-    });
-    addr
-}
+use demiurge_router::{select, serve, spawn_marker_backend, Backend, Router};
 
 // [DEMI-ROUTE-MINCOST] — select returns the cheapest backend, and in-flight
 // load shifts the decision: enough load on the cheap one flips the choice.
