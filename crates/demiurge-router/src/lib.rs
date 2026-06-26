@@ -1566,17 +1566,20 @@ fn handle_disaggregated(
     result
 }
 
+/// Read a `DEMIURGE_*` env var as a boolean flag, falling back to `default`.
+/// Accepted truthy values: `"1"`, `"true"`, `"yes"`.
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(default)
+}
+
 fn rebalancer_actuation_enabled() -> bool {
-    if let Ok(v) = std::env::var("DEMIURGE_REBALANCER_ACTUATE") {
-        return matches!(v.as_str(), "1" | "true" | "yes");
-    }
-    POOL_ACTUATION_ENABLED
+    env_bool("DEMIURGE_REBALANCER_ACTUATE", POOL_ACTUATION_ENABLED)
 }
 
 fn rdma_routing_enabled() -> bool {
-    std::env::var("DEMIURGE_RDMA_ROUTING")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+    env_bool("DEMIURGE_RDMA_ROUTING", false)
 }
 
 fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {

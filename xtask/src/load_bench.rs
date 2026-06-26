@@ -1059,17 +1059,19 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
     sorted[idx]
 }
 
-struct InflightGate {
+/// Bounded concurrency gate — blocks callers when `max` slots are occupied.
+struct ConcurrencyGate {
     slots: Mutex<usize>,
     cv: Condvar,
     max: usize,
 }
 
-struct InflightGuard {
-    gate: Arc<InflightGate>,
+/// RAII slot — releases one concurrency permit on drop.
+struct ConcurrencySlot {
+    gate: Arc<ConcurrencyGate>,
 }
 
-impl InflightGate {
+impl ConcurrencyGate {
     fn new(max: usize) -> Arc<Self> {
         Arc::new(Self {
             slots: Mutex::new(0),
@@ -1078,21 +1080,21 @@ impl InflightGate {
         })
     }
 
-    fn enter(self: &Arc<Self>) -> InflightGuard {
-        let mut slots = self.slots.lock().expect("inflight");
+    fn enter(self: &Arc<Self>) -> ConcurrencySlot {
+        let mut slots = self.slots.lock().expect("concurrency gate");
         while *slots >= self.max {
-            slots = self.cv.wait(slots).expect("inflight wait");
+            slots = self.cv.wait(slots).expect("concurrency gate wait");
         }
         *slots += 1;
-        InflightGuard {
+        ConcurrencySlot {
             gate: Arc::clone(self),
         }
     }
 }
 
-impl Drop for InflightGuard {
+impl Drop for ConcurrencySlot {
     fn drop(&mut self) {
-        let mut slots = self.gate.slots.lock().expect("inflight");
+        let mut slots = self.gate.slots.lock().expect("concurrency gate");
         *slots -= 1;
         self.gate.cv.notify_one();
     }
@@ -1247,7 +1249,7 @@ fn run_admit_workers(
     head: &[u8],
     concurrency: u32,
     requests_per_worker: u32,
-    inflight: Option<Arc<InflightGate>>,
+    inflight: Option<Arc<ConcurrencyGate>>,
 ) -> Vec<u64> {
     let latencies = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
@@ -1293,7 +1295,7 @@ struct WindowWorkerConfig {
     long_prompt_tokens: u64,
     prefill_fraction: f64,
     seq_base: u64,
-    inflight: Option<Arc<InflightGate>>,
+    inflight: Option<Arc<ConcurrencyGate>>,
     peak_sampler: Option<Arc<KvReservationLedger>>,
     peak_atomic: Option<Arc<AtomicU64>>,
 }
@@ -1426,7 +1428,7 @@ fn run_fleet_replay_scenario(
     }
 
     let inflight = if sc.max_inflight > 0 {
-        Some(InflightGate::new(sc.max_inflight as usize))
+        Some(ConcurrencyGate::new(sc.max_inflight as usize))
     } else {
         None
     };
@@ -1672,7 +1674,7 @@ fn run_e2e_scenario(
 
     let start_wall = Instant::now();
     let inflight = if sc.max_inflight > 0 {
-        Some(InflightGate::new(sc.max_inflight as usize))
+        Some(ConcurrencyGate::new(sc.max_inflight as usize))
     } else {
         None
     };
