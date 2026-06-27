@@ -77,10 +77,12 @@ gates remain open):
 \textbf{Not shipped (Track~B exit gates / Track~C).} XDP shed on production NIC
 under fleet load, data-plane p99 admit budget on x86\_64 reference hardware under
 CP slowdown, pool rebalancing \emph{actuation} in production fleets, RDMA production
-hand-off, cross-tenant sharing (\S\ref{sec:sharing}), live migration
-(\S\ref{sec:migration}), and corrector graduation (\S\ref{sec:corrector}) remain
-\textbf{design intent} tracked in \texttt{design/requirements.toml} and
-\texttt{ROADMAP.md}.
+hand-off, the sub-ITL migration cutover budget \emph{measured on reference fleet
+hardware} (\S\ref{sec:migration}), and corrector graduation
+(\S\ref{sec:corrector}) remain \textbf{design intent} tracked in
+\texttt{design/requirements.toml} and \texttt{ROADMAP.md}. Cross-tenant
+cache-domain isolation (\S\ref{sec:sharing}) and the abortable migration cutover
+\emph{logic} ship as portable, test-backed crates.
 
 \begin{table}[h]
   \centering
@@ -205,13 +207,16 @@ or TTL expiry \req{DEMI-KV-RELEASE}. Overhead terms are mandatory in the
 reservation formula \req{DEMI-KV-OVERHEAD}.
 
 \section{Cross-Tenant Cache Sharing}\label{sec:sharing}
-\intent{Prefix-cache reuse across tenants is opt-in via a Shared-Prefix Group
-with a content-verified template. Cache-domain keys are tenant-salted; a
-non-member never resolves to a shared cache-domain key \req{DEMI-S1-DOMAIN}.}
+Prefix-cache reuse across tenants is opt-in via a Shared-Prefix Group with a
+content-verified template. Cache-domain keys are tenant-salted; a non-member
+never resolves to a shared cache-domain key \req{DEMI-S1-DOMAIN}.
 
 \subsection{Shared-Domain Isolation}\label{sec:sharing-s1}
-\intent{Membership is checked on the strongly consistent authorization path before
-any warmth discount is applied.}
+Membership and template match are checked on the strongly consistent
+authorization path before any warmth discount is applied. The registry resolves
+a shared cache-domain key only for a group member presenting content that
+matches the registered template; every other request falls back to a
+tenant-private key and can hit only its own warmth.
 
 \section{State Plane}\label{sec:state}
 Each backend publishes a block-granularity warmth map and live occupancy via
@@ -272,9 +277,15 @@ then optimize decode conditional on it \req{DEMI-PAIR-GREEDY}. Pairing regret is
 measured in shadow.
 
 \subsection{Live Migration}\label{sec:migration}
-\intent{Decode migration is chunked and abortable. Cutover commits only if
-estimated stall $\le \varepsilon\cdot\mathrm{ITL}$ \req{DEMI-MIG-SUBITL};
-otherwise the original placement is restored.}
+Decode migration is chunked and abortable: KV is copied to the target in
+background passes (the QuiesceOneStep loop), and cutover commits only if the
+estimated stall of the final step is $\le \varepsilon\cdot\mathrm{ITL}$
+\req{DEMI-MIG-SUBITL}; otherwise the original placement is restored. The target
+KV reservation is held during the move; on commit the source reservation is
+released, and on abort the target is released so the source placement is left
+untouched. \intent{The $\varepsilon\cdot\mathrm{ITL}$ budget is validated on
+reference fleet hardware (Track~C); on Track~A the cutover logic is exercised by
+property tests only.}
 
 \section{Control Plane}\label{sec:control}
 The pool-ratio controller adjusts prefill vs decode capacity share
