@@ -182,6 +182,7 @@ dependencies = [
 name = "demiurge-state"
 version = "0.1.0"
 dependencies = [
+ "demiurge-auth",
  "demiurge-cost",
 ]
 

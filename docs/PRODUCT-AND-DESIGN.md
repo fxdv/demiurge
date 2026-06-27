@@ -4,7 +4,7 @@
 
 *Human-readable product and design brief. Synthesized from [`README.md`](../README.md), [`ROADMAP.md`](../ROADMAP.md), and the living requirement registry. For machine-checked contracts, see [`design/requirements.toml`](../design/requirements.toml); for academic notation, see [`spec/demiurge.tex`](../spec/demiurge.tex) (PDF is optional).*
 
-**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **26 requirements** in the registry (**23 implemented**, **3 intended** for Track C: migration, tenant auth, corrector graduation). **Track B** engineering path green on Linux VM (XDP veth, kernel admit, io_uring production TCP `serve()`, `LOAD-TRACK-B-KERNEL` in Gate + linux-nightly); **production exit gates** (real NIC XDP under load, x86_64 p99 budget) remain open. Unified **Gate** CI workflow mirrors `./scripts/gate.sh`; **`'sim`** fleet replay + **`verify.sh`** harden tiers ship observable pseudo reports.
+**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **26 requirements** in the registry (**25 implemented**, **1 intended** for Track C: corrector graduation). **Track B** engineering path green on Linux VM (XDP veth, kernel admit, io_uring production TCP `serve()`, `LOAD-TRACK-B-KERNEL` in Gate + linux-nightly); **production exit gates** (real NIC XDP under load, x86_64 p99 budget) remain open. Unified **Gate** CI workflow mirrors `./scripts/gate.sh`; **`'sim`** fleet replay + **`verify.sh`** harden tiers ship observable pseudo reports.
 
 ---
 
@@ -14,9 +14,9 @@
 
 **The insight.** An inference request is not a packet. It is a **lease on stateful accelerator memory**. The valuable state on a GPU is the KV cache attached to a specific prompt prefix — not the TCP connection. Round-robin and least-connections ignore that completely.
 
-**What exists today.** A working Rust forwarder with cost-based routing, async prefill→decode flow, KV hand-off and memory barriers, warmth-aware placement, pool rebalancing (shadow mode), and userspace dataplane proofs — all enforced by CI gates, CPU benchmarks, and load/stress suites.
+**What exists today.** A working Rust forwarder with cost-based routing, async prefill→decode flow, KV hand-off and memory barriers, warmth-aware placement, pool rebalancing (shadow mode), userspace dataplane proofs, abortable migration-cutover logic, and tenant cache-domain isolation — all enforced by CI gates, CPU benchmarks, and load/stress suites.
 
-**What we are building toward.** Production-grade kernel admission at fleet scale (real NIC XDP under load), RDMA KV transfer, live migration, and safe multi-tenant cache sharing on real GPU clusters. io_uring L7 forwarding on the production TCP path is shipped; reference-hardware validation remains.
+**What we are building toward.** Production-grade kernel admission at fleet scale (real NIC XDP under load), RDMA KV transfer, and pool/corrector actuation on real GPU clusters. The abortable live-migration cutover logic and tenant cache-domain isolation already ship as portable, test-backed crates (Track A); io_uring L7 forwarding on the production TCP path is shipped. Reference-hardware validation — fleet-measured migration p99, GPU economics — remains.
 
 **Honest caveat.** Early proof is green on mock backends and local TCP. **Disruption depends on production economics** on real accelerators. We do not oversell kernel XDP or RDMA as shipped when they are still Track B/C work.
 
@@ -62,7 +62,7 @@ When prefill and decode share one pool, you get the worst of both worlds: comput
 
 - A replacement for vLLM, TGI, or TensorRT-LLM — we sit **in front of** inference workers.
 - A training platform or model compiler.
-- A finished multi-tenant SaaS — cross-tenant cache sharing is **design intent** (Phase 7).
+- A finished multi-tenant SaaS — the cache-domain **isolation** logic ships (Phase 7), but live-router tenant routing and billing are not wired.
 
 ---
 
@@ -99,7 +99,7 @@ When prefill and decode share one pool, you get the worst of both worlds: comput
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Design choice that matters:** warmth and occupancy are **eventually consistent on purpose**. A stale warmth read costs a cache miss — it never violates correctness. **Authorization** for shared cache lines (future) stays strongly consistent on the control plane.
+**Design choice that matters:** warmth and occupancy are **eventually consistent on purpose**. A stale warmth read costs a cache miss — it never violates correctness. **Authorization** for shared cache lines is resolved on a strongly consistent path — a synchronous Shared-Prefix Group registry today, CP consensus on a fleet — never on the AP plane, so a stale "authorized share" is impossible.
 
 ### The routing bet
 
@@ -146,13 +146,13 @@ Live count from `cargo xtask lint`:
 | 1 | Non-blocking route + fast path | **2 / 2** |
 | 2 | KV hand-off + memory barriers | **6 / 6** |
 | 3 | State plane (warmth, gossip) | **2 / 2** |
-| 4 | Control plane + pairing + shadow fleet | **4 / 4** |
+| 4 | Control plane + pairing + shadow fleet | **6 / 6** |
 | 5 | Dataplane proof (RCU + admit shed) | **2 / 2** |
-| 6 | Live migration | 0 / 1 |
-| 7 | Multi-tenant cache security | 0 / 1 |
+| 6 | Live migration (logic; fleet-p99 gate open) | **1 / 1** |
+| 7 | Multi-tenant cache security | **1 / 1** |
 | 8 | Corrector graduation to production | 1 / 2 |
 
-**21 implemented**, **3 intended** — tracked in [`design/requirements.toml`](../design/requirements.toml). The spec describes *target* behavior; the registry marks *shipped* vs *planned* so the two never blur.
+**25 implemented**, **1 intended** — tracked in [`design/requirements.toml`](../design/requirements.toml). The spec describes *target* behavior; the registry marks *shipped* vs *planned* so the two never blur.
 
 ### Development tracks
 
@@ -161,7 +161,7 @@ Live count from `cargo xtask lint`:
 | **A — Local proof** | macOS + Linux, mock TCP backends | **Done** (Phases 0–5) |
 | **A+ — Shadow tooling** | Trace replay, corrector shadow, fleet pilot | **Done** |
 | **B — Linux production** | XDP attach, io_uring forwarder, nightly binaries | **In progress** — engineering path green (`track-b-verify`); exit gates open |
-| **C — Fleet / GPU** | RDMA hand-off, migration, actuation at scale | **Planned** |
+| **C — Fleet / GPU** | RDMA hand-off, migration, actuation at scale | **In progress** — cache-domain isolation + migration cutover logic shipped (Track A); fleet-measured gates open |
 
 ### CPU hot path (release benchmarks)
 
@@ -248,9 +248,9 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 ### Track C — Fleet economics
 
 - [ ] RDMA KV hand-off (production transport)
-- [ ] Live migration with sub-ITL cutover budget
+- [ ] Live migration — abortable sub-ITL cutover **logic shipped** (Track A); fleet-measured p99 budget on reference hardware open
 - [ ] Pool autoscaler actuation on real GPU fractions (shadow → canary → prod)
-- [ ] Cross-tenant cache sharing with CP-strong authorization
+- [ ] Cross-tenant cache sharing — cache-domain isolation + auth registry **shipped** (Track A); live-router multi-tenant routing open
 - [ ] Learned corrector graduation (shadow exists today)
 
 ### Explicit non-goals for near term

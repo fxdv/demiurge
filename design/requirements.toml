@@ -282,22 +282,39 @@ tests = ["fast_path_ratio_tracks_colocated_routes"]
 [[requirement]]
 id = "DEMI-MIG-SUBITL"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 6
 section = "8.5"
 summary = "Migration cutover never commits unless est <= eps * ITL budget."
-requires_test = false
+requires_test = true
+tests = [
+    "migration_aborts_when_over_budget",
+    "budget_uses_canonical_epsilon",
+    "quiesce_one_step_accumulates_estimated_stall",
+    "record_migration_stall_tracks_estimated_vs_measured",
+    "migration_commit_transfers_reservation",
+    "migration_abort_restores_source_reservation",
+    "ledger_consistent_after_commit_and_abort",
+]
 
 # --- Phase 7: multi-tenancy & cache security ----------------------------
 
 [[requirement]]
 id = "DEMI-S1-DOMAIN"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 7
 section = "6.1"
 summary = "A non-member never obtains a shared cache-domain key."
-requires_test = false
+requires_test = true
+tests = [
+    "non_member_never_resolves_shared_key",
+    "member_with_matching_template_resolves_shared_key",
+    "template_mismatch_no_shared_key",
+    "non_member_isolated_under_fuzz",
+    "tenant_private_warmth_not_shared_across_tenants",
+    "shared_group_members_share_salted_warmth",
+]
 
 # --- Phase 8: learned corrector graduation --------------------------------
 

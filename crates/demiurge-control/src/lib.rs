@@ -26,7 +26,10 @@ pub use fleet_sim::{
     eval_fleet_sim_gate, jitter_delay_us, load_fleet_trace, shadow_pilot_for_trace, tier_delay_us,
     window_knobs, FleetSimReport, FleetWindowResult, SimBaseKnobs, WindowKnobs,
 };
-pub use migration::{evaluate_cutover, MigrationBudget, MigrationDecision};
+pub use migration::{
+    evaluate_cutover, MigrationBudget, MigrationDecision, MigrationStallLog, MigrationStallSample,
+    QuiesceModel, QuiesceOutcome,
+};
 pub use pairing::{
     greedy_pair, oracle_pair, pairing_regret, pairing_regret_targets, select_decode,
     select_decode_target, select_prefill, select_prefill_target, PairingTarget,
@@ -239,6 +242,29 @@ impl ReservationGuard {
             self.released = true;
         }
     }
+
+    /// Resolve a live migration whose target reservation is `target`. On
+    /// `Commit` the source (`self`) is released and the target survives; on
+    /// `Abort` the target is released and the source survives untouched.
+    /// Exactly one reservation remains, so the fleet total is single-counted
+    /// after the call. [DEMI-MIG-SUBITL]
+    #[must_use]
+    pub fn resolve_migration(
+        self,
+        target: ReservationGuard,
+        decision: MigrationDecision,
+    ) -> ReservationGuard {
+        match decision {
+            MigrationDecision::Commit => {
+                self.release();
+                target
+            }
+            MigrationDecision::Abort => {
+                target.release();
+                self
+            }
+        }
+    }
 }
 
 impl Drop for ReservationGuard {
@@ -277,5 +303,59 @@ mod tests {
         assert_eq!(ledger.fleet_reserved(), capacity);
         drop(guards);
         assert_eq!(ledger.fleet_reserved(), 0);
+    }
+
+    #[test]
+    fn migration_commit_transfers_reservation() {
+        let ledger = ReservationLedger::new(10_000);
+        let source = ledger.try_reserve(1, 500).expect("source");
+        // Transient double-reservation during the chunked move.
+        let target = ledger.try_reserve(2, 500).expect("target");
+        assert_eq!(ledger.fleet_reserved(), 1_000);
+
+        let survivor = source.resolve_migration(target, MigrationDecision::Commit);
+        // Source released, target kept: single reservation, on the target id.
+        assert_eq!(survivor.request_id(), 2);
+        assert_eq!(ledger.fleet_reserved(), 500);
+        drop(survivor);
+        assert_eq!(ledger.fleet_reserved(), 0);
+    }
+
+    #[test]
+    fn migration_abort_restores_source_reservation() {
+        let ledger = ReservationLedger::new(10_000);
+        let source = ledger.try_reserve(1, 500).expect("source");
+        let target = ledger.try_reserve(2, 500).expect("target");
+        assert_eq!(ledger.fleet_reserved(), 1_000);
+
+        let survivor = source.resolve_migration(target, MigrationDecision::Abort);
+        // Target released, original source placement untouched.
+        assert_eq!(survivor.request_id(), 1);
+        assert_eq!(ledger.fleet_reserved(), 500);
+        drop(survivor);
+        assert_eq!(ledger.fleet_reserved(), 0);
+    }
+
+    #[test]
+    fn ledger_consistent_after_commit_and_abort() {
+        let ledger = ReservationLedger::new(10_000);
+
+        // Commit path.
+        let s1 = ledger.try_reserve(1, 400).expect("s1");
+        let t1 = ledger.try_reserve(2, 400).expect("t1");
+        let g1 = s1.resolve_migration(t1, MigrationDecision::Commit);
+
+        // Abort path, concurrently held.
+        let s2 = ledger.try_reserve(3, 600).expect("s2");
+        let t2 = ledger.try_reserve(4, 600).expect("t2");
+        let g2 = s2.resolve_migration(t2, MigrationDecision::Abort);
+
+        // One survivor per migration: 400 (target of commit) + 600 (source of abort).
+        assert_eq!(ledger.fleet_reserved(), 1_000);
+        drop(g1);
+        drop(g2);
+        assert_eq!(ledger.fleet_reserved(), 0);
+        // No phantom releases occurred (released ids were not double-counted).
+        assert_eq!(ledger.metrics().kv_reservation_error, 0);
     }
 }

@@ -37,7 +37,7 @@ Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in
 |-------|----------|-------|------------|--------|
 | **A — Local development** | macOS (primary), portable Rust | Phases 0–5 proof | `./scripts/gate.sh`, optional `./scripts/verify.sh full` | **Complete** |
 | **B — Linux production** | Linux x86_64 | Kernel dataplane (XDP, io_uring), `linux-nightly` | Gate Track B, `./scripts/track-b-verify.sh` | **In progress** |
-| **C — Fleet and scale** | Linux + GPU fleet | Migration, tenancy, corrector production | Reference hardware | **Planned** |
+| **C — Fleet and scale** | Linux + GPU fleet | Migration, tenancy, corrector production | Reference hardware | **In progress** (P6 + P7 logic done on Track A; fleet-measured gates open) |
 
 ### Platform matrix
 
@@ -51,7 +51,8 @@ Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in
 | XDP attach, io_uring forwarder | — | Yes | — |
 | `linux-nightly` pre-release | — | Yes | — |
 | Production RDMA transport | Mock | Mock | Planned |
-| Live migration, pool actuation at scale | — | — | Planned |
+| Live migration cutover logic + atomic KV transfer | Yes | Yes | Fleet p99 gate open |
+| Pool actuation at scale | — | — | Planned |
 
 **Scope note.** `DEMI-XDP-SHED` at `implemented` is the **userspace proof** (Track A). Runtime XDP shedding before decode saturation is Track B (Phase 5+).
 
@@ -70,8 +71,8 @@ Live counts: `cargo xtask lint`.
 | 4 | A | Control plane and pairing | 2 / 2 | Complete |
 | 5 | A | Data plane hardening (proof) | 2 / 2 | Complete |
 | 5+ | B | Data plane production | — | In progress |
-| 6 | C | Live migration | 0 / 1 | Planned |
-| 7 | C | Multi-tenancy and cache security | 0 / 1 | Planned |
+| 6 | C | Live migration | 1 / 1 | Logic done (Track A; fleet p99 gate open) |
+| 7 | C | Multi-tenancy and cache security | 1 / 1 | Logic done (Track A; live-router routing open) |
 | 8 | C | Learned corrector graduation | 0 / 1 | Planned |
 
 ---
@@ -285,9 +286,11 @@ Exit gates are measured on **reference fleet hardware**, not mock TCP alone.
 
 **Objective.** Abortable chunked migration; cutover only if estimated stall ≤ ε × ITL; atomic KV reservation transfer.
 
-**Requirement.** `DEMI-MIG-SUBITL` (planned).
+**Requirement.** `DEMI-MIG-SUBITL` (implemented — Track A logic + tests; fleet p99 gate open).
 
-**Risk.** Sub-ITL cutover must be **measured** on target hardware; otherwise migration stays shadow-only.
+**Status.** Abortable chunked quiesce model, migration-stall telemetry, and atomic `ReservationGuard::resolve_migration` (commit/abort) ship as portable control-plane logic.
+
+**Risk.** Sub-ITL cutover must still be **measured** on target hardware before fleet actuation; otherwise migration stays shadow-only.
 
 ---
 
@@ -295,7 +298,9 @@ Exit gates are measured on **reference fleet hardware**, not mock TCP alone.
 
 **Objective.** Opt-in prefix-cache sharing with CP-authorized membership; AP warmth, CP membership.
 
-**Requirement.** `DEMI-S1-DOMAIN` (planned).
+**Requirement.** `DEMI-S1-DOMAIN` (implemented — Track A logic + tests; live-router routing open).
+
+**Status.** `demiurge-auth` ships the Shared-Prefix Group registry with content-verified templates and tenant-salted cache-domain keys; `demiurge-state` gates salted warmth lookups on synchronous membership. Wiring the gated lookup into the live router cost path remains open.
 
 ---
 
