@@ -81,6 +81,24 @@ flowchart TB
 
 ---
 
+## Repository layout
+
+| Path | What it is |
+|------|------------|
+| [`crates/demiurge-cost/`](crates/demiurge-cost/) | Cost-factor algebra (`C>0` by construction) and property tests. |
+| [`crates/demiurge-router/`](crates/demiurge-router/) | Phase-aware forwarder: async route, fast path, KV pool integration. |
+| [`crates/demiurge-handoff/`](crates/demiurge-handoff/) | KV hand-off descriptor, registry, TCP transport (RDMA trait behind it). |
+| [`crates/demiurge-control/`](crates/demiurge-control/) | Reservation ledger + TTL release, length predictor, greedy pairing, pool rebalancer (shadow), migration cutover evaluation, corrector shadow/graduation. |
+| [`crates/demiurge-state/`](crates/demiurge-state/) | AP state plane: KV warmth map, occupancy gossip, RCU state snapshots. |
+| [`crates/demiurge-auth/`](crates/demiurge-auth/) | Tenant cache-domain authorization for opt-in shared-prefix cache groups (Track C). |
+| [`crates/demiurge-dataplane/`](crates/demiurge-dataplane/) | RCU routing table, admit bucket, XDP admit-shed + io_uring forwarder (Linux). |
+| [`design/`](design/) | Single source of truth: `demiurge.params.toml`, `requirements.toml`, bench/load gate thresholds. |
+| [`spec/`](spec/) | Target design (`demiurge.tex`); `spec/generated/` is `@generated` — never hand-edited. |
+| [`xtask/`](xtask/) | `gen`, `lint`, `spec`, `bench-gate`, `load-bench`, `fleet-pilot`. |
+| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `verify.sh`, `publish.sh`, Track A/B verify, [`linux-vm/`](scripts/linux-vm/). |
+
+---
+
 ## Design contract
 
 ```text
