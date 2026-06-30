@@ -77,12 +77,14 @@ gates remain open):
 \textbf{Not shipped (Track~B exit gates / Track~C).} XDP shed on production NIC
 under fleet load, data-plane p99 admit budget on x86\_64 reference hardware under
 CP slowdown, pool rebalancing \emph{actuation} in production fleets, RDMA production
-hand-off, the sub-ITL migration cutover budget \emph{measured on reference fleet
-hardware} (\S\ref{sec:migration}), and corrector graduation
-(\S\ref{sec:corrector}) remain \textbf{design intent} tracked in
+hand-off, and the sub-ITL migration cutover budget \emph{measured on reference fleet
+hardware} (\S\ref{sec:migration}) remain \textbf{design intent} tracked in
 \texttt{design/requirements.toml} and \texttt{ROADMAP.md}. Cross-tenant
-cache-domain isolation (\S\ref{sec:sharing}) and the abortable migration cutover
-\emph{logic} ship as portable, test-backed crates.
+cache-domain isolation (\S\ref{sec:sharing}), the abortable migration cutover
+\emph{logic} (\S\ref{sec:migration}), and the corrector shadow $\to$ canary
+$\to$ production graduation state machine (\S\ref{sec:corrector-grad}) ship
+as portable, test-backed crates; only their reference-fleet rollout onto
+live traffic remains Track~C.
 
 \begin{table}[h]
   \centering
@@ -228,10 +230,23 @@ causes miss only \req{DEMI-STATE-AP}.
 The analytic corrector multiplier $\delta$ is clamped to $[1-\alpha,1+\alpha]$
 \req{DEMI-CORR-CLAMP}. Shadow mode logs $(\text{features}, \ln C, t_{\mathrm{obs}})$
 and trains a bounded $\delta$ offline without actuation \req{DEMI-CORR-SHADOW}.
-\intent{Production use of a learned $\delta$ follows a
-shadow $\to$ canary $\to$ prod graduation path; promotion requires no clamp
-saturation and no violation of \req{DEMI-COST-POS} \req{DEMI-CORR-GRAD}. Until
-Phase~8, the router uses $\delta=1$.}
+
+\subsection{Graduation}\label{sec:corrector-grad}
+Production use of a learned $\delta$ follows a one-way-gated
+shadow $\to$ canary $\to$ production state machine. Each evaluated window
+promotes one stage only if the trained $\delta$ is strictly inside the
+clamp envelope (not pinned to $1-\alpha$ or $1+\alpha$) and the observed
+violation count and goodput improvement clear the graduation gate;
+otherwise the controller demotes straight back to \emph{Shadow}, including
+out of \emph{Production} — there is no stage at which a corrector keeps
+actuating once it has been seen to saturate or regress
+\req{DEMI-CORR-GRAD}. This keeps graduation consistent with
+\req{DEMI-COST-POS}: a corrector that is clamp-saturated or has caused an
+observed cost-positivity violation never holds production traffic.
+\intent{The reference-fleet rollout of this state machine — wiring its
+window cadence and violation counters to live production traffic instead
+of replayed/shadow samples — is Track C work measured on fleet hardware.
+Until that rollout, the router uses $\delta=1$.}
 
 \section{Routing and Migration}\label{sec:routing}
 

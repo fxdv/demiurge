@@ -4,7 +4,7 @@
 
 *Human-readable product and design brief. Synthesized from [`README.md`](../README.md), [`ROADMAP.md`](../ROADMAP.md), and the living requirement registry. For machine-checked contracts, see [`design/requirements.toml`](../design/requirements.toml); for academic notation, see [`spec/demiurge.tex`](../spec/demiurge.tex) (PDF is optional).*
 
-**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **26 requirements** in the registry (**25 implemented**, **1 intended** for Track C: corrector graduation). **Track B** engineering path green on Linux VM (XDP veth, kernel admit, io_uring production TCP `serve()`, `LOAD-TRACK-B-KERNEL` in Gate + linux-nightly); **production exit gates** (real NIC XDP under load, x86_64 p99 budget) remain open. Unified **Gate** CI workflow mirrors `./scripts/gate.sh`; **`'sim`** fleet replay + **`verify.sh`** harden tiers ship observable pseudo reports.
+**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **26 requirements** in the registry, **all 26 implemented and test-backed** — Phases 6–8 (live migration, multi-tenant cache security, corrector graduation) ship as portable Track A logic; their reference-fleet actuation gates remain open Track C work. **Track B** engineering path green on Linux VM (XDP veth, kernel admit, io_uring production TCP `serve()`, `LOAD-TRACK-B-KERNEL` in Gate + linux-nightly); **production exit gates** (real NIC XDP under load, x86_64 p99 budget) remain open. Unified **Gate** CI workflow mirrors `./scripts/gate.sh`; **`'sim`** fleet replay + **`verify.sh`** harden tiers ship observable pseudo reports.
 
 ---
 
@@ -14,9 +14,9 @@
 
 **The insight.** An inference request is not a packet. It is a **lease on stateful accelerator memory**. The valuable state on a GPU is the KV cache attached to a specific prompt prefix — not the TCP connection. Round-robin and least-connections ignore that completely.
 
-**What exists today.** A working Rust forwarder with cost-based routing, async prefill→decode flow, KV hand-off and memory barriers, warmth-aware placement, pool rebalancing (shadow mode), userspace dataplane proofs, abortable migration-cutover logic, and tenant cache-domain isolation — all enforced by CI gates, CPU benchmarks, and load/stress suites.
+**What exists today.** A working Rust forwarder with cost-based routing, async prefill→decode flow, KV hand-off and memory barriers, warmth-aware placement, pool rebalancing (shadow mode), userspace dataplane proofs, abortable migration-cutover logic, tenant cache-domain isolation, and a corrector shadow→canary→production graduation state machine — all enforced by CI gates, CPU benchmarks, and load/stress suites.
 
-**What we are building toward.** Production-grade kernel admission at fleet scale (real NIC XDP under load), RDMA KV transfer, and pool/corrector actuation on real GPU clusters. The abortable live-migration cutover logic and tenant cache-domain isolation already ship as portable, test-backed crates (Track A); io_uring L7 forwarding on the production TCP path is shipped. Reference-hardware validation — fleet-measured migration p99, GPU economics — remains.
+**What we are building toward.** Production-grade kernel admission at fleet scale (real NIC XDP under load), RDMA KV transfer, and pool/corrector actuation on real GPU clusters. The abortable live-migration cutover logic, tenant cache-domain isolation, and corrector graduation state machine already ship as portable, test-backed crates (Track A); io_uring L7 forwarding on the production TCP path is shipped. Reference-hardware validation — fleet-measured migration p99, live production traffic driving the graduation windows, GPU economics — remains.
 
 **Honest caveat.** Early proof is green on mock backends and local TCP. **Disruption depends on production economics** on real accelerators. We do not oversell kernel XDP or RDMA as shipped when they are still Track B/C work.
 
@@ -128,7 +128,7 @@ Each backend gets a score. Lower is better. The score combines:
 - **Time core** — how long work will take on this backend (always strictly positive).
 - **Barriers** — queue pressure, fleet KV headroom (Φ barrier raises cost when decode pool is full).
 - **Discounts** — warmth hits reduce cost (bounded; never below zero in log space).
-- **Corrector** — bounded multiplier δ ∈ [1−α, 1+α]; learned correction in **shadow mode** today.
+- **Corrector** — bounded multiplier δ ∈ [1−α, 1+α]; the router runs δ=1 in production today, with a shadow → canary → production graduation state machine shipped and test-backed but not yet wired to live traffic.
 
 **Invariant we refuse to break:** cost is always **> 0 by construction** (log-space composition). Broken telemetry **fails expensive**, never cheap — a sick backend cannot be accidentally preferred.
 
@@ -150,9 +150,9 @@ Live count from `cargo xtask lint`:
 | 5 | Dataplane proof (RCU + admit shed) | **2 / 2** |
 | 6 | Live migration (logic; fleet-p99 gate open) | **1 / 1** |
 | 7 | Multi-tenant cache security | **1 / 1** |
-| 8 | Corrector graduation to production | 1 / 2 |
+| 8 | Corrector graduation to production | **2 / 2** |
 
-**25 implemented**, **1 intended** — tracked in [`design/requirements.toml`](../design/requirements.toml). The spec describes *target* behavior; the registry marks *shipped* vs *planned* so the two never blur.
+**26 implemented**, **0 intended** — tracked in [`design/requirements.toml`](../design/requirements.toml). Phases 6–8 are logic-complete and test-backed on Track A; their reference-fleet rollout onto live traffic is tracked separately in the Track C roadmap below, not as an open requirement. The spec describes *target* behavior; the registry marks *shipped* vs *planned* so the two never blur.
 
 ### Development tracks
 
@@ -161,7 +161,7 @@ Live count from `cargo xtask lint`:
 | **A — Local proof** | macOS + Linux, mock TCP backends | **Done** (Phases 0–5) |
 | **A+ — Shadow tooling** | Trace replay, corrector shadow, fleet pilot | **Done** |
 | **B — Linux production** | XDP attach, io_uring forwarder, nightly binaries | **In progress** — engineering path green (`track-b-verify`); exit gates open |
-| **C — Fleet / GPU** | RDMA hand-off, migration, actuation at scale | **In progress** — cache-domain isolation + migration cutover logic shipped (Track A); fleet-measured gates open |
+| **C — Fleet / GPU** | RDMA hand-off, migration, actuation at scale | **In progress** — cache-domain isolation, migration cutover logic, and corrector graduation state machine shipped (Track A); fleet-measured gates open |
 
 ### CPU hot path (release benchmarks)
 
@@ -251,7 +251,7 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 - [ ] Live migration — abortable sub-ITL cutover **logic shipped** (Track A); fleet-measured p99 budget on reference hardware open
 - [ ] Pool autoscaler actuation on real GPU fractions (shadow → canary → prod)
 - [ ] Cross-tenant cache sharing — cache-domain isolation + auth registry **shipped** (Track A); live-router multi-tenant routing open
-- [ ] Learned corrector graduation (shadow exists today)
+- [ ] Learned corrector graduation — shadow → canary → production state machine **shipped** (Track A); wiring window cadence + violation counters to live production traffic open
 
 ### Explicit non-goals for near term
 

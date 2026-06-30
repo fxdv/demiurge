@@ -321,8 +321,20 @@ tests = [
 [[requirement]]
 id = "DEMI-CORR-GRAD"
 kind = "normative"
-status = "intended"
+status = "implemented"
 phase = 8
 section = "7"
 summary = "Corrector graduates shadow to prod only without clamp or C>0 violations."
-requires_test = false
+requires_test = true
+tests = [
+    "corrector_graduation_requires_zero_violations_and_goodput",
+    "is_clamp_saturated_covers_boundary_and_invalid_values",
+    "healthy_window_promotes_shadow_to_canary",
+    "two_healthy_windows_reach_production",
+    "production_holds_under_continued_health",
+    "violation_during_canary_rolls_back_to_shadow",
+    "violation_during_production_rolls_back_to_shadow",
+    "saturated_delta_blocks_promotion_even_with_zero_violations",
+    "saturation_in_canary_rolls_back_even_though_goodput_looks_fine",
+    "hold_at_shadow_is_not_reported_as_rollback",
+]
