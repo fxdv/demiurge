@@ -37,7 +37,7 @@ Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in
 |-------|----------|-------|------------|--------|
 | **A — Local development** | macOS (primary), portable Rust | Phases 0–5 proof | `./scripts/gate.sh`, optional `./scripts/verify.sh full` | **Complete** |
 | **B — Linux production** | Linux x86_64 | Kernel dataplane (XDP, io_uring), `linux-nightly` | Gate Track B, `./scripts/track-b-verify.sh` | **In progress** |
-| **C — Fleet and scale** | Linux + GPU fleet | Migration, tenancy, corrector production | Reference hardware | **In progress** (P6 + P7 logic done on Track A; fleet-measured gates open) |
+| **C — Fleet and scale** | Linux + GPU fleet | Migration, tenancy, corrector production | Reference hardware | **In progress** (P6 + P7 + P8 logic done on Track A; fleet-measured gates open) |
 
 ### Platform matrix
 
@@ -52,6 +52,7 @@ Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in
 | `linux-nightly` pre-release | — | Yes | — |
 | Production RDMA transport | Mock | Mock | Planned |
 | Live migration cutover logic + atomic KV transfer | Yes | Yes | Fleet p99 gate open |
+| Corrector shadow → canary → production graduation state machine | Yes | Yes | Live-traffic wiring open |
 | Pool actuation at scale | — | — | Planned |
 
 **Scope note.** `DEMI-XDP-SHED` at `implemented` is the **userspace proof** (Track A). Runtime XDP shedding before decode saturation is Track B (Phase 5+).
@@ -73,7 +74,7 @@ Live counts: `cargo xtask lint`.
 | 5+ | B | Data plane production | — | In progress |
 | 6 | C | Live migration | 1 / 1 | Logic done (Track A; fleet p99 gate open) |
 | 7 | C | Multi-tenancy and cache security | 1 / 1 | Logic done (Track A; live-router routing open) |
-| 8 | C | Learned corrector graduation | 0 / 1 | Planned |
+| 8 | C | Learned corrector graduation | 2 / 2 | Logic done (Track A; live-traffic wiring open) |
 
 ---
 
@@ -308,9 +309,11 @@ Exit gates are measured on **reference fleet hardware**, not mock TCP alone.
 
 **Objective.** Shadow → canary → production corrector without violating `DEMI-CORR-CLAMP` or `DEMI-COST-POS`. Production actuation only after Phase 4 exit with corrector off.
 
-**Requirement.** `DEMI-CORR-GRAD` (planned).
+**Requirement.** `DEMI-CORR-GRAD` (implemented — Track A logic + tests; live-traffic wiring open).
 
-Shadow pipeline and offline eval are complete on Track A (`fleet-pilot`, corrector shadow tests).
+**Status.** `GraduationController` (`demiurge-control::corrector_grad`) implements the one-way-gated shadow → canary → production state machine: each evaluated window promotes one stage only if the trained δ clears `DEMI-CORR-CLAMP` (not pinned to the envelope boundary, checked via `is_clamp_saturated`) and the violation/goodput gate; any failure — at any stage, including `Production` — demotes straight back to `Shadow`. Shadow pipeline and offline eval are complete on Track A (`fleet-pilot`, corrector shadow tests).
+
+**Risk.** Wiring the controller's window cadence and violation counters to live production traffic (vs. replayed/shadow samples) is Track C work; until that rollout the router runs `δ=1`.
 
 ---
 

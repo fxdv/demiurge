@@ -14,7 +14,10 @@ mod rdma_cost_shadow;
 mod rebalancer;
 mod scored;
 
-pub use corrector_grad::{eval_corrector_graduation, GraduationGate};
+pub use corrector_grad::{
+    eval_corrector_graduation, is_clamp_saturated, GraduationController, GraduationGate,
+    GraduationStage, GraduationStep,
+};
 pub use corrector_shadow::{
     delta_within_envelope, eval_goodput_improvement, train_bounded_delta, CorrectorShadowLog,
     CorrectorShadowSample,
