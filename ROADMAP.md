@@ -52,6 +52,7 @@ Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in
 | `linux-nightly` pre-release | — | Yes | — |
 | Production RDMA transport | Mock | Mock | Planned |
 | Live migration cutover logic + atomic KV transfer | Yes | Yes | Fleet p99 gate open |
+| Cross-tenant cache-domain isolation, wired into the router | Yes | Yes | Real tenant auth/content verification open |
 | Corrector shadow → canary → production graduation state machine | Yes | Yes | Live-traffic wiring open |
 | Pool actuation at scale | — | — | Planned |
 
@@ -73,7 +74,7 @@ Live counts: `cargo xtask lint`.
 | 5 | A | Data plane hardening (proof) | 2 / 2 | Complete |
 | 5+ | B | Data plane production | — | In progress |
 | 6 | C | Live migration | 1 / 1 | Logic done (Track A; fleet p99 gate open) |
-| 7 | C | Multi-tenancy and cache security | 1 / 1 | Logic done (Track A; live-router routing open) |
+| 7 | C | Multi-tenancy and cache security | 1 / 1 | Logic done, wired into the router (Track A; fleet-traffic rollout open) |
 | 8 | C | Learned corrector graduation | 2 / 2 | Logic done (Track A; live-traffic wiring open) |
 
 ---
@@ -299,9 +300,9 @@ Exit gates are measured on **reference fleet hardware**, not mock TCP alone.
 
 **Objective.** Opt-in prefix-cache sharing with CP-authorized membership; AP warmth, CP membership.
 
-**Requirement.** `DEMI-S1-DOMAIN` (implemented — Track A logic + tests; live-router routing open).
+**Requirement.** `DEMI-S1-DOMAIN` (implemented — Track A logic, tests, and live-router wiring; fleet-traffic rollout open).
 
-**Status.** `demiurge-auth` ships the Shared-Prefix Group registry with content-verified templates and tenant-salted cache-domain keys; `demiurge-state` gates salted warmth lookups on synchronous membership. Wiring the gated lookup into the live router cost path remains open.
+**Status.** `demiurge-auth` ships the Shared-Prefix Group registry with content-verified templates and tenant-salted cache-domain keys; `demiurge-state` gates salted warmth lookups on synchronous membership. `demiurge-router` now wires this into the live routing decision: `Router::with_cache_registry` attaches the registry, and `route_with_identity` gates the short-context warmth override and long-context prefill selection through `gated_hit_strength` — proven end-to-end against real `Backend`/`Router` selection (`p7_cache_isolation` integration tests), not just at the state-plane unit level. `route` (no identity) is unchanged. What remains open is wiring real tenant authentication and content verification — currently the caller's responsibility per `RequestIdentity`'s contract — onto live production traffic.
 
 ---
 

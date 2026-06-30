@@ -15,6 +15,7 @@ name = "demiurge_router"
 path = "src/lib.rs"
 
 [dependencies]
+demiurge-auth = { path = "../demiurge-auth" }
 demiurge-cost = { path = "../demiurge-cost" }
 demiurge-control = { path = "../demiurge-control" }
 demiurge-dataplane = { path = "../demiurge-dataplane" }

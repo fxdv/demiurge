@@ -30,8 +30,9 @@ use demiurge_dataplane::{admit_capacity_for_pi, AdmitBucket, DataPlaneSnapshot};
 use demiurge_handoff::{
     parse_prefill_handoff, HandoffRegistry, HandoffTransport, HeaderPassthroughTransport,
 };
-use demiurge_state::default_routing_blocks;
+use demiurge_state::{default_routing_blocks, gated_hit_strength};
 
+pub use demiurge_auth::{GroupId, PrefixFingerprint, SharedPrefixGroupRegistry, TenantId};
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
 #[cfg(target_os = "linux")]
 pub use demiurge_dataplane::IoUringProxySession;
@@ -84,6 +85,23 @@ impl Default for RequestId {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Already-authenticated request identity for cache-domain isolation.
+/// [DEMI-S1-DOMAIN]
+///
+/// The router never authenticates a tenant or verifies content itself —
+/// the caller establishes `tenant` and `content_fp` on its own strongly
+/// consistent path (see [`SharedPrefixGroupRegistry`]) before calling
+/// [`route_with_identity`]. The router's job is only to resolve the
+/// cache-domain key for that identity and measure warmth under it, so a
+/// non-member or template mismatch can discount against nothing but its
+/// own tenant-private warmth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestIdentity {
+    pub tenant: TenantId,
+    pub group: GroupId,
+    pub content_fp: PrefixFingerprint,
 }
 
 /// Telemetry produced when prefill finishes; feeds decode placement.
@@ -220,6 +238,27 @@ impl Backend {
         decode_pool: bool,
         pool_pi: f64,
     ) -> Cost {
+        self.cost_with_isolation_pi(extra, snapshot, blocks, decode_pool, pool_pi, None)
+    }
+
+    /// `cost_with_warmth_pi`, but the warmth discount is gated by cache-domain
+    /// isolation. [DEMI-S1-DOMAIN]
+    ///
+    /// `isolation` is `Some((registry, identity))` for an already-authenticated
+    /// request; the discount is then measured under the cache-domain key the
+    /// registry resolves for `identity` — a non-member or template mismatch
+    /// falls back to a tenant-private key and can only ever discount against
+    /// its own warmth, never another tenant's shared cache. `None` is
+    /// identical to [`Self::cost_with_warmth_pi`].
+    pub fn cost_with_isolation_pi(
+        &self,
+        extra: &[BarrierFactor],
+        snapshot: Option<&StateSnapshot>,
+        blocks: &[u64],
+        decode_pool: bool,
+        pool_pi: f64,
+        isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
+    ) -> Cost {
         let mut discounts = Vec::new();
         if let Some(snap) = snapshot {
             let pool = if decode_pool {
@@ -228,7 +267,18 @@ impl Backend {
                 &snap.prefill
             };
             if let Some(bs) = pool.get(&self.label) {
-                if let Some(d) = warmth_discount(bs.warmth.hit_strength(blocks)) {
+                let strength = match isolation {
+                    Some((registry, identity)) => gated_hit_strength(
+                        &bs.warmth,
+                        registry,
+                        identity.tenant,
+                        identity.group,
+                        identity.content_fp,
+                        blocks,
+                    ),
+                    None => bs.warmth.hit_strength(blocks),
+                };
+                if let Some(d) = warmth_discount(strength) {
                     discounts.push(d);
                 }
             }
@@ -294,11 +344,15 @@ impl PairingTarget for Backend {
     }
 }
 
-fn select_prefill_with_pi(
+/// Minimum-cost prefill selection over `candidates`, with the warmth discount
+/// driving the choice optionally gated by cache-domain isolation.
+/// [DEMI-S1-DOMAIN]
+fn select_prefill_with_identity_pi(
     candidates: &[Arc<Backend>],
     snapshot: Option<&StateSnapshot>,
     prompt_tokens: u64,
     pool_pi: f64,
+    isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
 ) -> Option<Arc<Backend>> {
     if snapshot.is_none() {
         return select_with_barriers_pi(candidates, &[], pool_pi, true);
@@ -307,10 +361,10 @@ fn select_prefill_with_pi(
     candidates
         .iter()
         .min_by(|a, b| {
-            a.cost_with_warmth_pi(&[], snapshot, &blocks, false, pool_pi)
+            a.cost_with_isolation_pi(&[], snapshot, &blocks, false, pool_pi, isolation)
                 .ln()
                 .total_cmp(
-                    &b.cost_with_warmth_pi(&[], snapshot, &blocks, false, pool_pi)
+                    &b.cost_with_isolation_pi(&[], snapshot, &blocks, false, pool_pi, isolation)
                         .ln(),
                 )
         })
@@ -468,6 +522,10 @@ pub struct Router {
     disagg_routes: AtomicU64,
     handoff_transport: Option<Arc<dyn HandoffTransport>>,
     rdma_routing: bool,
+    /// Shared-Prefix Group authority for cache-domain isolation; `None`
+    /// disables identity-gated routing entirely (`route_with_identity`
+    /// then behaves exactly like `route`). [DEMI-S1-DOMAIN]
+    cache_registry: Option<Arc<SharedPrefixGroupRegistry>>,
 }
 
 impl Clone for Router {
@@ -491,6 +549,7 @@ impl Clone for Router {
             disagg_routes: AtomicU64::new(self.disagg_routes.load(Ordering::Relaxed)),
             handoff_transport: self.handoff_transport.clone(),
             rdma_routing: self.rdma_routing,
+            cache_registry: self.cache_registry.clone(),
         }
     }
 }
@@ -575,6 +634,7 @@ impl Router {
             disagg_routes: AtomicU64::new(0),
             handoff_transport: None,
             rdma_routing: rdma_routing_enabled(),
+            cache_registry: None,
         }
     }
 
@@ -619,6 +679,7 @@ impl Router {
             disagg_routes: AtomicU64::new(0),
             handoff_transport: Some(Self::default_handoff_transport()),
             rdma_routing: rdma_routing_enabled(),
+            cache_registry: None,
         };
         (router, ledger, handoffs)
     }
@@ -645,6 +706,19 @@ impl Router {
     pub fn with_rdma_routing(mut self, enabled: bool) -> Self {
         self.rdma_routing = enabled;
         self
+    }
+
+    /// Attach a Shared-Prefix Group authority; enables [`route_with_identity`]
+    /// to gate warmth discounts by cache-domain isolation. [DEMI-S1-DOMAIN]
+    #[must_use]
+    pub fn with_cache_registry(mut self, registry: Arc<SharedPrefixGroupRegistry>) -> Self {
+        self.cache_registry = Some(registry);
+        self
+    }
+
+    #[must_use]
+    pub fn cache_registry(&self) -> Option<&Arc<SharedPrefixGroupRegistry>> {
+        self.cache_registry.as_ref()
     }
 
     /// Inject trace window pressure and publish π (fleet replay actuation; bypasses hysteresis).
@@ -1165,6 +1239,35 @@ fn pool_pressure(router: &Router, fp_share: f64) -> PoolPressure {
 
 /// Classify admission path from the HTTP head. [ALG-ROUTE] [DEMI-SHORT-FASTPATH] [DEMI-WARM-DISCOUNT]
 pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
+    route_impl(router, head, None)
+}
+
+/// `route`, but warmth-driven decisions are gated by cache-domain isolation.
+/// [DEMI-S1-DOMAIN]
+///
+/// When both `router.cache_registry()` and `identity` are present, the
+/// short-context warmth override and the long-context prefill selection
+/// measure warmth only under the cache-domain key the registry resolves
+/// for `identity` — exactly [`demiurge_state::gated_hit_strength`] applied
+/// on the live routing path, not just at the state-plane unit level. A
+/// non-member or template mismatch can therefore only ever benefit from
+/// its own tenant-private warmth, never another tenant's shared cache.
+/// Missing either the registry or the identity falls back to identical
+/// behavior as [`route`].
+pub fn route_with_identity(
+    router: &Router,
+    head: &[u8],
+    identity: Option<&RequestIdentity>,
+) -> Result<RoutePath, RouteError> {
+    let isolation = router.cache_registry.as_deref().zip(identity);
+    route_impl(router, head, isolation)
+}
+
+fn route_impl(
+    router: &Router,
+    head: &[u8],
+    isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
+) -> Result<RoutePath, RouteError> {
     if is_decode_only(head) {
         let path = router
             .pick(Phase::Decode)
@@ -1176,7 +1279,9 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
 
     let prompt_tokens = estimate_prompt_tokens(head);
     if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
-        if let Some((prefill, _strength)) = warmth_override_target(router, prompt_tokens) {
+        if let Some((prefill, _strength)) =
+            warmth_override_target_with_identity(router, prompt_tokens, isolation)
+        {
             router.tick_control(Some(false), Some(prompt_tokens), false);
             return Ok(RoutePath::Disaggregated {
                 prefill,
@@ -1193,11 +1298,12 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
     }
 
     let pool_pi = router.dataplane.read_pi();
-    let prefill = select_prefill_with_pi(
+    let prefill = select_prefill_with_identity_pi(
         router.pool(Phase::Prefill),
         router.state.as_ref(),
         prompt_tokens,
         pool_pi,
+        isolation,
     )
     .ok_or(RouteError::NoBackend)?;
     router.tick_control(Some(false), Some(prompt_tokens), false);
@@ -1208,13 +1314,29 @@ pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
     })
 }
 
-fn warmth_override_target(router: &Router, prompt_tokens: u64) -> Option<(Arc<Backend>, f64)> {
+/// Short-context warmth-override target, with the warmth strength driving
+/// the decision optionally gated by cache-domain isolation. [DEMI-S1-DOMAIN]
+fn warmth_override_target_with_identity(
+    router: &Router,
+    prompt_tokens: u64,
+    isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
+) -> Option<(Arc<Backend>, f64)> {
     let snap = router.state.as_ref()?;
     let blocks = default_routing_blocks(prompt_tokens);
     let mut best: Option<(Arc<Backend>, f64)> = None;
     for backend in router.pool(Phase::Prefill) {
         let warmth = snap.prefill.get(&backend.label)?;
-        let strength = warmth.warmth.hit_strength(&blocks);
+        let strength = match isolation {
+            Some((registry, identity)) => gated_hit_strength(
+                &warmth.warmth,
+                registry,
+                identity.tenant,
+                identity.group,
+                identity.content_fp,
+                &blocks,
+            ),
+            None => warmth.warmth.hit_strength(&blocks),
+        };
         if strength < ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE {
             continue;
         }
