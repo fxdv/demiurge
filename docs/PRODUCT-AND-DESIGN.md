@@ -62,7 +62,7 @@ When prefill and decode share one pool, you get the worst of both worlds: comput
 
 - A replacement for vLLM, TGI, or TensorRT-LLM — we sit **in front of** inference workers.
 - A training platform or model compiler.
-- A finished multi-tenant SaaS — the cache-domain **isolation** logic ships (Phase 7), but live-router tenant routing and billing are not wired.
+- A finished multi-tenant SaaS — the cache-domain **isolation** logic is wired into the router's routing decision (Phase 7), but real tenant authentication, content verification, and billing remain the caller's responsibility, not wired end-to-end.
 
 ---
 
@@ -250,7 +250,7 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 - [ ] RDMA KV hand-off (production transport)
 - [ ] Live migration — abortable sub-ITL cutover **logic shipped** (Track A); fleet-measured p99 budget on reference hardware open
 - [ ] Pool autoscaler actuation on real GPU fractions (shadow → canary → prod)
-- [ ] Cross-tenant cache sharing — cache-domain isolation + auth registry **shipped** (Track A); live-router multi-tenant routing open
+- [ ] Cross-tenant cache sharing — cache-domain isolation, auth registry, and live-router wiring **shipped** (Track A); real tenant auth/content verification on production traffic open
 - [ ] Learned corrector graduation — shadow → canary → production state machine **shipped** (Track A); wiring window cadence + violation counters to live production traffic open
 
 ### Explicit non-goals for near term

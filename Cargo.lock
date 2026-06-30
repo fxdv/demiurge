@@ -170,6 +170,7 @@ dependencies = [
 name = "demiurge-router"
 version = "0.1.0"
 dependencies = [
+ "demiurge-auth",
  "demiurge-control",
  "demiurge-cost",
  "demiurge-dataplane",
