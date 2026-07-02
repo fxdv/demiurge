@@ -17,7 +17,6 @@ const HOST_IP: &str = "192.0.2.1";
 
 struct VethPair {
     iface: String,
-    peer: String,
 }
 
 impl VethPair {
@@ -30,7 +29,7 @@ impl VethPair {
         run_ip(&["addr", "add", "192.0.2.2/30", "dev", &b])?;
         run_ip(&["link", "set", &a, "up"])?;
         run_ip(&["link", "set", &b, "up"])?;
-        Ok(Self { iface: a, peer: b })
+        Ok(Self { iface: a })
     }
 }
 
@@ -62,6 +61,32 @@ impl VethNs {
         run_ip(&["-n", &ns, "link", "set", &b, "up"])?;
         run_ip(&["-n", &ns, "link", "set", "lo", "up"])?;
         Ok(Self { iface: a, ns })
+    }
+
+    /// Ping `HOST_IP` from inside the netns; true when every reply arrived.
+    /// (Same-netns `ping -I peer` cannot work here: requests traverse the
+    /// veth but replies to a local address come back via loopback, which a
+    /// device-bound ping ignores.)
+    fn ping(&self, count: u32) -> Result<bool, String> {
+        let status = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.ns,
+                "ping",
+                "-c",
+                &count.to_string(),
+                "-W",
+                "1",
+                "-i",
+                "0.01",
+                HOST_IP,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| format!("ping: {e}"))?;
+        Ok(status.success())
     }
 
     /// One TCP connection attempt from the netns to `HOST_IP:port`.
@@ -163,36 +188,16 @@ fn xdp_admit_shed_reseed_updates_tokens() {
     assert_eq!(shed.shed_total().expect("shed"), 0);
 }
 
-fn send_probes_via_ping(peer: &str, dest: &str, count: u32) -> Result<bool, String> {
-    let status = Command::new("ping")
-        .args([
-            "-I",
-            peer,
-            "-c",
-            &count.to_string(),
-            "-W",
-            "1",
-            "-i",
-            "0.01",
-            dest,
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|e| format!("ping: {e}"))?;
-    Ok(status.success())
-}
-
 // The bucket is an overload valve for *new work*, never a packet firewall:
 // ICMP (and any non-SYN traffic) passes untouched even with zero tokens.
 #[test]
 #[ignore = "needs root + veth; run ./scripts/xdp-veth-smoke.sh"]
 fn xdp_admit_shed_passes_non_syn_traffic() {
     require_root_and_bpf().expect("precheck");
-    let veth = VethPair::create().expect("veth");
+    let veth = VethNs::create().expect("veth+ns");
     let shed = XdpAdmitShed::attach(&veth.iface, config(1, 0, None)).expect("attach");
 
-    let ok = send_probes_via_ping(&veth.peer, HOST_IP, 8).expect("ping probes");
+    let ok = veth.ping(8).expect("ping probes");
     assert!(ok, "ICMP must pass regardless of bucket state");
     assert_eq!(shed.shed_total().expect("shed"), 0, "ICMP is never gated");
     assert_eq!(
