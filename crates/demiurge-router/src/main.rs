@@ -14,6 +14,10 @@
 //!   DEMIURGE_DECODE_KV_CAPACITY_BYTES  fleet decode KV budget (enables ledger + handoff)
 //!   DEMIURGE_BYTES_PER_TOKEN   bytes per KV token for reservation (default 128)
 //!   DEMIURGE_STATE_PLANE       1 to record live warmth on production traffic
+//!   DEMIURGE_CACHE_GROUPS       group@domain@template_fp@tenant1+tenant2,...
+//!                               enables cache-domain isolation on the live path
+//!   DEMIURGE_MAX_CONNS          concurrent connection cap (default from params)
+//!   DEMIURGE_WORKER_THREADS     bounded worker pool size (default 256)
 
 use std::collections::HashMap;
 use std::net::TcpListener;
@@ -24,8 +28,8 @@ use demiurge_cost::TopologyId;
 use demiurge_dataplane::AdmitMode;
 use demiurge_handoff::handoff_transport_from_env;
 use demiurge_router::{
-    parse_pool_with_topology, parse_topology_map, print_startup_banner, serve, Phase, Router,
-    StatePlane,
+    parse_cache_groups, parse_pool_with_topology, parse_topology_map, print_startup_banner,
+    serve_with_max_conns, Phase, Router, StatePlane,
 };
 
 fn main() {
@@ -110,6 +114,11 @@ fn configure() -> Result<(TcpListener, Arc<Router>), String> {
     let listener = TcpListener::bind(&listen).map_err(|e| format!("bind {listen}: {e}"))?;
 
     let mut router = build_router(prefill, decode, topology)?;
+    if let Some(registry) =
+        parse_cache_groups(&std::env::var("DEMIURGE_CACHE_GROUPS").unwrap_or_default())?
+    {
+        router = router.with_cache_registry(Arc::new(registry));
+    }
     let xdp_iface = std::env::var("DEMIURGE_XDP_IFACE").ok();
     if let Some(ref iface) = xdp_iface {
         router = router
@@ -124,7 +133,11 @@ fn configure() -> Result<(TcpListener, Arc<Router>), String> {
 
 fn run() -> Result<(), String> {
     let (listener, router) = configure()?;
-    serve(listener, router).map_err(|e| e.to_string())
+    let max_conns = std::env::var("DEMIURGE_MAX_CONNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(demiurge_cost::DATAPLANE_MAX_CONNS as usize);
+    serve_with_max_conns(listener, router, max_conns).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

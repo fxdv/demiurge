@@ -5,7 +5,19 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::warmth::WarmthMap;
+use demiurge_auth::{GroupId, PrefixFingerprint, SharedPrefixGroupRegistry, TenantId};
+
+use crate::warmth::{gated_hit_strength, WarmthMap};
+
+/// Cache-domain isolation context for a warmth lookup: the Shared-Prefix
+/// Group authority plus the already-authenticated requester identity.
+/// [DEMI-S1-DOMAIN]
+pub type IsolationCtx<'a> = (
+    &'a SharedPrefixGroupRegistry,
+    TenantId,
+    GroupId,
+    PrefixFingerprint,
+);
 
 #[derive(Debug, Clone)]
 pub struct BackendSnapshot {
@@ -49,6 +61,35 @@ impl StateSnapshot {
             generation: 0,
             prefill: HashMap::new(),
             decode: HashMap::new(),
+        }
+    }
+
+    /// Warmth hit strength for `label` in the prefill or decode pool,
+    /// optionally gated by cache-domain isolation; a backend absent from the
+    /// snapshot reads as fully cold (`0.0`). This is the single warmth-lookup
+    /// path shared by live routing and shadow pairing. [DEMI-WARM-DISCOUNT]
+    /// [DEMI-S1-DOMAIN]
+    #[must_use]
+    pub fn pool_hit_strength(
+        &self,
+        decode_pool: bool,
+        label: &str,
+        blocks: &[u64],
+        isolation: Option<IsolationCtx<'_>>,
+    ) -> f64 {
+        let pool = if decode_pool {
+            &self.decode
+        } else {
+            &self.prefill
+        };
+        let Some(bs) = pool.get(label) else {
+            return 0.0;
+        };
+        match isolation {
+            Some((registry, tenant, group, content_fp)) => {
+                gated_hit_strength(&bs.warmth, registry, tenant, group, content_fp, blocks)
+            }
+            None => bs.warmth.hit_strength(blocks),
         }
     }
 }

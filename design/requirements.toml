@@ -314,6 +314,7 @@ tests = [
     "non_member_isolated_under_fuzz",
     "tenant_private_warmth_not_shared_across_tenants",
     "shared_group_members_share_salted_warmth",
+    "live_tcp_path_gates_warmth_by_identity",
 ]
 
 # --- Phase 8: learned corrector graduation --------------------------------

@@ -69,3 +69,7 @@ admit_burst = 4096
 rcu_stale_alert_ms = 500
 # Republish RCU snapshot (same π) when age exceeds this — keeps staleness alerts meaningful.
 rcu_heartbeat_ms = 250
+# Hard cap on concurrent proxied connections (thread-per-conn bound); excess sheds 503.
+max_conns = 1024
+# Hard cap on a prefill backend's response size (headers + body); larger fails the hand-off.
+prefill_response_max_bytes = 1048576

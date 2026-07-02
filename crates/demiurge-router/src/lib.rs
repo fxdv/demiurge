@@ -1,36 +1,36 @@
 //! Phase-aware, cost-based TCP forwarder.
 //!
-//! **Phase 0:** min-cost selection over phase pools (`select`, `Router::pick`).
+//! **Phase 0:** min-cost selection over phase pools ([`select`], [`Router::pick`]).
 //! **Phase 3:** RCU state snapshot, warmth discounts, fast-path override ([DEMI-WARM-DISCOUNT], [DEMI-STATE-AP]).
 //! **Phase 4:** Greedy pf→dc pairing on the disaggregated path ([DEMI-PAIR-GREEDY]).
 //! **Phase 5:** RCU routing table + admit shed on the live TCP path ([DEMI-DP-RCU], [DEMI-XDP-SHED]).
+//! **Phase 7:** Cache-domain isolation on the live path ([DEMI-S1-DOMAIN]).
+//!
+//! ## Module layout
+//!
+//! | Module | Contents |
+//! |---|---|
+//! | [`backend`]  | `Backend` cost surface, min-cost selection |
+//! | `http`       | bounded head parsing, identity headers |
+//! | `config`     | pool/topology/cache-group spec parsing, env flags |
+//! | [`routing`]  | `route`/`route_with_identity`, prefill→decode continuation |
+//! | `serve`      | bounded accept loop, admission, TCP proxying |
+//! | crate root   | `Router` (pools, control plane, dataplane wiring) |
 
-use std::collections::HashMap;
-use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use demiurge_control::{
-    export_pool_pressure, pairing_regret_targets, AdmitError, CorrectorShadowLog,
-    CorrectorShadowSample, LengthPredictor, PairingTarget, PoolPressure, PoolRebalancer,
-    RdmaCostShadowLog, RdmaCostShadowSample, RebalancerMode, ReservationGuard, ReservationLedger,
+    export_pool_pressure, pairing_regret_targets, CorrectorShadowLog, CorrectorShadowSample,
+    LengthPredictor, PoolPressure, PoolRebalancer, RdmaCostShadowLog, RdmaCostShadowSample,
+    RebalancerMode, ReservationLedger,
 };
-use demiurge_cost::ROUTING_SHORT_CONTEXT_TOKENS;
-use demiurge_cost::ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE;
-use demiurge_cost::ROUTING_TRANSFER_PENALTY;
 use demiurge_cost::{
-    compose, kv_breakdown, rdma_distance, rdma_transfer_ln, warmth_discount, BarrierFactor,
-    Corrector, Cost, TimeCore, TopologyId, DATAPLANE_ADMIT_BURST, DATAPLANE_RCU_HEARTBEAT_MS,
-    DATAPLANE_RCU_STALE_ALERT_MS, POOL_ACTUATION_ENABLED,
+    BarrierFactor, TopologyId, DATAPLANE_ADMIT_BURST, DATAPLANE_RCU_HEARTBEAT_MS,
+    DATAPLANE_RCU_STALE_ALERT_MS, ROUTING_SHORT_CONTEXT_TOKENS, ROUTING_TRANSFER_PENALTY,
 };
 use demiurge_dataplane::{admit_capacity_for_pi, AdmitBucket, DataPlaneSnapshot};
-use demiurge_handoff::{
-    parse_prefill_handoff, HandoffRegistry, HandoffTransport, HeaderPassthroughTransport,
-};
-use demiurge_state::{default_routing_blocks, gated_hit_strength};
+use demiurge_handoff::{HandoffRegistry, HandoffTransport, HeaderPassthroughTransport};
 
 pub use demiurge_auth::{GroupId, PrefixFingerprint, SharedPrefixGroupRegistry, TenantId};
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
@@ -43,455 +43,36 @@ pub use demiurge_dataplane::{
 pub use demiurge_handoff::{
     HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
 };
-pub use demiurge_state::{BackendSnapshot, StatePlane, StateSnapshot, WarmthMap};
+pub use demiurge_state::{default_routing_blocks, BackendSnapshot, StatePlane, StateSnapshot, WarmthMap};
 
+pub mod backend;
 mod banner;
+mod config;
+mod http;
+pub mod routing;
+mod serve;
 /// Reusable TCP backend stubs for integration tests.
 pub mod testutil;
 
+pub use backend::{
+    select, select_with_barriers, select_with_barriers_pi, select_with_warmth,
+    select_with_warmth_pi, Backend,
+};
 pub use banner::print_startup_banner;
+pub use config::{parse_cache_groups, parse_pool, parse_pool_with_topology, parse_topology_map};
+pub use http::{
+    estimate_prompt_tokens, is_decode_only, parse_path_tokens, parse_prompt_tokens,
+    parse_request_identity,
+};
+pub use routing::{
+    admit_disaggregated, dispatch_prefill, on_prefill_complete, route, route_with_identity,
+    DecodePlacement, Phase, PrefillSignals, RequestId, RequestIdentity, RouteError, RoutePath,
+};
+pub use serve::{serve, serve_with_max_conns};
 pub use testutil::{
     spawn_delay_backend, spawn_large_body_backend, spawn_latch_prefill_backend,
     spawn_marker_backend, spawn_rst_backend, LatchBackend,
 };
-
-static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Request phase. Prefill is compute-bound and cache-producing; decode is
-/// memory-bandwidth-bound and cache-consuming.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Phase {
-    Prefill,
-    Decode,
-}
-
-/// Opaque correlation handle for disaggregated prefill → decode continuations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RequestId(u64);
-
-impl RequestId {
-    #[must_use]
-    pub fn new() -> Self {
-        Self(NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed))
-    }
-
-    #[must_use]
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-impl Default for RequestId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Already-authenticated request identity for cache-domain isolation.
-/// [DEMI-S1-DOMAIN]
-///
-/// The router never authenticates a tenant or verifies content itself —
-/// the caller establishes `tenant` and `content_fp` on its own strongly
-/// consistent path (see [`SharedPrefixGroupRegistry`]) before calling
-/// [`route_with_identity`]. The router's job is only to resolve the
-/// cache-domain key for that identity and measure warmth under it, so a
-/// non-member or template mismatch can discount against nothing but its
-/// own tenant-private warmth.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestIdentity {
-    pub tenant: TenantId,
-    pub group: GroupId,
-    pub content_fp: PrefixFingerprint,
-}
-
-/// Telemetry produced when prefill finishes; feeds decode placement.
-#[derive(Debug, Clone, Copy)]
-pub struct PrefillSignals {
-    pub request_id: RequestId,
-    pub prompt_tokens: u64,
-    /// Wall time for prefill I/O including KV hand-off header receipt.
-    pub prefill_wall: Duration,
-}
-
-/// Admission outcome from [`route`].
-#[derive(Debug, Clone)]
-pub enum RoutePath {
-    /// Short context: colocated prefill+decode on one backend. [DEMI-SHORT-FASTPATH]
-    Colocated(Arc<Backend>),
-    /// Long (or unknown) context: async prefill, decode in [`on_prefill_complete`].
-    /// [ALG-ROUTE]
-    Disaggregated {
-        prefill: Arc<Backend>,
-        request_id: RequestId,
-        prompt_tokens: u64,
-    },
-    /// Client declared decode phase only (`X-Demiurge-Phase: decode` or `/decode`).
-    DecodeOnly(Arc<Backend>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RouteError {
-    NoBackend,
-    HandoffMissing,
-    KvAdmitRejected,
-    /// Prefill backend I/O failed — the error message is preserved for logging.
-    PrefillIo(String),
-}
-
-impl std::fmt::Display for RouteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RouteError::NoBackend => write!(f, "no backend available for route"),
-            RouteError::HandoffMissing => write!(f, "prefill completed without KV hand-off"),
-            RouteError::KvAdmitRejected => write!(f, "decode pool rejected KV reservation"),
-            RouteError::PrefillIo(msg) => write!(f, "prefill I/O error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for RouteError {}
-
-/// A backend instance plus its live load signal.
-#[derive(Debug)]
-pub struct Backend {
-    pub label: String,
-    pub addr: SocketAddr,
-    topology: TopologyId,
-    base_service_seconds: f64,
-    /// ln(base_service_seconds) — valid bases only; invalid inputs fail-expensive at construction.
-    ln_base: f64,
-    inflight: AtomicUsize,
-}
-
-#[inline]
-fn queue_ln(inflight: usize) -> f64 {
-    (1.0 + inflight as f64).ln()
-}
-
-impl Backend {
-    pub fn new(label: impl Into<String>, addr: SocketAddr, base_service_seconds: f64) -> Arc<Self> {
-        Self::new_with_topology(label, addr, base_service_seconds, TopologyId::default())
-    }
-
-    pub fn new_with_topology(
-        label: impl Into<String>,
-        addr: SocketAddr,
-        base_service_seconds: f64,
-        topology: TopologyId,
-    ) -> Arc<Self> {
-        let ln_base = if base_service_seconds.is_finite() && base_service_seconds > 0.0 {
-            base_service_seconds.ln()
-        } else {
-            f64::MAX.ln()
-        };
-        Arc::new(Self {
-            label: label.into(),
-            addr,
-            topology,
-            base_service_seconds,
-            ln_base,
-            inflight: AtomicUsize::new(0),
-        })
-    }
-
-    #[must_use]
-    pub fn topology(&self) -> &TopologyId {
-        &self.topology
-    }
-
-    pub fn inflight(&self) -> usize {
-        self.inflight.load(Ordering::Relaxed)
-    }
-
-    pub fn incr_inflight(&self) {
-        self.inflight.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn decr_inflight(&self) {
-        self.inflight.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    pub fn cost(&self) -> Cost {
-        Cost::from_ln(self.ln_base + queue_ln(self.inflight()))
-    }
-
-    #[inline]
-    fn selection_ln(&self, pool_pi: f64, prefill: bool) -> f64 {
-        self.ln_base + pool_core_scale(1.0, pool_pi, prefill).ln() + queue_ln(self.inflight())
-    }
-
-    pub fn cost_with_warmth(
-        &self,
-        extra: &[BarrierFactor],
-        snapshot: Option<&StateSnapshot>,
-        blocks: &[u64],
-        decode_pool: bool,
-    ) -> Cost {
-        self.cost_with_warmth_pi(extra, snapshot, blocks, decode_pool, 0.5)
-    }
-
-    pub fn cost_with_warmth_pi(
-        &self,
-        extra: &[BarrierFactor],
-        snapshot: Option<&StateSnapshot>,
-        blocks: &[u64],
-        decode_pool: bool,
-        pool_pi: f64,
-    ) -> Cost {
-        self.cost_with_isolation_pi(extra, snapshot, blocks, decode_pool, pool_pi, None)
-    }
-
-    /// `cost_with_warmth_pi`, but the warmth discount is gated by cache-domain
-    /// isolation. [DEMI-S1-DOMAIN]
-    ///
-    /// `isolation` is `Some((registry, identity))` for an already-authenticated
-    /// request; the discount is then measured under the cache-domain key the
-    /// registry resolves for `identity` — a non-member or template mismatch
-    /// falls back to a tenant-private key and can only ever discount against
-    /// its own warmth, never another tenant's shared cache. `None` is
-    /// identical to [`Self::cost_with_warmth_pi`].
-    pub fn cost_with_isolation_pi(
-        &self,
-        extra: &[BarrierFactor],
-        snapshot: Option<&StateSnapshot>,
-        blocks: &[u64],
-        decode_pool: bool,
-        pool_pi: f64,
-        isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
-    ) -> Cost {
-        let discount = if let Some(snap) = snapshot {
-            let pool = if decode_pool {
-                &snap.decode
-            } else {
-                &snap.prefill
-            };
-            pool.get(&self.label).and_then(|bs| {
-                let strength = match isolation {
-                    Some((registry, identity)) => gated_hit_strength(
-                        &bs.warmth,
-                        registry,
-                        identity.tenant,
-                        identity.group,
-                        identity.content_fp,
-                        blocks,
-                    ),
-                    None => bs.warmth.hit_strength(blocks),
-                };
-                warmth_discount(strength)
-            })
-        } else {
-            None
-        };
-        if extra.is_empty() && discount.is_none() {
-            return Cost::from_ln(self.selection_ln(pool_pi, !decode_pool));
-        }
-        let scaled = pool_core_scale(self.base_service_seconds, pool_pi, !decode_pool);
-        let core = TimeCore::clamped(scaled);
-        let mut barriers = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
-        let barrier_len = push_route_barriers(&mut barriers, self.inflight(), extra);
-        match discount {
-            Some(d) => compose(core, &barriers[..barrier_len], &[d], Corrector::identity()),
-            None => compose(core, &barriers[..barrier_len], &[], Corrector::identity()),
-        }
-    }
-
-    pub fn cost_with_barriers(&self, extra: &[BarrierFactor]) -> Cost {
-        self.cost_with_barriers_pi(extra, 0.5, true)
-    }
-
-    pub fn cost_with_barriers_pi(
-        &self,
-        extra: &[BarrierFactor],
-        pool_pi: f64,
-        prefill: bool,
-    ) -> Cost {
-        if extra.is_empty() {
-            return Cost::from_ln(self.selection_ln(pool_pi, prefill));
-        }
-        let scaled = pool_core_scale(self.base_service_seconds, pool_pi, prefill);
-        let core = TimeCore::clamped(scaled);
-        let mut barriers = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
-        let barrier_len = push_route_barriers(&mut barriers, self.inflight(), extra);
-        compose(core, &barriers[..barrier_len], &[], Corrector::identity())
-    }
-}
-
-impl PairingTarget for Backend {
-    fn label(&self) -> &str {
-        &self.label
-    }
-
-    fn prefill_ln(&self, snapshot: Option<&StateSnapshot>, blocks: &[u64]) -> f64 {
-        self.cost_with_warmth(&[], snapshot, blocks, false).ln()
-    }
-
-    fn decode_ln(
-        &self,
-        snapshot: Option<&StateSnapshot>,
-        blocks: &[u64],
-        prefill_label: &str,
-        transfer_penalty: f64,
-        extra_barriers: &[BarrierFactor],
-    ) -> f64 {
-        let mut barriers = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
-        let mut len = 0;
-        for barrier in extra_barriers {
-            if len < MAX_ROUTE_BARRIERS {
-                barriers[len] = *barrier;
-                len += 1;
-            }
-        }
-        if prefill_label != self.label && len < MAX_ROUTE_BARRIERS {
-            barriers[len] = BarrierFactor::clamped(transfer_penalty.max(1.0));
-            len += 1;
-        }
-        self.cost_with_warmth(&barriers[..len], snapshot, blocks, true)
-            .ln()
-    }
-}
-
-/// Minimum-cost prefill selection over `candidates`, with the warmth discount
-/// driving the choice optionally gated by cache-domain isolation.
-/// [DEMI-S1-DOMAIN]
-fn select_prefill_with_identity_pi(
-    candidates: &[Arc<Backend>],
-    snapshot: Option<&StateSnapshot>,
-    prompt_tokens: u64,
-    pool_pi: f64,
-    isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
-) -> Option<Arc<Backend>> {
-    if snapshot.is_none() {
-        return select_with_barriers_pi(candidates, &[], pool_pi, true);
-    }
-    let blocks = default_routing_blocks(prompt_tokens);
-    candidates
-        .iter()
-        .min_by(|a, b| {
-            a.cost_with_isolation_pi(&[], snapshot, &blocks, false, pool_pi, isolation)
-                .ln()
-                .total_cmp(
-                    &b.cost_with_isolation_pi(&[], snapshot, &blocks, false, pool_pi, isolation)
-                        .ln(),
-                )
-        })
-        .cloned()
-}
-
-#[derive(Clone, Copy)]
-struct DecodePlacementCtx<'a> {
-    prefill_label: &'a str,
-    pf_topo: &'a TopologyId,
-    kv_bytes: u64,
-    use_rdma_routing: bool,
-}
-
-fn select_decode_with_pi(
-    ctx: &DecodePlacementCtx<'_>,
-    candidates: &[Arc<Backend>],
-    snapshot: Option<&StateSnapshot>,
-    prompt_tokens: u64,
-    extra_barriers: &[BarrierFactor],
-    pool_pi: f64,
-) -> Option<Arc<Backend>> {
-    let blocks = default_routing_blocks(prompt_tokens);
-    let mut barriers_a = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
-    let mut barriers_b = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
-    candidates
-        .iter()
-        .min_by(|a, b| {
-            let len_a =
-                fill_decode_barriers(&mut barriers_a, extra_barriers, ctx.prefill_label, a, ctx);
-            let len_b =
-                fill_decode_barriers(&mut barriers_b, extra_barriers, ctx.prefill_label, b, ctx);
-            a.cost_with_warmth_pi(&barriers_a[..len_a], snapshot, &blocks, true, pool_pi)
-                .ln()
-                .total_cmp(
-                    &b.cost_with_warmth_pi(&barriers_b[..len_b], snapshot, &blocks, true, pool_pi)
-                        .ln(),
-                )
-        })
-        .cloned()
-}
-
-pub fn select_with_warmth_pi(
-    candidates: &[Arc<Backend>],
-    extra: &[BarrierFactor],
-    snapshot: Option<&StateSnapshot>,
-    blocks: &[u64],
-    decode_pool: bool,
-    pool_pi: f64,
-) -> Option<Arc<Backend>> {
-    candidates
-        .iter()
-        .min_by(|a, b| {
-            a.cost_with_warmth_pi(extra, snapshot, blocks, decode_pool, pool_pi)
-                .ln()
-                .total_cmp(
-                    &b.cost_with_warmth_pi(extra, snapshot, blocks, decode_pool, pool_pi)
-                        .ln(),
-                )
-        })
-        .cloned()
-}
-
-pub fn select_with_warmth(
-    candidates: &[Arc<Backend>],
-    extra: &[BarrierFactor],
-    snapshot: Option<&StateSnapshot>,
-    blocks: &[u64],
-    decode_pool: bool,
-) -> Option<Arc<Backend>> {
-    candidates
-        .iter()
-        .min_by(|a, b| {
-            a.cost_with_warmth(extra, snapshot, blocks, decode_pool)
-                .ln()
-                .total_cmp(
-                    &b.cost_with_warmth(extra, snapshot, blocks, decode_pool)
-                        .ln(),
-                )
-        })
-        .cloned()
-}
-
-/// Select minimum-cost backend, optionally with extra barriers (e.g. Φ). [DEMI-ROUTE-MINCOST]
-pub fn select(candidates: &[Arc<Backend>]) -> Option<Arc<Backend>> {
-    select_with_barriers(candidates, &[])
-}
-
-pub fn select_with_barriers_pi(
-    candidates: &[Arc<Backend>],
-    extra: &[BarrierFactor],
-    pool_pi: f64,
-    prefill: bool,
-) -> Option<Arc<Backend>> {
-    if extra.is_empty() {
-        let ln_scale = pool_core_scale(1.0, pool_pi, prefill).ln();
-        return candidates
-            .iter()
-            .min_by(|a, b| {
-                let la = a.ln_base + ln_scale + queue_ln(a.inflight());
-                let lb = b.ln_base + ln_scale + queue_ln(b.inflight());
-                la.total_cmp(&lb)
-            })
-            .cloned();
-    }
-    candidates
-        .iter()
-        .min_by(|a, b| {
-            a.cost_with_barriers_pi(extra, pool_pi, prefill)
-                .ln()
-                .total_cmp(&b.cost_with_barriers_pi(extra, pool_pi, prefill).ln())
-        })
-        .cloned()
-}
-
-pub fn select_with_barriers(
-    candidates: &[Arc<Backend>],
-    extra: &[BarrierFactor],
-) -> Option<Arc<Backend>> {
-    select_with_barriers_pi(candidates, extra, 0.5, true)
-}
 
 pub struct Router {
     prefill: Vec<Arc<Backend>>,
@@ -530,7 +111,6 @@ impl Clone for Router {
             handoffs: self.handoffs.clone(),
             bytes_per_token: self.bytes_per_token,
             state: self.state.clone(),
-            state_plane: self.state_plane.clone(),
             control: Arc::clone(&self.control),
             dataplane: Arc::clone(&self.dataplane),
             admit: Arc::clone(&self.admit),
@@ -544,6 +124,7 @@ impl Clone for Router {
             handoff_transport: self.handoff_transport.clone(),
             rdma_routing: self.rdma_routing,
             cache_registry: self.cache_registry.clone(),
+            state_plane: self.state_plane.clone(),
         }
     }
 }
@@ -623,11 +204,11 @@ impl Router {
             kernel_admit: Arc::new(Mutex::new(None)),
             last_admit_capacity: AtomicU64::new(DATAPLANE_ADMIT_BURST),
             io_uring: Self::io_uring_from_env(&dataplane),
-            rebalancer_actuation: rebalancer_actuation_enabled(),
+            rebalancer_actuation: config::rebalancer_actuation_enabled(),
             colocated_routes: AtomicU64::new(0),
             disagg_routes: AtomicU64::new(0),
             handoff_transport: None,
-            rdma_routing: rdma_routing_enabled(),
+            rdma_routing: config::rdma_routing_enabled(),
             cache_registry: None,
             state_plane: None,
         }
@@ -669,11 +250,11 @@ impl Router {
             kernel_admit: Arc::new(Mutex::new(None)),
             last_admit_capacity: AtomicU64::new(DATAPLANE_ADMIT_BURST),
             io_uring: Self::io_uring_from_env(&dataplane),
-            rebalancer_actuation: rebalancer_actuation_enabled(),
+            rebalancer_actuation: config::rebalancer_actuation_enabled(),
             colocated_routes: AtomicU64::new(0),
             disagg_routes: AtomicU64::new(0),
             handoff_transport: Some(Self::default_handoff_transport()),
-            rdma_routing: rdma_routing_enabled(),
+            rdma_routing: config::rdma_routing_enabled(),
             cache_registry: None,
             state_plane: None,
         };
@@ -757,6 +338,25 @@ impl Router {
     #[must_use]
     pub fn cache_registry(&self) -> Option<&Arc<SharedPrefixGroupRegistry>> {
         self.cache_registry.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) const fn rdma_routing(&self) -> bool {
+        self.rdma_routing
+    }
+
+    pub(crate) fn handoff_transport_or_default(&self) -> Arc<dyn HandoffTransport> {
+        self.handoff_transport
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(Self::default_handoff_transport)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn io_uring_proxy_session(&self) -> Option<IoUringProxySession> {
+        self.io_uring
+            .as_ref()
+            .and_then(|fwd| fwd.open_proxy_session().ok())
     }
 
     /// Inject trace window pressure and publish π (fleet replay actuation; bypasses hysteresis).
@@ -950,7 +550,23 @@ impl Router {
             .samples()
     }
 
-    fn topology_for_label(&self, label: &str) -> TopologyId {
+    pub(crate) fn record_corrector_shadow(&self, sample: CorrectorShadowSample) {
+        self.control
+            .lock()
+            .expect("control plane")
+            .corrector_shadow
+            .record(sample);
+    }
+
+    pub(crate) fn record_rdma_cost_shadow(&self, sample: RdmaCostShadowSample) {
+        self.control
+            .lock()
+            .expect("control plane")
+            .rdma_cost_shadow
+            .record(sample);
+    }
+
+    pub(crate) fn topology_for_label(&self, label: &str) -> TopologyId {
         self.prefill
             .iter()
             .chain(self.decode.iter())
@@ -959,7 +575,7 @@ impl Router {
             .unwrap_or_default()
     }
 
-    fn bump_route_counters(&self, colocated: bool) {
+    pub(crate) fn bump_route_counters(&self, colocated: bool) {
         if colocated {
             self.colocated_routes.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -967,7 +583,7 @@ impl Router {
         }
     }
 
-    fn note_fastpath_misroute(&self, prompt_tokens: u64) {
+    pub(crate) fn note_fastpath_misroute(&self, prompt_tokens: u64) {
         let threshold = ROUTING_SHORT_CONTEXT_TOKENS.max(1);
         if prompt_tokens <= threshold && prompt_tokens * 100 / threshold >= 80 {
             let frac = (prompt_tokens as f64 / threshold as f64).clamp(0.0, 1.0);
@@ -979,7 +595,7 @@ impl Router {
     }
 
     /// Control-plane maintenance deferred off the classify hot path.
-    fn deferred_control_tick(&self, prompt_tokens: Option<u64>, sample_regret: bool) {
+    pub(crate) fn deferred_control_tick(&self, prompt_tokens: Option<u64>, sample_regret: bool) {
         let need_rebalancer = sample_regret
             || self.rebalancer_actuation
             || self.dataplane.age_ms() >= DATAPLANE_RCU_HEARTBEAT_MS;
@@ -1049,7 +665,7 @@ impl Router {
         }
     }
 
-    fn schedule_control_tick(&self, path: &RoutePath, head: &[u8]) {
+    pub(crate) fn schedule_control_tick(&self, path: &RoutePath, head: &[u8]) {
         match path {
             RoutePath::Colocated(_) => {
                 self.deferred_control_tick(Some(estimate_prompt_tokens(head)), false);
@@ -1100,243 +716,6 @@ impl Router {
     }
 }
 
-pub fn parse_topology_map(spec: &str) -> Result<HashMap<String, TopologyId>, String> {
-    let mut out = HashMap::new();
-    for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let (label, rest) = item
-            .split_once('@')
-            .ok_or_else(|| format!("bad topology spec {item:?}; want label@node/rack/cluster"))?;
-        let parts: Vec<&str> = rest.split('/').collect();
-        if parts.len() != 3 {
-            return Err(format!(
-                "bad topology spec {item:?}; want label@node/rack/cluster"
-            ));
-        }
-        out.insert(
-            label.to_string(),
-            TopologyId::new(parts[0], parts[1], parts[2]),
-        );
-    }
-    Ok(out)
-}
-
-pub fn parse_pool(spec: &str) -> Result<Vec<Arc<Backend>>, String> {
-    parse_pool_with_topology(spec, &HashMap::new())
-}
-
-pub fn parse_pool_with_topology(
-    spec: &str,
-    topology: &HashMap<String, TopologyId>,
-) -> Result<Vec<Arc<Backend>>, String> {
-    let mut out = Vec::new();
-    for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let parts: Vec<&str> = item.split('@').collect();
-        if parts.len() != 3 {
-            return Err(format!(
-                "bad backend spec {item:?}; want label@host:port@seconds"
-            ));
-        }
-        let addr: SocketAddr = parts[1]
-            .parse()
-            .map_err(|e| format!("bad address {:?}: {e}", parts[1]))?;
-        let secs: f64 = parts[2]
-            .parse()
-            .map_err(|e| format!("bad seconds {:?}: {e}", parts[2]))?;
-        let topo = topology.get(parts[0]).cloned().unwrap_or_default();
-        out.push(Backend::new_with_topology(parts[0], addr, secs, topo));
-    }
-    Ok(out)
-}
-
-const MAX_HEAD: usize = 64 * 1024;
-/// Stack cap for queue + Φ + transfer barriers on the routing hot path.
-const MAX_ROUTE_BARRIERS: usize = 16;
-
-fn push_route_barriers(
-    buf: &mut [BarrierFactor; MAX_ROUTE_BARRIERS],
-    inflight: usize,
-    extra: &[BarrierFactor],
-) -> usize {
-    buf[0] = BarrierFactor::clamped(1.0 + inflight as f64);
-    let mut len = 1;
-    for barrier in extra {
-        if len < MAX_ROUTE_BARRIERS {
-            buf[len] = *barrier;
-            len += 1;
-        }
-    }
-    len
-}
-
-fn fill_decode_barriers(
-    buf: &mut [BarrierFactor; MAX_ROUTE_BARRIERS],
-    extra: &[BarrierFactor],
-    prefill_label: &str,
-    backend: &Backend,
-    ctx: &DecodePlacementCtx<'_>,
-) -> usize {
-    let mut len = 0;
-    for barrier in extra {
-        if len < MAX_ROUTE_BARRIERS {
-            buf[len] = *barrier;
-            len += 1;
-        }
-    }
-    if prefill_label != backend.label && len < MAX_ROUTE_BARRIERS {
-        let penalty = if ctx.use_rdma_routing {
-            rdma_transfer_ln(ctx.kv_bytes, ctx.pf_topo, backend.topology())
-                .exp()
-                .max(1.0)
-        } else {
-            ROUTING_TRANSFER_PENALTY.max(1.0)
-        };
-        buf[len] = BarrierFactor::clamped(penalty);
-        len += 1;
-    }
-    len
-}
-
-const HDR_TOKENS: &[u8] = b"x-demiurge-tokens";
-const HDR_PHASE: &[u8] = b"x-demiurge-phase";
-
-#[inline]
-fn trim_ascii_ws(bytes: &[u8]) -> &[u8] {
-    let start = bytes
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|b| !b.is_ascii_whitespace())
-        .map(|p| p + 1)
-        .unwrap_or(start);
-    &bytes[start..end]
-}
-
-#[inline]
-fn ascii_eq_ci(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b.iter())
-            .all(|(&x, &y)| x.eq_ignore_ascii_case(&y))
-}
-
-#[inline]
-fn header_value_ci<'a>(head: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    let mut i = 0;
-    while i < head.len() {
-        let line_end = head[i..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map(|p| i + p)
-            .unwrap_or(head.len());
-        let mut line = &head[i..line_end];
-        if let Some(stripped) = line.strip_suffix(b"\r") {
-            line = stripped;
-        }
-        if line.len() > name.len()
-            && line[name.len()] == b':'
-            && ascii_eq_ci(&line[..name.len()], name)
-        {
-            return Some(trim_ascii_ws(&line[name.len() + 1..]));
-        }
-        if line_end >= head.len() {
-            break;
-        }
-        i = line_end + 1;
-    }
-    None
-}
-
-#[inline]
-fn parse_u64_digits(bytes: &[u8]) -> Option<u64> {
-    let mut n = 0u64;
-    let mut any = false;
-    for b in bytes {
-        if !b.is_ascii_digit() {
-            break;
-        }
-        any = true;
-        n = n.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
-    }
-    if any {
-        Some(n)
-    } else {
-        None
-    }
-}
-
-#[inline]
-fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
-    hay.len() >= needle.len() && hay.windows(needle.len()).any(|w| w == needle)
-}
-
-/// Parse `X-Demiurge-Tokens: N` from the request head.
-pub fn parse_prompt_tokens(head: &[u8]) -> Option<u64> {
-    header_value_ci(head, HDR_TOKENS).and_then(parse_u64_digits)
-}
-
-/// Parse token count from `/prefill/<n>` or `/long/<n>` path segments.
-pub fn parse_path_tokens(head: &[u8]) -> Option<u64> {
-    let first = head.split(|&b| b == b'\r' || b == b'\n').next()?;
-    let mut parts = first.split(|&b| b == b' ').filter(|p| !p.is_empty());
-    parts.next()?;
-    let path = parts.next()?;
-    for prefix in [b"/prefill/" as &[u8], b"/long/"] {
-        if path.starts_with(prefix) {
-            return parse_u64_digits(&path[prefix.len()..]);
-        }
-    }
-    None
-}
-
-/// Estimate prompt tokens for admission. Unknown prompts default to above the
-/// fast-path threshold so we never colocate a long unknown request.
-pub fn estimate_prompt_tokens(head: &[u8]) -> u64 {
-    parse_prompt_tokens(head)
-        .or_else(|| parse_path_tokens(head))
-        .unwrap_or(ROUTING_SHORT_CONTEXT_TOKENS + 1)
-}
-
-fn request_line_parts(head: &[u8]) -> Option<(&[u8], &[u8])> {
-    let line = head.split(|&b| b == b'\r' || b == b'\n').next()?;
-    let mut parts = line.split(|&b| b == b' ').filter(|p| !p.is_empty());
-    let method = parts.next()?;
-    let path = parts.next()?;
-    Some((method, path))
-}
-
-fn is_admin_probe_request(head: &[u8]) -> bool {
-    let Some((method, path)) = request_line_parts(head) else {
-        return false;
-    };
-    if ascii_eq_ci(method, b"POST") {
-        return false;
-    }
-    let path = path.split(|&b| b == b'?').next().unwrap_or(path);
-    path.ends_with(b"/models")
-        || path.ends_with(b"/version")
-        || matches!(
-            path,
-            b"/health" | b"/healthz" | b"/ready" | b"/readyz" | b"/metrics"
-        )
-}
-
-/// True when the request should bypass prefill (admin GETs, explicit decode phase, etc.).
-pub fn is_decode_only(head: &[u8]) -> bool {
-    if header_value_ci(head, HDR_PHASE).is_some_and(|v| ascii_eq_ci(v, b"decode")) {
-        return true;
-    }
-    if head
-        .split(|&b| b == b'\r' || b == b'\n')
-        .next()
-        .is_some_and(|line| contains_subslice(line, b" /decode"))
-    {
-        return true;
-    }
-    is_admin_probe_request(head)
-}
-
 fn live_queue_pressure(backends: &[Arc<Backend>]) -> f64 {
     let max = backends.iter().map(|b| b.inflight()).max().unwrap_or(0);
     (max as f64 / (max as f64 + 16.0)).clamp(0.0, 1.0)
@@ -1363,609 +742,4 @@ fn pool_pressure(router: &Router, fp_share: f64) -> PoolPressure {
     }
     signals.fp_share = fp_share.clamp(0.0, 1.0);
     signals
-}
-
-/// Classify admission path from the HTTP head. [ALG-ROUTE] [DEMI-SHORT-FASTPATH] [DEMI-WARM-DISCOUNT]
-pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
-    let path = route_impl(router, head, None)?;
-    router.schedule_control_tick(&path, head);
-    Ok(path)
-}
-
-/// `route`, but warmth-driven decisions are gated by cache-domain isolation.
-/// [DEMI-S1-DOMAIN]
-///
-/// When both `router.cache_registry()` and `identity` are present, the
-/// short-context warmth override and the long-context prefill selection
-/// measure warmth only under the cache-domain key the registry resolves
-/// for `identity` — exactly [`demiurge_state::gated_hit_strength`] applied
-/// on the live routing path, not just at the state-plane unit level. A
-/// non-member or template mismatch can therefore only ever benefit from
-/// its own tenant-private warmth, never another tenant's shared cache.
-/// Missing either the registry or the identity falls back to identical
-/// behavior as [`route`].
-pub fn route_with_identity(
-    router: &Router,
-    head: &[u8],
-    identity: Option<&RequestIdentity>,
-) -> Result<RoutePath, RouteError> {
-    let isolation = router.cache_registry.as_deref().zip(identity);
-    let path = route_impl(router, head, isolation)?;
-    router.schedule_control_tick(&path, head);
-    Ok(path)
-}
-
-fn route_impl(
-    router: &Router,
-    head: &[u8],
-    isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
-) -> Result<RoutePath, RouteError> {
-    if is_decode_only(head) {
-        let path = router
-            .pick(Phase::Decode)
-            .map(RoutePath::DecodeOnly)
-            .ok_or(RouteError::NoBackend)?;
-        router.bump_route_counters(false);
-        return Ok(path);
-    }
-
-    let prompt_tokens = estimate_prompt_tokens(head);
-    let snap = router.routing_snapshot();
-    let snap_ref = snap.as_deref();
-    if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
-        if let Some((prefill, _strength)) =
-            warmth_override_target_with_identity(router, prompt_tokens, isolation, snap_ref)
-        {
-            router.bump_route_counters(false);
-            router.note_fastpath_misroute(prompt_tokens);
-            return Ok(RoutePath::Disaggregated {
-                prefill,
-                request_id: RequestId::new(),
-                prompt_tokens,
-            });
-        }
-        let path = router
-            .pick_colocated()
-            .map(RoutePath::Colocated)
-            .ok_or(RouteError::NoBackend)?;
-        router.bump_route_counters(true);
-        return Ok(path);
-    }
-
-    let pool_pi = router.dataplane.read_pi();
-    let prefill = select_prefill_with_identity_pi(
-        router.pool(Phase::Prefill),
-        snap_ref,
-        prompt_tokens,
-        pool_pi,
-        isolation,
-    )
-    .ok_or(RouteError::NoBackend)?;
-    router.bump_route_counters(false);
-    router.note_fastpath_misroute(prompt_tokens);
-    Ok(RoutePath::Disaggregated {
-        prefill,
-        request_id: RequestId::new(),
-        prompt_tokens,
-    })
-}
-
-/// Short-context warmth-override target, with the warmth strength driving
-/// the decision optionally gated by cache-domain isolation. [DEMI-S1-DOMAIN]
-fn warmth_override_target_with_identity(
-    router: &Router,
-    prompt_tokens: u64,
-    isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
-    snap: Option<&StateSnapshot>,
-) -> Option<(Arc<Backend>, f64)> {
-    let snap = snap?;
-    let blocks = default_routing_blocks(prompt_tokens);
-    let mut best: Option<(Arc<Backend>, f64)> = None;
-    for backend in router.pool(Phase::Prefill) {
-        let warmth = snap.prefill.get(&backend.label)?;
-        let strength = match isolation {
-            Some((registry, identity)) => gated_hit_strength(
-                &warmth.warmth,
-                registry,
-                identity.tenant,
-                identity.group,
-                identity.content_fp,
-                &blocks,
-            ),
-            None => warmth.warmth.hit_strength(&blocks),
-        };
-        if strength < ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE {
-            continue;
-        }
-        if best.as_ref().is_none_or(|(_, s)| strength > *s) {
-            best = Some((Arc::clone(backend), strength));
-        }
-    }
-    best
-}
-
-fn record_corrector_shadow(router: &Router, sample: CorrectorShadowSample) {
-    router
-        .control
-        .lock()
-        .expect("control plane")
-        .corrector_shadow
-        .record(sample);
-}
-
-fn record_rdma_cost_shadow(router: &Router, sample: RdmaCostShadowSample) {
-    router
-        .control
-        .lock()
-        .expect("control plane")
-        .rdma_cost_shadow
-        .record(sample);
-}
-
-/// Decode placement after prefill; requires valid hand-off when KV pool is wired.
-/// [ALG-ROUTE] [DEMI-KV-HANDOFF]
-pub struct DecodePlacement {
-    pub backend: Arc<Backend>,
-    reservation: Option<ReservationGuard>,
-}
-
-impl DecodePlacement {
-    #[must_use]
-    pub fn backend(&self) -> &Arc<Backend> {
-        &self.backend
-    }
-}
-
-pub fn on_prefill_complete(
-    router: &Router,
-    signals: &PrefillSignals,
-    prefill_response: &[u8],
-    prefill_label: &str,
-) -> Result<DecodePlacement, RouteError> {
-    let (handoff, reservation) = match (&router.ledger, &router.handoffs) {
-        (Some(ledger), Some(_handoffs)) => {
-            let handoff =
-                parse_prefill_handoff(prefill_response, signals.request_id.raw(), prefill_label)
-                    .filter(|h| h.is_valid())
-                    .ok_or(RouteError::HandoffMissing)?;
-
-            let expected = kv_breakdown(signals.prompt_tokens, router.bytes_per_token).kv_reserved;
-            if handoff.byte_len < expected {
-                return Err(RouteError::HandoffMissing);
-            }
-
-            let reservation = ledger
-                .try_reserve(handoff.request_id, handoff.byte_len)
-                .map_err(|e| match e {
-                    AdmitError::OverCapacity | AdmitError::DuplicateRequest => {
-                        RouteError::KvAdmitRejected
-                    }
-                })?;
-
-            (Some(handoff), Some(reservation))
-        }
-        _ => (None, None),
-    };
-
-    let phi = router
-        .ledger
-        .as_ref()
-        .map(|l| l.phi_barrier())
-        .filter(|b| b.get() > 1.0);
-    let extra: Vec<BarrierFactor> = phi.into_iter().collect();
-
-    let pool_pi = router.dataplane.read_pi();
-    let pf_topo = router.topology_for_label(prefill_label);
-    let snap = router.routing_snapshot();
-    let snap_ref = snap.as_deref();
-    let kv_bytes = handoff
-        .as_ref()
-        .map(|h| h.byte_len)
-        .unwrap_or_else(|| kv_breakdown(signals.prompt_tokens, router.bytes_per_token).kv_reserved);
-    let backend = select_decode_with_pi(
-        &DecodePlacementCtx {
-            prefill_label,
-            pf_topo: &pf_topo,
-            kv_bytes,
-            use_rdma_routing: router.rdma_routing,
-        },
-        router.pool(Phase::Decode),
-        snap_ref,
-        signals.prompt_tokens,
-        &extra,
-        pool_pi,
-    )
-    .or_else(|| router.pick_with_phi(Phase::Decode, phi))
-    .or_else(|| router.pick_colocated())
-    .ok_or(RouteError::NoBackend)?;
-
-    router.record_request_warmth(prefill_label, Phase::Prefill, signals.prompt_tokens);
-    router.record_request_warmth(&backend.label, Phase::Decode, signals.prompt_tokens);
-
-    if let Some(mut h) = handoff {
-        if let Some(reg) = &router.handoffs {
-            h.decode_label = Some(backend.label.clone());
-            reg.publish(h.clone());
-            let transport = router
-                .handoff_transport
-                .as_ref()
-                .map(Arc::clone)
-                .unwrap_or_else(Router::default_handoff_transport);
-            let outcome = transport.transfer(&h, signals.prefill_wall);
-            reg.record_transfer(outcome.bytes, outcome.wall);
-
-            if prefill_label != backend.label {
-                let pf_topo = router.topology_for_label(prefill_label);
-                let dc_topo = backend.topology().clone();
-                record_rdma_cost_shadow(
-                    router,
-                    RdmaCostShadowSample {
-                        pf_label: prefill_label.to_string(),
-                        dc_label: backend.label.clone(),
-                        distance: rdma_distance(&pf_topo, &dc_topo),
-                        kv_bytes: h.byte_len,
-                        analytic_transfer_ln: rdma_transfer_ln(h.byte_len, &pf_topo, &dc_topo),
-                        flat_penalty_ln: ROUTING_TRANSFER_PENALTY.ln(),
-                        observed_transfer_secs: outcome.wall.as_secs_f64(),
-                    },
-                );
-            }
-        }
-    }
-
-    let blocks = default_routing_blocks(signals.prompt_tokens);
-    let analytic_ln = backend
-        .cost_with_warmth_pi(&extra, snap_ref, &blocks, true, pool_pi)
-        .ln();
-    record_corrector_shadow(
-        router,
-        CorrectorShadowSample {
-            prompt_tokens: signals.prompt_tokens,
-            analytic_ln,
-            observed_us: signals.prefill_wall.as_micros().min(u64::MAX as u128) as u64,
-            pool_pi,
-            backend_label: backend.label.clone(),
-        },
-    );
-
-    router.deferred_control_tick(Some(signals.prompt_tokens), true);
-
-    Ok(DecodePlacement {
-        backend,
-        reservation,
-    })
-}
-
-/// Classify and spawn async prefill; return before prefill I/O completes.
-/// [ALG-ROUTE]
-pub fn admit_disaggregated(router: &Router, head: &[u8]) -> Result<Duration, RouteError> {
-    let start = std::time::Instant::now();
-    match route(router, head)? {
-        RoutePath::Disaggregated {
-            prefill,
-            request_id,
-            prompt_tokens,
-        } => {
-            let _worker = dispatch_prefill(
-                prefill,
-                head.to_vec(),
-                request_id,
-                prompt_tokens,
-                |_, _r| {},
-            );
-        }
-        RoutePath::Colocated(_) | RoutePath::DecodeOnly(_) => {
-            return Err(RouteError::NoBackend);
-        }
-    }
-    Ok(start.elapsed())
-}
-
-/// Dispatch prefill I/O on a worker thread; invoke `on_complete` when done.
-///
-/// The callback receives the raw I/O outcome so callers can distinguish a
-/// network failure (`Err`) from a successful but empty response (`Ok(vec![])`).
-pub fn dispatch_prefill(
-    prefill: Arc<Backend>,
-    head: Vec<u8>,
-    request_id: RequestId,
-    prompt_tokens: u64,
-    on_complete: impl FnOnce(PrefillSignals, io::Result<Vec<u8>>) + Send + 'static,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let started = std::time::Instant::now();
-        let response = run_prefill_io(&prefill, &head);
-        let prefill_wall = started.elapsed();
-        on_complete(
-            PrefillSignals {
-                request_id,
-                prompt_tokens,
-                prefill_wall,
-            },
-            response,
-        );
-    })
-}
-
-fn run_prefill_io(prefill: &Backend, head: &[u8]) -> io::Result<Vec<u8>> {
-    let mut upstream = TcpStream::connect(prefill.addr)?;
-    upstream.write_all(head)?;
-    upstream.shutdown(Shutdown::Write)?;
-    let mut resp = Vec::new();
-    upstream.read_to_end(&mut resp)?;
-    Ok(resp)
-}
-
-fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(1024);
-    let mut byte = [0u8; 1];
-    while stream.read(&mut byte)? == 1 {
-        buf.push(byte[0]);
-        if buf.ends_with(b"\r\n\r\n") || buf.len() >= MAX_HEAD {
-            break;
-        }
-    }
-    Ok(buf)
-}
-
-fn parse_content_length(head: &[u8]) -> Option<usize> {
-    header_value_ci(head, b"content-length")
-        .and_then(|v| std::str::from_utf8(v).ok())
-        .and_then(|s| s.trim().parse().ok())
-}
-
-/// Append a fixed `Content-Length` body from `client` onto `head`.
-fn read_body_into(client: &mut TcpStream, head: &mut Vec<u8>) -> io::Result<()> {
-    if let Some(len) = parse_content_length(head) {
-        if len > 0 {
-            let mut body = vec![0u8; len];
-            client.read_exact(&mut body)?;
-            head.extend_from_slice(&body);
-        }
-    }
-    Ok(())
-}
-
-/// Proxy a fully buffered HTTP request (head + body) to `backend`.
-fn proxy_buffer_to_backend(
-    client: &mut TcpStream,
-    request: &[u8],
-    backend: &Backend,
-) -> io::Result<()> {
-    backend.incr_inflight();
-    let _guard = InflightGuard(backend);
-
-    let mut upstream = TcpStream::connect(backend.addr)?;
-    upstream.write_all(request)?;
-    let mut resp = Vec::new();
-    upstream.read_to_end(&mut resp)?;
-    client.write_all(&resp)?;
-    Ok(())
-}
-
-struct InflightGuard<'a>(&'a Backend);
-
-impl Drop for InflightGuard<'_> {
-    fn drop(&mut self) {
-        self.0.decr_inflight();
-    }
-}
-
-struct AdmitGuard(Arc<AdmitBucket>);
-
-impl Drop for AdmitGuard {
-    fn drop(&mut self) {
-        self.0.release(1);
-    }
-}
-
-/// Userspace admit for one TCP connection — at most one guard per `handle_conn`.
-enum AdmitConn {
-    Shed,
-    Proceed(Option<AdmitGuard>),
-}
-
-fn admit_conn(router: &Router) -> AdmitConn {
-    let kernel_attached = router.kernel_admit_attached();
-    if !router.admit_mode.uses_userspace_admit(kernel_attached) {
-        return AdmitConn::Proceed(None);
-    }
-    if router.admit.try_admit().is_err() {
-        return AdmitConn::Shed;
-    }
-    AdmitConn::Proceed(Some(AdmitGuard(Arc::clone(&router.admit))))
-}
-
-fn handle_disaggregated(
-    mut client: TcpStream,
-    head: Vec<u8>,
-    router: Arc<Router>,
-    prefill: Arc<Backend>,
-    request_id: RequestId,
-    prompt_tokens: u64,
-    #[cfg(target_os = "linux")] _io_uring_session: Option<&mut IoUringProxySession>,
-) -> io::Result<()> {
-    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
-    let router2 = Arc::clone(&router);
-    let prefill_label = prefill.label.clone();
-    let _prefill_worker = dispatch_prefill(
-        prefill,
-        head.clone(),
-        request_id,
-        prompt_tokens,
-        move |signals, io_result| {
-            let response = match io_result {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("demiurge: prefill I/O error for {prefill_label}: {e}");
-                    let _ = done_tx.send(Err(RouteError::PrefillIo(e.to_string())));
-                    return;
-                }
-            };
-            let placement = match on_prefill_complete(&router2, &signals, &response, &prefill_label)
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = done_tx.send(Err(e));
-                    return;
-                }
-            };
-            let _ = done_tx.send(Ok(placement));
-        },
-    );
-
-    let placement = match done_rx
-        .recv()
-        .map_err(|_| io::Error::other("prefill channel"))?
-    {
-        Ok(p) => p,
-        Err(
-            RouteError::NoBackend
-            | RouteError::HandoffMissing
-            | RouteError::KvAdmitRejected
-            | RouteError::PrefillIo(_),
-        ) => {
-            let _ =
-                client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
-            return Ok(());
-        }
-    };
-
-    let result = proxy_buffer_to_backend(&mut client, &head, placement.backend.as_ref());
-    drop(placement.reservation);
-    result
-}
-
-/// Read a `DEMIURGE_*` env var as a boolean flag, falling back to `default`.
-/// Accepted truthy values: `"1"`, `"true"`, `"yes"`.
-fn env_bool(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(default)
-}
-
-fn rebalancer_actuation_enabled() -> bool {
-    env_bool("DEMIURGE_REBALANCER_ACTUATE", POOL_ACTUATION_ENABLED)
-}
-
-fn rdma_routing_enabled() -> bool {
-    env_bool("DEMIURGE_RDMA_ROUTING", false)
-}
-
-fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
-    let _admit_guard = match admit_conn(&router) {
-        AdmitConn::Shed => {
-            let mut client = client;
-            let _ =
-                client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
-            return Ok(());
-        }
-        AdmitConn::Proceed(guard) => guard,
-    };
-
-    let mut client = client;
-    #[cfg(target_os = "linux")]
-    let mut io_uring_session = router
-        .io_uring
-        .as_ref()
-        .and_then(|fwd| fwd.open_proxy_session().ok());
-
-    let mut head = {
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(ref mut session) = io_uring_session {
-                use std::os::fd::AsRawFd;
-                session.read_http_head(client.as_raw_fd(), MAX_HEAD)?
-            } else {
-                read_head(&mut client)?
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            read_head(&mut client)?
-        }
-    };
-    read_body_into(&mut client, &mut head)?;
-    std::hint::black_box(router.dataplane_pi());
-
-    match route(&router, &head) {
-        Ok(path) => match path {
-            RoutePath::Colocated(b) => {
-                let tokens = estimate_prompt_tokens(&head);
-                let label = b.label.clone();
-                let result = proxy_buffer_to_backend(&mut client, &head, b.as_ref());
-                if result.is_ok() {
-                    router.record_request_warmth(&label, Phase::Prefill, tokens);
-                }
-                result
-            }
-            RoutePath::DecodeOnly(b) => proxy_buffer_to_backend(&mut client, &head, b.as_ref()),
-            RoutePath::Disaggregated {
-                prefill,
-                request_id,
-                prompt_tokens,
-            } => handle_disaggregated(
-                client,
-                head,
-                router,
-                prefill,
-                request_id,
-                prompt_tokens,
-                #[cfg(target_os = "linux")]
-                io_uring_session.as_mut(),
-            ),
-        },
-        Err(
-            RouteError::NoBackend
-            | RouteError::HandoffMissing
-            | RouteError::KvAdmitRejected
-            | RouteError::PrefillIo(_),
-        ) => {
-            let _ =
-                client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
-            Ok(())
-        }
-    }
-}
-
-fn worker_thread_count() -> usize {
-    std::env::var("DEMIURGE_WORKER_THREADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(256)
-}
-
-pub fn serve(listener: TcpListener, router: Arc<Router>) -> io::Result<()> {
-    let workers = worker_thread_count();
-    let backlog = workers.saturating_mul(2).max(1);
-    let (tx, rx) = mpsc::sync_channel::<TcpStream>(backlog);
-    let shared_rx = Arc::new(Mutex::new(rx));
-    for _ in 0..workers {
-        let rx = Arc::clone(&shared_rx);
-        let router = Arc::clone(&router);
-        thread::spawn(move || loop {
-            let client = {
-                let guard = rx.lock().expect("worker rx");
-                match guard.recv() {
-                    Ok(client) => client,
-                    Err(_) => break,
-                }
-            };
-            let _ = handle_conn(client, Arc::clone(&router));
-        });
-    }
-
-    for conn in listener.incoming() {
-        let Ok(client) = conn else { continue };
-        match tx.try_send(client) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(mut client)) => {
-                let _ = client
-                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
-        }
-    }
-    Ok(())
 }

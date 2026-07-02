@@ -1,0 +1,208 @@
+# Demiurge Threat Model
+
+Status: **normative for wire-protocol design**. Any feature that moves state
+across a machine boundary (gossip, KV hand-off, control-plane RPC) must cite
+the relevant section of this document in its design review *before* the wire
+format is fixed. This document precedes — deliberately — the design of the
+gossip wire protocol.
+
+Scope: the router binary (`demiurge-router`), the state plane
+(`demiurge-state`), the shared-prefix authorization registry
+(`demiurge-auth`), the KV hand-off path (`demiurge-handoff`), and the kernel
+admission shed (`bpf/admit_shed.bpf.c`).
+
+---
+
+## 1. Assets
+
+| # | Asset | Why it matters |
+|---|---|---|
+| A1 | **Tenant cache isolation** | A warmth discount derived from another tenant's KV cache leaks membership/content information (a prefix-cache timing oracle) and steers traffic in attacker-observable ways. [DEMI-S1-DOMAIN] |
+| A2 | **Routing integrity** | Whoever influences the cost function influences placement: a poisoned warmth or occupancy signal can concentrate load, starve a victim tenant, or steer requests to a compromised backend. |
+| A3 | **Availability** | The router is a single ingress choke point; connection floods, oversized responses, and slow-loris bodies are the cheap attacks. [DEMI-XDP-SHED] |
+| A4 | **KV hand-off confidentiality/integrity** | Hand-off descriptors name KV handles and byte counts; a forged descriptor can reserve ledger capacity (DoS) or misdirect a decode continuation. [DEMI-KV-HANDOFF] |
+| A5 | **Control telemetry** | π actuation, admit capacity, and shed counters are driven by aggregated signals; falsified signals move real capacity. [DEMI-DP-RCU] |
+
+## 2. Trust boundaries
+
+```
+ client ──▶ [authenticating edge] ──▶ [router] ──▶ backends (prefill/decode)
+                                        │  ▲
+                       gossip peers ────┘  └──── KV hand-off transport
+```
+
+- **B1 — Client ↔ edge.** Untrusted. The edge terminates client auth
+  (API keys, mTLS — out of scope here) and is the *only* component allowed to
+  set the identity headers `X-Demiurge-Tenant`, `X-Demiurge-Group`,
+  `X-Demiurge-Prefix-Fp`. The edge MUST strip these headers from inbound
+  client traffic; if it does not, any client can claim any tenant identity
+  and the isolation gating in `parse_request_identity` is void.
+- **B2 — Edge ↔ router.** Semi-trusted (same operator). The router treats
+  the identity headers as pre-authenticated ([`RequestIdentity`] docs); it
+  performs authorization (group membership, template match) but not
+  authentication. Deployments crossing untrusted networks need mTLS on this
+  hop.
+- **B3 — Router ↔ backends.** Semi-trusted. Backends supply KV hand-off
+  headers (`x-demiurge-kv-handle`, `x-demiurge-kv-bytes`) that the router
+  currently believes after plausibility checks only (`is_valid()`, expected
+  byte floor). A compromised backend is in the threat model — see T4.
+- **B4 — Router ↔ gossip peers.** **Untrusted until authenticated.** Today
+  gossip (`demiurge_state::gossip`) is in-process only; the moment it gets a
+  socket, every input in `apply_gossip`/`heal_merge` is attacker-controlled.
+  See §4 — this boundary has the strictest requirements for future work.
+- **B5 — Kernel/dataplane.** Trusted (same host, root-installed XDP).
+
+## 3. Adversaries
+
+- **M1 — Malicious tenant.** Valid credentials at the edge; crafts headers,
+  token counts, and request timing. Goals: read another tenant's cache
+  warmth (timing oracle), free-ride on shared caches, exhaust capacity.
+- **M2 — Compromised backend.** Full control of one pool member's responses
+  and timing. Goals: attract or repel traffic, forge hand-offs, exhaust
+  router memory.
+- **M3 — Network attacker (gossip/hand-off path).** Can inject, replay, or
+  tamper with any unauthenticated cross-machine message. Relevant the moment
+  gossip or hand-off leaves localhost.
+- **M4 — Volumetric attacker.** No credentials; floods connections/packets.
+
+## 4. Threats, mitigations, gaps
+
+### T1 — Cross-tenant cache-warmth leakage (M1 → A1)
+
+A tenant presents another group's prefix content (byte-identical system
+prompt) hoping to inherit its warmth discount and, via latency, confirm
+cache residency.
+
+**Mitigated.** Membership and template match are checked on the strongly
+consistent registry path *before* any discount applies
+(`SharedPrefixGroupRegistry::resolve_shared_key`); non-members and template
+mismatches fall back to a tenant-private cache-domain key, so their lookup
+can only hit their own warmth. Enforced end-to-end on the live TCP path
+(`p7_live_wire::live_tcp_path_gates_warmth_by_identity`). [DEMI-S1-DOMAIN]
+
+**Residual gap — G1 (high):** cache-domain salts come from
+`DefaultHasher` (SipHash-1-3 with *fixed, public* keys) over
+`(owner, domain, shared)`. An adversary can compute any domain's salt
+offline and search for routing-block collisions across domains. The same
+applies to `PrefixFingerprint::of`. Before multi-tenant production:
+derive salts with a keyed PRF (e.g. BLAKE3 keyed mode or SipHash with a
+per-deployment secret key) and make `PrefixFingerprint` a keyed hash of the
+prefix bytes. Tracked as the top hardening item.
+
+**Residual gap — G2 (medium):** warmth timing is still observable *within*
+a legitimately shared group; a member can probe whether a co-member has
+already warmed a template. Accepted: sharing a cache domain is opt-in and
+implies this visibility.
+
+### T2 — Identity forgery at the edge (M1 → A1, A2)
+
+**Mitigated by contract, not by code.** The router cannot distinguish a
+forged `X-Demiurge-Tenant` from a real one (B1/B2). The deployment
+requirement is: edge strips inbound identity headers, edge-to-router link is
+authenticated. Missing headers fail closed (no identity → no shared-domain
+warmth benefit). Do **not** expose the router port directly to clients.
+
+### T3 — Gossip poisoning (M3 → A2, A5)
+
+`heal_merge` takes `max()` of occupancy/KV bytes and inserts unknown
+backends (`or_insert_with`); `apply_gossip` inserts warmth blocks without
+proof of origin. A network attacker could: inflate a victim backend's
+occupancy (traffic repulsion), advertise phantom warm backends (traffic
+attraction), or wedge occupancy at 1.0 forever (monotonic max has no decay).
+
+**Current stance:** gossip is compiled in-process only; B4 does not exist on
+any wire today, so the attack surface is nil. **Wire-protocol requirements
+(normative, from this document):**
+
+1. Peer authentication: mTLS with a fleet-internal CA, or signed updates
+   (Ed25519) with per-peer keys. No unauthenticated UDP merge, ever.
+2. Origin binding: a peer may only assert state for backends it owns
+   (`source_label` must match the authenticated peer identity); merging
+   another peer's claims about a third backend requires that third party's
+   signature (or is dropped).
+3. Freshness: updates carry a monotonic per-peer sequence + timestamp;
+   replays and stale generations are rejected. Occupancy must be
+   last-writer-wins with decay, not monotonic max.
+4. Bounded influence: warmth insertions are rate-limited per peer and capped
+   by the cuckoo load factor (already enforced by `WarmthMap::insert`);
+   a peer that persistently fills maps gets quarantined.
+5. Membership: peers join via the control plane (CP, strongly consistent),
+   never by being mentioned in gossip (`or_insert_with` on an unknown label
+   must become a drop + alert on the wire path).
+
+### T4 — Forged or oversized prefill responses (M2 → A3, A4)
+
+A compromised prefill backend can claim arbitrary `x-demiurge-kv-bytes`
+(ledger exhaustion → 503s for everyone) or stream an unbounded body into the
+router's buffer.
+
+**Mitigated (partially):**
+- Response buffering is capped at `dataplane.prefill_response_max_bytes`
+  (default 1 MiB); an oversized response fails that hand-off gracefully
+  (503 to the one client, no router memory growth) —
+  `p7_live_wire::oversized_prefill_response_sheds_gracefully`.
+- Byte-count floor: claimed KV bytes below the analytic expectation for the
+  prompt are rejected (`on_prefill_complete`).
+- Duplicate reservations are rejected by request id; reservations are
+  RAII-released. [DEMI-KV-HANDOFF]
+
+**Residual gap — G3 (medium):** there is no *upper* sanity bound on claimed
+KV bytes, so one backend can still reserve the whole decode ledger a few
+requests at a time. Add a per-request ceiling (multiple of the analytic
+expectation) and per-backend outstanding-reservation quota.
+**Residual gap — G4 (medium):** hand-off descriptors are unsigned; when the
+hand-off transport leaves localhost it needs the same authentication story
+as gossip (§T3 requirements apply verbatim).
+
+### T5 — Resource exhaustion (M4 → A3)
+
+**Mitigated, defense in depth:**
+- L4: XDP token-bucket shed (`admit_shed.bpf.c`), refilled to
+  π-scaled capacity. [DEMI-XDP-SHED]
+- L7 admission: userspace `AdmitBucket` (one token per connection, RAII).
+- L7 concurrency: `serve` caps live proxied connections
+  (`dataplane.max_conns`, default 1024, `DEMIURGE_MAX_CONNS`); excess
+  connections get an immediate 503 instead of an unbounded thread —
+  `p7_live_wire::serve_sheds_503_over_connection_cap`.
+- Head parsing is bounded (`MAX_HEAD` = 64 KiB); prefill buffering is
+  capped (T4).
+
+**Residual gap — G5 (low):** the BPF bucket uses
+`__sync_fetch_and_sub` and can transiently wrap, over-admitting at most one
+packet per CPU per refill window; bounded and harmless at current burst
+sizes, but fix (compare-exchange loop) before advertising exact admission
+counts.
+**Residual gap — G6 (low):** thread-per-connection remains within the cap;
+1024 threads is acceptable on target hosts, but the io_uring path should
+eventually own the accept loop.
+
+### T6 — Cost-function manipulation (M1, M2 → A2)
+
+A backend that under-reports latency (or a tenant that inflates
+`X-Demiurge-Tokens`) shifts placement.
+
+**Mitigated structurally:** the cost algebra is fail-expensive — broken or
+out-of-range signals saturate toward *more expensive*, never cheaper
+([DEMI-FAIL-EXPENSIVE], [DEMI-COST-POS]); `Cost::from_ln` now saturates
+non-finite logs the same way, so no arithmetic path can mint an artificially
+cheap target. Token-count inflation only pushes a request onto the slower
+disaggregated path (self-harm). The corrector multiplier is clamped to
+`[1−α, 1+α]`, bounding any learned component's influence.
+[DEMI-CORR-CLAMP]
+
+## 5. Explicit non-goals (current phase)
+
+- Client authentication and API-key management (edge responsibility, B1).
+- Encryption of KV cache contents at rest on backends.
+- Byzantine control-plane consensus; the CP registry is single-process and
+  strongly consistent by construction on Track A.
+
+## 6. Hardening backlog (priority order)
+
+1. **G1** — keyed salts + keyed prefix fingerprints (`demiurge-auth`).
+2. **T3** — authenticated gossip wire protocol per §4 requirements
+   (blocks: any networked state plane).
+3. **G3/G4** — hand-off byte ceiling, per-backend reservation quota, signed
+   descriptors (blocks: cross-host hand-off transport).
+4. **G5** — CAS-based BPF token bucket.
+5. **G6** — io_uring-owned accept loop replacing thread-per-connection.
