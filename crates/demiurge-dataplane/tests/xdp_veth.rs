@@ -1,12 +1,19 @@
 //! Runtime XDP attach on a veth pair (Linux + root). [DEMI-XDP-SHED]
+//!
+//! The kernel bucket gates *new-connection TCP SYNs only*; TCP probes are
+//! sent from a peer network namespace so they traverse the wire (same-netns
+//! TCP would short-circuit via the local route and never hit XDP).
 #![cfg(target_os = "linux")]
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-use demiurge_dataplane::{XdpAdmitShed, XdpAttachError, XDP_DEFAULT_CAPACITY};
+use demiurge_dataplane::{XdpAdmitConfig, XdpAdmitShed, XdpAttachError};
 
 static VETH_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+const HOST_IP: &str = "192.0.2.1";
 
 struct VethPair {
     iface: String,
@@ -30,6 +37,59 @@ impl VethPair {
 impl Drop for VethPair {
     fn drop(&mut self) {
         let _ = run_ip(&["link", "del", &self.iface]);
+    }
+}
+
+/// veth pair with the peer end in its own netns: traffic from the netns
+/// genuinely traverses the veth and hits XDP on the host-side ingress.
+struct VethNs {
+    iface: String,
+    ns: String,
+}
+
+impl VethNs {
+    fn create() -> Result<Self, String> {
+        let n = VETH_SEQ.fetch_add(1, Ordering::Relaxed);
+        let a = format!("demi-na{n}");
+        let b = format!("demi-nb{n}");
+        let ns = format!("demi-ns{n}");
+        run_ip(&["link", "add", &a, "type", "veth", "peer", "name", &b])?;
+        run_ip(&["netns", "add", &ns])?;
+        run_ip(&["link", "set", &b, "netns", &ns])?;
+        run_ip(&["addr", "add", "192.0.2.1/30", "dev", &a])?;
+        run_ip(&["link", "set", &a, "up"])?;
+        run_ip(&["-n", &ns, "addr", "add", "192.0.2.2/30", "dev", &b])?;
+        run_ip(&["-n", &ns, "link", "set", &b, "up"])?;
+        run_ip(&["-n", &ns, "link", "set", "lo", "up"])?;
+        Ok(Self { iface: a, ns })
+    }
+
+    /// One TCP connection attempt from the netns to `HOST_IP:port`.
+    /// No listener runs on the host side: an *admitted* SYN elicits an
+    /// immediate RST (fast failure), a *shed* SYN times out. Either way the
+    /// SYN itself traversed the wire, which is all these tests need.
+    fn syn_probe(&self, port: u16, timeout_s: u32) {
+        let _ = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.ns,
+                "timeout",
+                &timeout_s.to_string(),
+                "bash",
+                "-c",
+                &format!("echo > /dev/tcp/{HOST_IP}/{port}"),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+impl Drop for VethNs {
+    fn drop(&mut self) {
+        let _ = run_ip(&["link", "del", &self.iface]);
+        let _ = run_ip(&["netns", "del", &self.ns]);
     }
 }
 
@@ -63,15 +123,30 @@ fn require_root_and_bpf() -> Result<(), String> {
     Ok(())
 }
 
+fn config(capacity: u64, refill_per_sec: u64, listen_port: Option<u16>) -> XdpAdmitConfig {
+    XdpAdmitConfig {
+        capacity,
+        refill_per_sec,
+        listen_port,
+    }
+}
+
 #[test]
 #[ignore = "needs root + veth; run ./scripts/xdp-veth-smoke.sh"]
 fn xdp_admit_shed_attaches_and_seeds_map() {
     require_root_and_bpf().expect("precheck");
     let veth = VethPair::create().expect("veth");
-    let shed = XdpAdmitShed::attach(&veth.iface, 4).expect("attach");
+    let shed = XdpAdmitShed::attach(&veth.iface, config(4, 0, None)).expect("attach");
     assert_eq!(shed.available().expect("tokens"), 4);
     assert_eq!(shed.capacity().expect("cap"), 4);
     assert_eq!(shed.shed_total().expect("shed"), 0);
+    assert_eq!(shed.pass_total().expect("pass"), 0);
+    assert!(
+        ["driver", "skb", "skb-fallback"].contains(&shed.attach_mode()),
+        "unexpected attach mode {}",
+        shed.attach_mode()
+    );
+    assert!(shed.link_alive());
 }
 
 #[test]
@@ -79,7 +154,7 @@ fn xdp_admit_shed_attaches_and_seeds_map() {
 fn xdp_admit_shed_reseed_updates_tokens() {
     require_root_and_bpf().expect("precheck");
     let veth = VethPair::create().expect("veth");
-    let mut shed = XdpAdmitShed::attach(&veth.iface, 4).expect("attach");
+    let mut shed = XdpAdmitShed::attach(&veth.iface, config(4, 0, None)).expect("attach");
     assert_eq!(shed.available().expect("tokens"), 4);
 
     shed.reseed(2).expect("reseed");
@@ -88,7 +163,7 @@ fn xdp_admit_shed_reseed_updates_tokens() {
     assert_eq!(shed.shed_total().expect("shed"), 0);
 }
 
-fn send_probes_via_ping(peer: &str, dest: &str, count: u32) -> Result<(), String> {
+fn send_probes_via_ping(peer: &str, dest: &str, count: u32) -> Result<bool, String> {
     let status = Command::new("ping")
         .args([
             "-I",
@@ -105,32 +180,108 @@ fn send_probes_via_ping(peer: &str, dest: &str, count: u32) -> Result<(), String
         .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| format!("ping: {e}"))?;
-    // Some probes may fail once tokens are exhausted; only require the command to run.
-    if status.success() || status.code() == Some(1) {
-        Ok(())
-    } else {
-        Err(format!("ping exited with {status}"))
-    }
+    Ok(status.success())
 }
 
+// The bucket is an overload valve for *new work*, never a packet firewall:
+// ICMP (and any non-SYN traffic) passes untouched even with zero tokens.
 #[test]
 #[ignore = "needs root + veth; run ./scripts/xdp-veth-smoke.sh"]
-fn xdp_admit_shed_drops_packets_when_exhausted() {
+fn xdp_admit_shed_passes_non_syn_traffic() {
     require_root_and_bpf().expect("precheck");
-    std::env::set_var("DEMIURGE_XDP_FLAGS", "skb");
     let veth = VethPair::create().expect("veth");
-    let shed = XdpAdmitShed::attach(&veth.iface, 2).expect("attach");
+    let shed = XdpAdmitShed::attach(&veth.iface, config(1, 0, None)).expect("attach");
 
-    send_probes_via_ping(&veth.peer, "192.0.2.1", 8).expect("ping probes");
-
-    let shed_count = shed.shed_total().expect("shed");
-    let tokens = shed.available().expect("tokens");
-    std::env::remove_var("DEMIURGE_XDP_FLAGS");
-    assert!(
-        shed_count >= 1,
-        "expected XDP_DROP after token exhaustion (shed={shed_count}, tokens={tokens})"
+    let ok = send_probes_via_ping(&veth.peer, HOST_IP, 8).expect("ping probes");
+    assert!(ok, "ICMP must pass regardless of bucket state");
+    assert_eq!(shed.shed_total().expect("shed"), 0, "ICMP is never gated");
+    assert_eq!(
+        shed.available().expect("tokens"),
+        1,
+        "non-SYN traffic must not consume tokens"
     );
-    assert_eq!(tokens, 0);
+}
+
+// [DEMI-XDP-SHED] — new-connection SYNs beyond capacity are dropped in kernel.
+#[test]
+#[ignore = "needs root + veth; run ./scripts/xdp-veth-smoke.sh"]
+fn xdp_admit_shed_sheds_new_syns_when_exhausted() {
+    require_root_and_bpf().expect("precheck");
+    let veth = VethNs::create().expect("veth+ns");
+    let shed = XdpAdmitShed::attach(&veth.iface, config(2, 0, None)).expect("attach");
+
+    for _ in 0..5 {
+        veth.syn_probe(8080, 1);
+    }
+
+    let pass = shed.pass_total().expect("pass");
+    let dropped = shed.shed_total().expect("shed");
+    assert_eq!(
+        pass, 2,
+        "exactly capacity SYNs admitted with refill disabled (pass={pass}, shed={dropped})"
+    );
+    assert!(
+        dropped >= 3,
+        "attempts beyond capacity must shed (pass={pass}, shed={dropped})"
+    );
+    assert_eq!(shed.available().expect("tokens"), 0);
+}
+
+// SYNs to unrelated ports never pay the admission toll when a listen port
+// is configured.
+#[test]
+#[ignore = "needs root + veth; run ./scripts/xdp-veth-smoke.sh"]
+fn xdp_admit_shed_gates_only_listen_port() {
+    require_root_and_bpf().expect("precheck");
+    let veth = VethNs::create().expect("veth+ns");
+    let shed = XdpAdmitShed::attach(&veth.iface, config(1, 0, Some(4242))).expect("attach");
+
+    for _ in 0..3 {
+        veth.syn_probe(9999, 1);
+    }
+    assert_eq!(shed.pass_total().expect("pass"), 0, "other ports ungated");
+    assert_eq!(
+        shed.shed_total().expect("shed"),
+        0,
+        "other ports never shed"
+    );
+    assert_eq!(shed.available().expect("tokens"), 1);
+
+    veth.syn_probe(4242, 1);
+    veth.syn_probe(4242, 1);
+
+    assert_eq!(shed.pass_total().expect("pass"), 1, "gated port admits");
+    assert!(
+        shed.shed_total().expect("shed") >= 1,
+        "gated port sheds past capacity"
+    );
+}
+
+// In-kernel refill recovers the bucket without any userspace reseed.
+#[test]
+#[ignore = "needs root + veth; run ./scripts/xdp-veth-smoke.sh"]
+fn xdp_admit_shed_refills_tokens_in_kernel() {
+    require_root_and_bpf().expect("precheck");
+    let veth = VethNs::create().expect("veth+ns");
+    // 1 token/s: slow enough that back-to-back probes exhaust, fast enough
+    // that a 2.5s wait provably accrues.
+    let shed = XdpAdmitShed::attach(&veth.iface, config(1, 1, None)).expect("attach");
+
+    veth.syn_probe(8080, 1); // admitted, drains the only token
+    veth.syn_probe(8080, 1); // shed (sub-second gap, nothing accrued yet)
+    std::thread::sleep(Duration::from_millis(2500));
+    veth.syn_probe(8080, 1); // admitted from refilled tokens
+
+    let pass = shed.pass_total().expect("pass");
+    let dropped = shed.shed_total().expect("shed");
+    assert!(
+        pass >= 2,
+        "refill must re-admit after the wait (pass={pass}, shed={dropped})"
+    );
+    assert!(
+        dropped >= 1,
+        "back-to-back probe past capacity must shed (pass={pass}, shed={dropped})"
+    );
 }
 
 #[test]
@@ -141,7 +292,7 @@ fn xdp_attach_errors_without_object_on_linux() {
     let missing = std::env::temp_dir().join("demiurge-missing-bpf.o");
     assert!(!missing.is_file());
     std::env::set_var("DEMIURGE_BPF_OBJECT", missing.to_string_lossy().as_ref());
-    let err = match XdpAdmitShed::attach("lo", XDP_DEFAULT_CAPACITY) {
+    let err = match XdpAdmitShed::attach("lo", XdpAdmitConfig::default()) {
         Err(e) => e,
         Ok(_) => panic!("expected ObjectNotBuilt"),
     };

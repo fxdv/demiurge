@@ -38,7 +38,7 @@ pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedg
 pub use demiurge_dataplane::IoUringProxySession;
 pub use demiurge_dataplane::{
     pool_core_scale, AdmitMode, DataPlaneSnapshot as RcuDataPlaneSnapshot, ForwardDecision,
-    IoUringForwarder, RcuRoutingTable, XdpAdmitShed, XdpAttachError,
+    IoUringForwarder, RcuRoutingTable, XdpAdmitConfig, XdpAdmitShed, XdpAttachError,
 };
 pub use demiurge_handoff::{
     HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
@@ -385,12 +385,23 @@ impl Router {
     }
 
     /// Attach kernel XDP admit-shed on `iface` (Linux + built BPF object).
-    pub fn with_kernel_admit(mut self, iface: &str) -> Result<Self, XdpAttachError> {
+    /// `listen_port` narrows the SYN gate to the router's port; `None` gates
+    /// every TCP SYN on the interface (dedicated-iface deployments).
+    pub fn with_kernel_admit(
+        mut self,
+        iface: &str,
+        listen_port: Option<u16>,
+    ) -> Result<Self, XdpAttachError> {
         if !self.admit_mode.wants_kernel() {
             self.admit_mode = AdmitMode::Hybrid;
         }
         let cap = admit_capacity_for_pi(DATAPLANE_ADMIT_BURST, self.dataplane.read_pi());
-        let shed = XdpAdmitShed::attach(iface, cap)?;
+        let config = XdpAdmitConfig {
+            capacity: cap,
+            listen_port,
+            ..XdpAdmitConfig::default()
+        };
+        let shed = XdpAdmitShed::attach(iface, config)?;
         *self.kernel_admit.lock().expect("kernel admit") = Some(shed);
         self.sync_admit_capacity(cap);
         Ok(self)
@@ -433,6 +444,21 @@ impl Router {
         if cap != prev {
             self.last_admit_capacity.store(cap, Ordering::Relaxed);
             self.sync_admit_capacity(cap);
+        }
+    }
+
+    /// Drop a dead kernel admit link so Hybrid mode fails back to the
+    /// userspace bucket instead of running with no admission at all.
+    /// Called on the RCU heartbeat cadence.
+    fn check_kernel_admit_link(&self) {
+        let Ok(mut guard) = self.kernel_admit.lock() else {
+            return;
+        };
+        if guard.as_ref().is_some_and(|s| !s.link_alive()) {
+            eprintln!(
+                "demiurge-router: kernel admit-shed link lost; falling back to userspace bucket"
+            );
+            *guard = None;
         }
     }
 
@@ -642,6 +668,7 @@ impl Router {
                 self.dataplane.generation().saturating_add(1),
                 pi,
             ));
+            self.check_kernel_admit_link();
             if self.rebalancer_actuation || self.kernel_admit_attached() {
                 self.maybe_sync_admit_for_pi(pi);
             }

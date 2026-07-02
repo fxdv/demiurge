@@ -204,6 +204,10 @@ tests = [
     "userspace_admit_limits_concurrent_connections",
     "harden_tcp_503_on_admit_exhaust",
     "harden_admit_conn_single_guard_path",
+    "bpf_model_never_over_admits_concurrently",
+    "xdp_admit_shed_sheds_new_syns_when_exhausted",
+    "xdp_admit_shed_passes_non_syn_traffic",
+    "xdp_admit_shed_refills_tokens_in_kernel",
 ]
 
 # --- Track A (macOS portable) — shadow tooling --------------------------------

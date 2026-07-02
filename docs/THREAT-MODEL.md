@@ -157,8 +157,16 @@ as gossip (§T3 requirements apply verbatim).
 ### T5 — Resource exhaustion (M4 → A3)
 
 **Mitigated, defense in depth:**
-- L4: XDP token-bucket shed (`admit_shed.bpf.c`), refilled to
-  π-scaled capacity. [DEMI-XDP-SHED]
+- L4: XDP token-bucket shed (`admit_shed.bpf.c`) gates *new-connection TCP
+  SYNs only* (optionally scoped to the router's listen port); established
+  flows, ICMP, and ARP always pass, so shedding rejects new work without
+  severing in-flight connections or management traffic. Tokens are signed
+  with fail-expensive compensation — an exhausted bucket cannot wrap open
+  under concurrent multi-CPU shed
+  (`bpf_model_never_over_admits_concurrently`) — and refill in kernel at
+  `dataplane.admit_refill_per_sec` with no userspace liveness dependency;
+  capacity remains π-scaled via reseed. Requires Linux >= 5.12
+  (`BPF_ATOMIC`, `-mcpu=v3`). [DEMI-XDP-SHED]
 - L7 admission: userspace `AdmitBucket` (one token per connection, RAII).
 - L7 concurrency: `serve` caps live proxied connections
   (`dataplane.max_conns`, default 1024, `DEMIURGE_MAX_CONNS`); excess
@@ -167,11 +175,16 @@ as gossip (§T3 requirements apply verbatim).
 - Head parsing is bounded (`MAX_HEAD` = 64 KiB); prefill buffering is
   capped (T4).
 
-**Residual gap — G5 (low):** the BPF bucket uses
-`__sync_fetch_and_sub` and can transiently wrap, over-admitting at most one
-packet per CPU per refill window; bounded and harmless at current burst
-sizes, but fix (compare-exchange loop) before advertising exact admission
-counts.
+**Closed — G5:** the BPF bucket previously used an *unsigned*
+`__sync_fetch_and_sub`, which wrapped to `2^64-1` under concurrent
+exhaustion and left the bucket permanently fail-open (unbounded over-admit
+during overload — worse than the original "at most one packet" estimate).
+Tokens are now signed with `prev <= 0` compensation; the concurrent model
+test would fail on the old logic.
+**Residual gap — G5b (low):** Hybrid-mode kernel-link liveness is detected
+via interface existence on the RCU heartbeat (falls back to the userspace
+bucket); an admin-forced `ip link set … xdp off` detach is not observable
+this way and would leave Hybrid unenforced at L4 (L7 caps still hold).
 **Residual gap — G6 (low):** thread-per-connection remains within the cap;
 1024 threads is acceptable on target hosts, but the io_uring path should
 eventually own the accept loop.

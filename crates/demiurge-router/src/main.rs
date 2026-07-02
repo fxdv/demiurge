@@ -6,7 +6,9 @@
 //!   DEMIURGE_DECODE        decode pool spec          label@host:port@seconds,...
 //!   DEMIURGE_TOPOLOGY       label@node/rack/cluster,... (optional RDMA shadow)
 //!   DEMIURGE_ADMIT_MODE    userspace | xdp | hybrid  (default userspace)
-//!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux)
+//!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux >= 5.12)
+//!   DEMIURGE_XDP_FLAGS     skb to force generic mode (default: driver, skb fallback)
+//!   DEMIURGE_BPF_PIN_DIR   pin BPF maps under this bpffs dir (telemetry survives restarts)
 //!   DEMIURGE_IOURING       1 for io_uring recv/send on production TCP proxy (Linux)
 //!   DEMIURGE_BANNER        0|1 force disable/enable startup banner (default: TTY)
 //!   DEMIURGE_HANDOFF_TRANSPORT  tcp (default) | mock_rdma | modeled_rdma
@@ -121,8 +123,11 @@ fn configure() -> Result<(TcpListener, Arc<Router>), String> {
     }
     let xdp_iface = std::env::var("DEMIURGE_XDP_IFACE").ok();
     if let Some(ref iface) = xdp_iface {
+        // Narrow the kernel SYN gate to the router's own port so unrelated
+        // services on the interface never pay the admission toll.
+        let listen_port = listener.local_addr().ok().map(|a| a.port());
         router = router
-            .with_kernel_admit(iface)
+            .with_kernel_admit(iface, listen_port)
             .map_err(|e| format!("XDP attach on {iface}: {e}"))?;
     }
 
