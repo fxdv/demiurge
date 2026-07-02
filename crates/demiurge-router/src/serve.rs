@@ -12,9 +12,9 @@ use demiurge_dataplane::AdmitBucket;
 #[cfg(target_os = "linux")]
 use demiurge_dataplane::IoUringProxySession;
 
-use crate::http::{parse_request_identity, read_head};
 #[cfg(target_os = "linux")]
 use crate::http::MAX_HEAD;
+use crate::http::{parse_request_identity, read_head};
 use crate::routing::{route_with_identity, RouteError, RoutePath};
 use crate::{Backend, RequestId, Router};
 

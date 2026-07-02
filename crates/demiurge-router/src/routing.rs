@@ -8,21 +8,18 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use demiurge_control::{
-    AdmitError, CorrectorShadowSample, RdmaCostShadowSample, ReservationGuard,
-};
+use demiurge_control::{AdmitError, CorrectorShadowSample, RdmaCostShadowSample, ReservationGuard};
 use demiurge_cost::{
-    kv_breakdown, rdma_distance, rdma_transfer_ln, BarrierFactor, DATAPLANE_PREFILL_RESPONSE_MAX_BYTES,
-    ROUTING_SHORT_CONTEXT_TOKENS, ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE, ROUTING_TRANSFER_PENALTY,
+    kv_breakdown, rdma_distance, rdma_transfer_ln, BarrierFactor,
+    DATAPLANE_PREFILL_RESPONSE_MAX_BYTES, ROUTING_SHORT_CONTEXT_TOKENS,
+    ROUTING_SHORT_CONTEXT_WARMTH_OVERRIDE, ROUTING_TRANSFER_PENALTY,
 };
 use demiurge_handoff::parse_prefill_handoff;
 use demiurge_state::default_routing_blocks;
 
 use crate::backend::{select_decode_with_pi, select_prefill_with_identity_pi, DecodePlacementCtx};
 use crate::http::{estimate_prompt_tokens, is_decode_only};
-use crate::{
-    Backend, GroupId, PrefixFingerprint, Router, SharedPrefixGroupRegistry, TenantId,
-};
+use crate::{Backend, GroupId, PrefixFingerprint, Router, SharedPrefixGroupRegistry, TenantId};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -261,7 +258,8 @@ pub fn on_prefill_complete(
                     .filter(|h| h.is_valid())
                     .ok_or(RouteError::HandoffMissing)?;
 
-            let expected = kv_breakdown(signals.prompt_tokens, router.bytes_per_token()).kv_reserved;
+            let expected =
+                kv_breakdown(signals.prompt_tokens, router.bytes_per_token()).kv_reserved;
             if handoff.byte_len < expected {
                 return Err(RouteError::HandoffMissing);
             }

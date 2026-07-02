@@ -216,7 +216,9 @@ fn parse_external_fleet(spec: &str) -> Result<Vec<(String, SocketAddr, f64)>, St
     for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let parts: Vec<&str> = item.split('@').collect();
         if parts.len() != 3 {
-            return Err(format!("bad backend {item:?}; want label@host:port@seconds"));
+            return Err(format!(
+                "bad backend {item:?}; want label@host:port@seconds"
+            ));
         }
         let addr = parts[1]
             .parse()
@@ -327,10 +329,14 @@ pub fn ab_bench(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         };
         match args[i].as_str() {
             "--backends-count" => {
-                cfg.backends = take(&mut i).ok_or("--backends-count needs a value")?.parse()?;
+                cfg.backends = take(&mut i)
+                    .ok_or("--backends-count needs a value")?
+                    .parse()?;
             }
             "--base-delay-us" => {
-                cfg.base_delay_us = take(&mut i).ok_or("--base-delay-us needs a value")?.parse()?;
+                cfg.base_delay_us = take(&mut i)
+                    .ok_or("--base-delay-us needs a value")?
+                    .parse()?;
             }
             "--concurrency" => {
                 cfg.concurrency = take(&mut i).ok_or("--concurrency needs a value")?.parse()?;
@@ -340,8 +346,7 @@ pub fn ab_bench(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     take(&mut i).ok_or("--requests needs a value")?.parse()?;
             }
             "--backends" => {
-                cfg.backend_spec =
-                    Some(take(&mut i).ok_or("--backends needs a value")?.clone());
+                cfg.backend_spec = Some(take(&mut i).ok_or("--backends needs a value")?.clone());
             }
             other => return Err(format!("ab-bench: unknown flag {other:?}").into()),
         }
@@ -352,7 +357,11 @@ pub fn ab_bench(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "ab-bench: {} backends (tiered {}µs..{}µs), {}×{} requests per arm",
         cfg.backends,
         cfg.base_delay_us,
-        tier_delay(cfg.base_delay_us, cfg.backends.saturating_sub(1), cfg.backends),
+        tier_delay(
+            cfg.base_delay_us,
+            cfg.backends.saturating_sub(1),
+            cfg.backends
+        ),
         cfg.concurrency,
         cfg.requests_per_worker,
     );
@@ -373,8 +382,10 @@ pub fn ab_bench(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         arms,
     };
 
-    println!("\n  {:<12} {:>7} {:>6} {:>10} {:>9} {:>9} {:>9} {:>9}",
-        "policy", "ok", "err", "req/s", "p50 µs", "p90 µs", "p99 µs", "max µs");
+    println!(
+        "\n  {:<12} {:>7} {:>6} {:>10} {:>9} {:>9} {:>9} {:>9}",
+        "policy", "ok", "err", "req/s", "p50 µs", "p90 µs", "p99 µs", "max µs"
+    );
     println!("  {}", "─".repeat(78));
     let cost_p99 = report
         .arms
@@ -384,7 +395,10 @@ pub fn ab_bench(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(0);
     for a in &report.arms {
         let delta = if a.policy != "cost" && cost_p99 > 0 && a.p99_us > 0 {
-            format!("  ({:+.1}% p99 vs cost)", (a.p99_us as f64 / cost_p99 as f64 - 1.0) * 100.0)
+            format!(
+                "  ({:+.1}% p99 vs cost)",
+                (a.p99_us as f64 / cost_p99 as f64 - 1.0) * 100.0
+            )
         } else {
             String::new()
         };

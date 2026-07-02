@@ -152,8 +152,7 @@ impl Backend {
         pool_pi: f64,
         isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
     ) -> Cost {
-        let discount =
-            warmth_discount_for(snapshot, decode_pool, &self.label, blocks, isolation);
+        let discount = warmth_discount_for(snapshot, decode_pool, &self.label, blocks, isolation);
         if extra.is_empty() && discount.is_none() {
             return Cost::from_ln(self.selection_ln(pool_pi, !decode_pool));
         }

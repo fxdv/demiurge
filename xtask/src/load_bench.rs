@@ -719,7 +719,11 @@ fn spawn_large_body_backend(delay_us: u64, body_bytes: usize) -> SocketAddr {
     addr
 }
 
-pub(crate) fn spawn_mock_backend(delay_us: u64, jitter_us: u64, kv_bytes: Option<u64>) -> SocketAddr {
+pub(crate) fn spawn_mock_backend(
+    delay_us: u64,
+    jitter_us: u64,
+    kv_bytes: Option<u64>,
+) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend");
     let addr = listener.local_addr().expect("backend addr");
     thread::spawn(move || {
