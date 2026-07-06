@@ -2539,7 +2539,7 @@ fn write_report(path: &Path, report: &LoadBenchReport) -> Result<(), Box<dyn std
     Ok(())
 }
 
-fn rfc3339_now() -> String {
+pub(crate) fn rfc3339_now() -> String {
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -2567,7 +2567,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (y, mo, d)
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "local".into())

@@ -88,6 +88,7 @@ Hot-path code is gated on **median nanoseconds per operation** in `--release`. T
 ```bash
 cargo run --release -q --package xtask -- bench-gate    # gate.sh / CI Track A
 cargo run --release -q --package xtask -- bench-probe   # tune limits locally
+cargo run --release -q --package xtask -- bench-flame   # flame SVG + headroom trends → target/bench-probe/flame.svg
 ```
 
 | ID | Phase | Measures | Local limit (median) |

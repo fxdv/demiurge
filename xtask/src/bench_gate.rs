@@ -40,8 +40,10 @@ struct Gate {
     id: String,
     #[allow(dead_code)]
     phase: u32,
-    #[allow(dead_code)]
     summary: String,
+    /// Enclosing hot-path gate (call structure for `bench-flame`); None = root.
+    #[serde(default)]
+    parent: Option<String>,
     warmup_iters: u32,
     bench_iters: u32,
     max_median_ns: u64,
@@ -559,4 +561,47 @@ pub fn bench_probe() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// One measured gate resolved against its limit — shared with `bench-flame`.
+#[derive(Debug, Clone)]
+pub struct GateMeasurement {
+    pub id: String,
+    pub summary: String,
+    pub parent: Option<String>,
+    pub floor_ns: u64,
+    pub median_ns: u64,
+    pub p95_ns: u64,
+    pub limit_ns: u64,
+    pub headroom_pct: f64,
+    pub thin: bool,
+}
+
+/// Measure every gate in `design/bench-gates.toml` (file order preserved).
+pub fn measure_all(samples: u32) -> Result<Vec<GateMeasurement>, Box<dyn Error>> {
+    let file: BenchGatesFile = toml::from_str(&fs::read_to_string(BENCH_GATES)?)?;
+    if file.gate.is_empty() {
+        return Err("no gates declared in bench-gates.toml".into());
+    }
+    let settings = Settings {
+        samples,
+        ci_slack: file.settings.ci_slack,
+    };
+    file.gate
+        .iter()
+        .map(|gate| {
+            let (stats, limit) = run_gate(gate, &settings)?;
+            Ok(GateMeasurement {
+                id: gate.id.clone(),
+                summary: gate.summary.clone(),
+                parent: gate.parent.clone(),
+                floor_ns: stats.floor_ns,
+                median_ns: stats.median_ns,
+                p95_ns: stats.p95_ns,
+                limit_ns: limit,
+                headroom_pct: headroom_pct(stats.median_ns, limit),
+                thin: is_thin(stats.median_ns, limit),
+            })
+        })
+        .collect()
 }

@@ -39,6 +39,10 @@ cargo run --release -q --package xtask -- bench-probe 2>&1 | tee "$VAL/bench-pro
 bold "CPU bench-gate (release hot paths)"
 cargo run --release -q --package xtask -- bench-gate 2>&1 | tee "$VAL/bench-gate.log"
 
+bold "CPU gate flame (hierarchy + headroom trends)"
+cargo run --release -q --package xtask -- bench-flame 2>&1 | tee "$VAL/bench-flame.log"
+cp -f target/bench-probe/flame.svg "$OUT/flame.svg" 2>/dev/null || true
+
 bold "fleet-pilot (shadow π* + corrector shadow)"
 cargo run --release -q --package xtask -- fleet-pilot 2>&1 | tee "$VAL/fleet-pilot.log"
 cp -f target/fleet-pilot/latest.json "$OUT/fleet-pilot/latest.json"
@@ -185,6 +189,8 @@ else:
 md.extend(["", "| gate | median | p95 | limit | headroom | thin |", "|---|---:|---:|---:|---:|:---:|"])
 for r in probe_rows:
     md.append(f"| {r['id']} | {r['median_ns']} | {r['p95_ns']} | {r['limit_ns']} | {r['headroom']} | {'YES' if r['thin'] else '·'} |")
+if (out / "flame.svg").is_file():
+    md.extend(["", "![CPU gate flame — call hierarchy, headroom heat, median trends](flame.svg)"])
 md.extend(["", "## Fleet pilot (shadow)", ""])
 if fp:
     md.extend([
@@ -218,6 +224,7 @@ md.extend([
     "## Logs",
     "",
     "- `validation/bench-probe.log` — CPU headroom",
+    "- `flame.svg` — CPU gate flame (call hierarchy + headroom trends)",
     "- `validation/fleet-pilot.log` — π* + corrector shadow",
     "- `validation/load-bench.log` — full scenario run",
     "- `load/latest.pseudo` — latency histograms",
@@ -232,6 +239,7 @@ PY
 bold "report ready"
 echo "  $OUT/report.md"
 echo "  $OUT/summary.json"
+echo "  $OUT/flame.svg"
 echo "  $OUT/load/latest.pseudo"
 echo "  $OUT/stress/stress.pseudo"
 

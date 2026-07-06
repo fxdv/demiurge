@@ -5,9 +5,16 @@
 #
 # Run locally:  cargo xtask bench-gate
 # Tune limits:   cargo xtask bench-probe   (reports floor/median/p95 + suggestions)
+# Visualize:     cargo xtask bench-flame   (flame SVG + headroom trends)
 #
 # Tighten a gate only when deliberately optimizing that path; loosening requires
 # justification in the PR (regressions are not free).
+#
+# Optional `parent = "BENCH-..."` declares the enclosing hot-path gate; gates
+# without a parent are roots. `bench-flame` renders this call structure as a
+# flame graph (nesting = who invokes whom; each box is labeled with its own
+# independently measured median, so widths are log-scaled cost, not additive
+# time attribution). Unknown parents and cycles are rejected.
 
 [settings]
 # Multiplier applied to max_median_ns when CI=true.
@@ -21,6 +28,7 @@ samples = 5
 id = "BENCH-COMPOSE-8"
 phase = 0
 summary = "compose() with 4 barriers + 2 discounts + identity corrector"
+parent = "BENCH-SELECT-64"
 warmup_iters = 10_000
 bench_iters = 100_000
 max_median_ns = 50
@@ -29,6 +37,7 @@ max_median_ns = 50
 id = "BENCH-SELECT-64"
 phase = 0
 summary = "select() minimum-cost pick over 64 backends (cost recomputed each pick)"
+parent = "BENCH-ROUTE-DISPATCH"
 warmup_iters = 1_000
 bench_iters = 10_000
 max_median_ns = 1_000
@@ -37,6 +46,7 @@ max_median_ns = 1_000
 id = "BENCH-BACKEND-COST"
 phase = 0
 summary = "Backend::cost() — single target load signal"
+parent = "BENCH-SELECT-64"
 warmup_iters = 10_000
 bench_iters = 100_000
 max_median_ns = 8
@@ -65,6 +75,7 @@ max_median_ns = 350
 id = "BENCH-KV-RESERVE"
 phase = 2
 summary = "kv_breakdown() + phi_barrier_marginal() hot path"
+parent = "BENCH-ROUTE-DISPATCH"
 warmup_iters = 5_000
 bench_iters = 50_000
 max_median_ns = 200
@@ -75,6 +86,7 @@ max_median_ns = 200
 id = "BENCH-WARM-LOOKUP"
 phase = 3
 summary = "WarmthMap hit_strength probe over 16 block keys"
+parent = "BENCH-SELECT-64"
 warmup_iters = 5_000
 bench_iters = 50_000
 max_median_ns = 500
@@ -103,6 +115,7 @@ max_median_ns = 800
 id = "BENCH-RCU-SNAPSHOT"
 phase = 5
 summary = "RcuRoutingTable::read_pi hot path (lock-free Arc clone)"
+parent = "BENCH-IOURING-FWD"
 warmup_iters = 5_000
 bench_iters = 50_000
 max_median_ns = 50
