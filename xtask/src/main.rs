@@ -4,7 +4,9 @@
 //! `lint` enforces the spec/code/test traceability join, and
 //! `bench-gate` runs release-mode CPU gates from `design/bench-gates.toml`,
 //! `bench-probe` samples floor/median/p95 to tune limits and find thin gates,
-//! `load-bench` runs local TCP load scenarios, `load-report` renders the
+//! `bench-flame` renders the gate call hierarchy as a flame SVG with headroom
+//! heat and median trends, `load-bench` runs local TCP load scenarios,
+//! `load-report` renders the
 //! pseudo-graphical report from the last run, `'sim` runs the fleet simulation
 //! spinoff, and `harden-verify` runs Tiers 1–4 die-hard checks with an aggregate observable report.
 //!
@@ -27,6 +29,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 mod apostrophe_sim;
+mod bench_flame;
 mod bench_gate;
 mod fleet_pilot;
 mod harden_report;
@@ -94,6 +97,7 @@ fn main() {
         "lint" => lint(),
         "bench-gate" => bench_gate::bench_gate(),
         "bench-probe" => bench_gate::bench_probe(),
+        "bench-flame" => bench_flame::bench_flame(),
         "load-bench" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             let ci_only = args.iter().any(|a| a == "--ci");
@@ -125,7 +129,7 @@ fn main() {
         "product-doc" => build_product_doc(),
         other => {
             eprintln!(
-                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `bench-probe`, `load-bench`, `load-report`, `harden-verify`, `build-bpf`, `fleet-pilot`, or `'sim`"
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `bench-probe`, `bench-flame`, `load-bench`, `load-report`, `harden-verify`, `build-bpf`, `fleet-pilot`, or `'sim`"
             );
             exit(2);
         }
