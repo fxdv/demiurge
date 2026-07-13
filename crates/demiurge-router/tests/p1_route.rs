@@ -137,3 +137,16 @@ fn short_context_uses_colocated_path() {
         other => panic!("expected colocated fast path, got {other:?}"),
     }
 }
+
+// Admin GETs (models, health) bypass prefill handoff shims.
+#[test]
+fn models_list_uses_decode_only_path() {
+    let pf = Backend::new("pf", "127.0.0.1:1".parse().unwrap(), 0.01);
+    let dc = Backend::new("dc", "127.0.0.1:2".parse().unwrap(), 0.02);
+    let router = Router::new(vec![pf], vec![dc]);
+    let head = b"GET /v1/models HTTP/1.1\r\nhost: x\r\n\r\n";
+    match route(&router, head).expect("route") {
+        RoutePath::DecodeOnly(b) => assert_eq!(b.label, "dc"),
+        other => panic!("expected decode-only admin path, got {other:?}"),
+    }
+}

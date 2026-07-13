@@ -1090,9 +1090,15 @@ impl Router {
         }
     }
 
-    /// Colocated fast path uses the prefill pool (single hop prefill+decode).
+    /// Colocated fast path: single-hop inference. Defaults to the prefill pool;
+    /// set `DEMIURGE_COLOCATED_PHASE=decode` when prefill workers are handoff-only.
     pub fn pick_colocated(&self) -> Option<Arc<Backend>> {
-        self.pick(Phase::Prefill)
+        let phase = match std::env::var("DEMIURGE_COLOCATED_PHASE").as_deref() {
+            Ok("decode") => Phase::Decode,
+            Ok("prefill") => Phase::Prefill,
+            _ => Phase::Prefill,
+        };
+        self.pick(phase)
     }
 }
 
@@ -1248,14 +1254,43 @@ pub fn estimate_prompt_tokens(head: &[u8]) -> u64 {
         .unwrap_or(ROUTING_SHORT_CONTEXT_TOKENS + 1)
 }
 
-/// True when the client declared decode-only routing.
+fn request_line_parts(head: &[u8]) -> Option<(&[u8], &[u8])> {
+    let line = head.split(|&b| b == b'\r' || b == b'\n').next()?;
+    let mut parts = line.split(|&b| b == b' ').filter(|p| !p.is_empty());
+    let method = parts.next()?;
+    let path = parts.next()?;
+    Some((method, path))
+}
+
+fn is_admin_probe_request(head: &[u8]) -> bool {
+    let Some((method, path)) = request_line_parts(head) else {
+        return false;
+    };
+    if ascii_eq_ci(method, b"POST") {
+        return false;
+    }
+    let path = path.split(|&b| b == b'?').next().unwrap_or(path);
+    path.ends_with(b"/models")
+        || path.ends_with(b"/version")
+        || matches!(
+            path,
+            b"/health" | b"/healthz" | b"/ready" | b"/readyz" | b"/metrics"
+        )
+}
+
+/// True when the request should bypass prefill (admin GETs, explicit decode phase, etc.).
 pub fn is_decode_only(head: &[u8]) -> bool {
     if header_value_ci(head, HDR_PHASE).is_some_and(|v| ascii_eq_ci(v, b"decode")) {
         return true;
     }
-    head.split(|&b| b == b'\r' || b == b'\n')
+    if head
+        .split(|&b| b == b'\r' || b == b'\n')
         .next()
         .is_some_and(|line| contains_subslice(line, b" /decode"))
+    {
+        return true;
+    }
+    is_admin_probe_request(head)
 }
 
 fn live_queue_pressure(backends: &[Arc<Backend>]) -> f64 {
@@ -1692,63 +1727,15 @@ fn admit_conn(router: &Router) -> AdmitConn {
     AdmitConn::Proceed(Some(AdmitGuard(Arc::clone(&router.admit))))
 }
 
-fn proxy_to_backend(
-    client: &mut TcpStream,
-    head: &[u8],
-    backend: &Backend,
-    #[cfg(target_os = "linux")] io_uring_session: Option<&mut IoUringProxySession>,
-) -> io::Result<()> {
-    backend.incr_inflight();
-    let _guard = InflightGuard(backend);
-
-    let mut upstream = TcpStream::connect(backend.addr)?;
-    upstream.write_all(head)?;
-
-    #[cfg(target_os = "linux")]
-    if let Some(session) = io_uring_session {
-        use std::os::fd::AsRawFd;
-        let up_read = upstream.try_clone()?;
-        let client_write = client.try_clone()?;
-        let client_read = client.try_clone()?;
-        let pump = thread::spawn(move || {
-            if let Ok(mut pump_session) = IoUringProxySession::new() {
-                let _ = pump_session.copy_stream(
-                    up_read.as_raw_fd(),
-                    client_write.as_raw_fd(),
-                    256 * 1024,
-                );
-            }
-            let _ = client_write.shutdown(Shutdown::Write);
-        });
-        session.copy_stream(client_read.as_raw_fd(), upstream.as_raw_fd(), 256 * 1024)?;
-        let _ = upstream.shutdown(Shutdown::Write);
-        let _ = pump.join();
-        return Ok(());
-    }
-
-    let mut up_read = upstream.try_clone()?;
-    let mut client_write = client.try_clone()?;
-    let pump = thread::spawn(move || {
-        let _ = io::copy(&mut up_read, &mut client_write);
-        let _ = client_write.shutdown(Shutdown::Write);
-    });
-    let mut client_read = client.try_clone()?;
-    let _ = io::copy(&mut client_read, &mut upstream);
-    let _ = upstream.shutdown(Shutdown::Write);
-    let _ = pump.join();
-    Ok(())
-}
-
 fn handle_disaggregated(
     mut client: TcpStream,
-    mut head: Vec<u8>,
+    head: Vec<u8>,
     router: Arc<Router>,
     prefill: Arc<Backend>,
     request_id: RequestId,
     prompt_tokens: u64,
     #[cfg(target_os = "linux")] _io_uring_session: Option<&mut IoUringProxySession>,
 ) -> io::Result<()> {
-    read_body_into(&mut client, &mut head)?;
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     let router2 = Arc::clone(&router);
     let prefill_label = prefill.label.clone();
@@ -1834,7 +1821,7 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
         .as_ref()
         .and_then(|fwd| fwd.open_proxy_session().ok());
 
-    let head = {
+    let mut head = {
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut session) = io_uring_session {
@@ -1849,31 +1836,20 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
             read_head(&mut client)?
         }
     };
+    read_body_into(&mut client, &mut head)?;
     std::hint::black_box(router.dataplane_pi());
 
     match route(&router, &head) {
         Ok(RoutePath::Colocated(b)) => {
             let tokens = estimate_prompt_tokens(&head);
             let label = b.label.clone();
-            let result = proxy_to_backend(
-                &mut client,
-                &head,
-                b.as_ref(),
-                #[cfg(target_os = "linux")]
-                io_uring_session.as_mut(),
-            );
+            let result = proxy_buffer_to_backend(&mut client, &head, b.as_ref());
             if result.is_ok() {
                 router.record_request_warmth(&label, Phase::Prefill, tokens);
             }
             result
         }
-        Ok(RoutePath::DecodeOnly(b)) => proxy_to_backend(
-            &mut client,
-            &head,
-            b.as_ref(),
-            #[cfg(target_os = "linux")]
-            io_uring_session.as_mut(),
-        ),
+        Ok(RoutePath::DecodeOnly(b)) => proxy_buffer_to_backend(&mut client, &head, b.as_ref()),
         Ok(RoutePath::Disaggregated {
             prefill,
             request_id,

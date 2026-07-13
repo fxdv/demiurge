@@ -82,14 +82,17 @@ def make_handler(backend_port: int, bytes_per_token: int, prefill_max_tokens: in
         def log_message(self, fmt: str, *args) -> None:
             print(f"[shim:{self.server.server_port}] {self.address_string()} {fmt % args}")
 
-        def _proxy_raw(self, method: str) -> None:
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length else b""
+        def _proxy_raw(self, method: str, body: bytes | None = None) -> None:
+            if body is None:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length) if length else b""
             headers = {
                 k: v
                 for k, v in self.headers.items()
                 if k.lower() not in ("host", "content-length", "transfer-encoding")
             }
+            if body:
+                headers["Content-Length"] = str(len(body))
             req = urllib.request.Request(
                 f"{backend_base}{self.path}",
                 data=body if body else None,
@@ -134,6 +137,10 @@ def make_handler(backend_port: int, bytes_per_token: int, prefill_max_tokens: in
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             tokens = parse_tokens(self.headers, body)
+            if tokens <= 512:
+                # Short-context colocated path: return full vLLM response, not handoff headers.
+                self._proxy_raw("POST", body=body)
+                return
             kv_bytes = kv_reserved(tokens, bytes_per_token)
             handle = next_kv_handle()
             patched = patch_prefill_body(body, prefill_max_tokens)
