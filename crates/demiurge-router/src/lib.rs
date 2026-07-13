@@ -1687,7 +1687,6 @@ fn proxy_buffer_to_backend(
 
     let mut upstream = TcpStream::connect(backend.addr)?;
     upstream.write_all(request)?;
-    upstream.shutdown(Shutdown::Write)?;
     let mut resp = Vec::new();
     upstream.read_to_end(&mut resp)?;
     client.write_all(&resp)?;
