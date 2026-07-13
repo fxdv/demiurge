@@ -116,6 +116,16 @@ def make_handler(backend_port: int, bytes_per_token: int, prefill_max_tokens: in
         def do_GET(self) -> None:
             self._proxy_raw("GET")
 
+        def _send_handoff(self, handle: int, kv_bytes: int) -> None:
+            self.send_response(200)
+            self.send_header("x-demiurge-prefill-done", "1")
+            self.send_header("x-demiurge-kv-handle", str(handle))
+            self.send_header("x-demiurge-kv-bytes", str(kv_bytes))
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+
         def do_POST(self) -> None:
             if not self.path.rstrip("/").endswith("/chat/completions"):
                 self._proxy_raw("POST")
@@ -154,16 +164,7 @@ def make_handler(backend_port: int, bytes_per_token: int, prefill_max_tokens: in
                 self.wfile.write(err_body)
                 return
 
-            handoff = (
-                "HTTP/1.1 200 OK\r\n"
-                "x-demiurge-prefill-done: 1\r\n"
-                f"x-demiurge-kv-handle: {handle}\r\n"
-                f"x-demiurge-kv-bytes: {kv_bytes}\r\n"
-                "content-length: 0\r\n"
-                "connection: close\r\n"
-                "\r\n"
-            )
-            self.wfile.write(handoff.encode())
+            self._send_handoff(handle, kv_bytes)
 
         def do_HEAD(self) -> None:
             self._proxy_raw("HEAD")
