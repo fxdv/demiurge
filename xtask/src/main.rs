@@ -97,7 +97,13 @@ fn main() {
         "lint" => lint(),
         "bench-gate" => bench_gate::bench_gate(),
         "bench-probe" => bench_gate::bench_probe(),
-        "bench-flame" => bench_flame::bench_flame(),
+        "bench-flame" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            let theme = args
+                .windows(2)
+                .find_map(|w| (w[0] == "--theme").then(|| w[1].clone()));
+            bench_flame::bench_flame(theme.as_deref())
+        }
         "load-bench" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
             let ci_only = args.iter().any(|a| a == "--ci");
