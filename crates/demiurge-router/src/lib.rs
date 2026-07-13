@@ -1687,10 +1687,10 @@ fn proxy_buffer_to_backend(
 
     let mut upstream = TcpStream::connect(backend.addr)?;
     upstream.write_all(request)?;
-    let _ = upstream.shutdown(Shutdown::Write);
-    let mut up_read = upstream.try_clone()?;
-    let mut client_write = client.try_clone()?;
-    let _ = io::copy(&mut up_read, &mut client_write);
+    upstream.shutdown(Shutdown::Write)?;
+    let mut resp = Vec::new();
+    upstream.read_to_end(&mut resp)?;
+    client.write_all(&resp)?;
     Ok(())
 }
 

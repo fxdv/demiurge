@@ -137,10 +137,6 @@ def make_handler(backend_port: int, bytes_per_token: int, prefill_max_tokens: in
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             tokens = parse_tokens(self.headers, body)
-            if tokens <= 512:
-                # Short-context colocated path: return full vLLM response, not handoff headers.
-                self._proxy_raw("POST", body=body)
-                return
             kv_bytes = kv_reserved(tokens, bytes_per_token)
             handle = next_kv_handle()
             patched = patch_prefill_body(body, prefill_max_tokens)
