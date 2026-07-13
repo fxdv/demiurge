@@ -79,6 +79,10 @@ if [[ "$LOGIC_ONLY" -eq 0 ]]; then
     bold "ensure fleet up (vLLM + shims + router)"
     bash ./scripts/singularity/start-vllm-pd.sh 2>&1 | tee "$VAL/start-vllm-pd.log"
     bash ./scripts/singularity/start-router.sh 2>&1 | tee "$VAL/start-router.log"
+  else
+    bold "restart router (fresh state plane for colocated smoke)"
+    bash ./scripts/singularity/start-router.sh 2>&1 | tee "$VAL/start-router.log"
+    sleep 1
   fi
 
   bold "live smoke (models + colocated + disaggregated)"

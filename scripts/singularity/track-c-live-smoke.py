@@ -27,11 +27,12 @@ def probe(url: str) -> tuple[bool, int, str]:
         return False, 0, str(e)
 
 
-def chat(tokens_hdr: int, max_tokens: int = 4) -> tuple[bool, int, float, str]:
+def chat(tokens_hdr: int, max_tokens: int = 4, user_suffix: str = "") -> tuple[bool, int, float, str]:
+    content = f"Cold smoke {user_suffix or tokens_hdr}: reply in one word."
     body = json.dumps(
         {
             "model": MODEL,
-            "messages": [{"role": "user", "content": "Say hi in one word."}],
+            "messages": [{"role": "user", "content": content}],
             "max_tokens": max_tokens,
             "temperature": 0,
         }
