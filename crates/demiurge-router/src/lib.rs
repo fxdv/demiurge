@@ -1623,6 +1623,42 @@ fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+fn parse_content_length(head: &[u8]) -> Option<usize> {
+    header_value_ci(head, b"content-length")
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Append a fixed `Content-Length` body from `client` onto `head`.
+fn read_body_into(client: &mut TcpStream, head: &mut Vec<u8>) -> io::Result<()> {
+    if let Some(len) = parse_content_length(head) {
+        if len > 0 {
+            let mut body = vec![0u8; len];
+            client.read_exact(&mut body)?;
+            head.extend_from_slice(&body);
+        }
+    }
+    Ok(())
+}
+
+/// Proxy a fully buffered HTTP request (head + body) to `backend`.
+fn proxy_buffer_to_backend(
+    client: &mut TcpStream,
+    request: &[u8],
+    backend: &Backend,
+) -> io::Result<()> {
+    backend.incr_inflight();
+    let _guard = InflightGuard(backend);
+
+    let mut upstream = TcpStream::connect(backend.addr)?;
+    upstream.write_all(request)?;
+    let _ = upstream.shutdown(Shutdown::Write);
+    let mut up_read = upstream.try_clone()?;
+    let mut client_write = client.try_clone()?;
+    let _ = io::copy(&mut up_read, &mut client_write);
+    Ok(())
+}
+
 struct InflightGuard<'a>(&'a Backend);
 
 impl Drop for InflightGuard<'_> {
@@ -1705,13 +1741,14 @@ fn proxy_to_backend(
 
 fn handle_disaggregated(
     mut client: TcpStream,
-    head: Vec<u8>,
+    mut head: Vec<u8>,
     router: Arc<Router>,
     prefill: Arc<Backend>,
     request_id: RequestId,
     prompt_tokens: u64,
-    #[cfg(target_os = "linux")] io_uring_session: Option<&mut IoUringProxySession>,
+    #[cfg(target_os = "linux")] _io_uring_session: Option<&mut IoUringProxySession>,
 ) -> io::Result<()> {
+    read_body_into(&mut client, &mut head)?;
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     let router2 = Arc::clone(&router);
     let prefill_label = prefill.label.clone();
@@ -1758,13 +1795,7 @@ fn handle_disaggregated(
         }
     };
 
-    let result = proxy_to_backend(
-        &mut client,
-        &head,
-        placement.backend.as_ref(),
-        #[cfg(target_os = "linux")]
-        io_uring_session,
-    );
+    let result = proxy_buffer_to_backend(&mut client, &head, placement.backend.as_ref());
     drop(placement.reservation);
     result
 }
