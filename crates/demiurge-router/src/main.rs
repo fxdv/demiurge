@@ -11,15 +11,21 @@
 //!   DEMIURGE_BANNER        0|1 force disable/enable startup banner (default: TTY)
 //!   DEMIURGE_HANDOFF_TRANSPORT  tcp (default) | mock_rdma | modeled_rdma
 //!   DEMIURGE_RDMA_ROUTING       1 to use topology transfer model in decode placement
+//!   DEMIURGE_DECODE_KV_CAPACITY_BYTES  fleet decode KV budget (enables ledger + handoff)
+//!   DEMIURGE_BYTES_PER_TOKEN   bytes per KV token for reservation (default 128)
+//!   DEMIURGE_STATE_PLANE       1 to record live warmth on production traffic
 
+use std::collections::HashMap;
 use std::net::TcpListener;
 use std::process::exit;
 use std::sync::Arc;
 
+use demiurge_cost::TopologyId;
 use demiurge_dataplane::AdmitMode;
 use demiurge_handoff::handoff_transport_from_env;
 use demiurge_router::{
-    parse_pool_with_topology, parse_topology_map, print_startup_banner, serve, Router,
+    parse_pool_with_topology, parse_topology_map, print_startup_banner, serve, Phase, Router,
+    StatePlane,
 };
 
 fn main() {
@@ -27,6 +33,58 @@ fn main() {
         eprintln!("demiurge-router: {e}");
         exit(1);
     }
+}
+
+fn parse_u64_env(key: &str) -> Option<u64> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+}
+
+/// Read a `DEMIURGE_*` env var as a boolean flag, falling back to `default`.
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(default)
+}
+
+fn build_router(
+    prefill: Vec<Arc<demiurge_router::Backend>>,
+    decode: Vec<Arc<demiurge_router::Backend>>,
+    topology: HashMap<String, TopologyId>,
+) -> Result<Router, String> {
+    let bytes_per_token = parse_u64_env("DEMIURGE_BYTES_PER_TOKEN").unwrap_or(128);
+    let kv_capacity = parse_u64_env("DEMIURGE_DECODE_KV_CAPACITY_BYTES");
+    let state_plane_on = env_bool("DEMIURGE_STATE_PLANE", false) || kv_capacity.is_some();
+
+    let admit_mode = AdmitMode::from_env();
+    let transport = handoff_transport_from_env(topology);
+
+    let mut router = if let Some(capacity) = kv_capacity {
+        let (r, _, _) = Router::with_kv_pool(prefill, decode, capacity, bytes_per_token);
+        r.with_handoff_transport(transport)
+    } else {
+        Router::new(prefill, decode).with_handoff_transport(transport)
+    };
+
+    router = router.with_admit_mode(admit_mode);
+
+    if state_plane_on {
+        let pf_labels: Vec<String> = router
+            .pool(Phase::Prefill)
+            .iter()
+            .map(|b| b.label.clone())
+            .collect();
+        let dc_labels: Vec<String> = router
+            .pool(Phase::Decode)
+            .iter()
+            .map(|b| b.label.clone())
+            .collect();
+        router = router.with_state_plane(StatePlane::new(&pf_labels, &dc_labels));
+    }
+
+    Ok(router)
 }
 
 /// Parse env, bind listen socket, build router — everything before the accept loop.
@@ -51,11 +109,7 @@ fn configure() -> Result<(TcpListener, Arc<Router>), String> {
 
     let listener = TcpListener::bind(&listen).map_err(|e| format!("bind {listen}: {e}"))?;
 
-    let admit_mode = AdmitMode::from_env();
-    let transport = handoff_transport_from_env(topology.clone());
-    let mut router = Router::new(prefill, decode)
-        .with_admit_mode(admit_mode)
-        .with_handoff_transport(transport);
+    let mut router = build_router(prefill, decode, topology)?;
     let xdp_iface = std::env::var("DEMIURGE_XDP_IFACE").ok();
     if let Some(ref iface) = xdp_iface {
         router = router
@@ -155,5 +209,28 @@ mod tests {
         ]);
         let (listener, _router) = configure().unwrap();
         assert!(listener.local_addr().unwrap().port() > 0);
+    }
+
+    #[test]
+    fn configure_enables_kv_ledger_and_state_plane() {
+        let _env = EnvGuard::set(&[
+            (
+                "DEMIURGE_PREFILL",
+                Some("pf0@127.0.0.1:9@0.01,pf1@127.0.0.1:10@0.01"),
+            ),
+            (
+                "DEMIURGE_DECODE",
+                Some("dc0@127.0.0.1:11@0.02,dc1@127.0.0.1:12@0.02"),
+            ),
+            ("DEMIURGE_LISTEN", Some("127.0.0.1:0")),
+            ("DEMIURGE_BANNER", Some("0")),
+            ("DEMIURGE_DECODE_KV_CAPACITY_BYTES", Some("67108864")),
+            ("DEMIURGE_BYTES_PER_TOKEN", Some("128")),
+        ]);
+        let (_listener, router) = configure().unwrap();
+        assert!(router.ledger().is_some());
+        assert!(router.handoffs().is_some());
+        assert!(router.state_plane_active());
+        assert_eq!(router.bytes_per_token(), 128);
     }
 }

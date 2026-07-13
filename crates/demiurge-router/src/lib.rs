@@ -526,6 +526,9 @@ pub struct Router {
     /// disables identity-gated routing entirely (`route_with_identity`
     /// then behaves exactly like `route`). [DEMI-S1-DOMAIN]
     cache_registry: Option<Arc<SharedPrefixGroupRegistry>>,
+    /// Live AP warmth plane; when set, [`Self::routing_snapshot`] reads here
+    /// instead of the static [`Self::state`] snapshot. [DEMI-STATE-AP]
+    state_plane: Option<Arc<StatePlane>>,
 }
 
 impl Clone for Router {
@@ -537,6 +540,7 @@ impl Clone for Router {
             handoffs: self.handoffs.clone(),
             bytes_per_token: self.bytes_per_token,
             state: self.state.clone(),
+            state_plane: self.state_plane.clone(),
             control: Arc::clone(&self.control),
             dataplane: Arc::clone(&self.dataplane),
             admit: Arc::clone(&self.admit),
@@ -635,6 +639,7 @@ impl Router {
             handoff_transport: None,
             rdma_routing: rdma_routing_enabled(),
             cache_registry: None,
+            state_plane: None,
         }
     }
 
@@ -680,6 +685,7 @@ impl Router {
             handoff_transport: Some(Self::default_handoff_transport()),
             rdma_routing: rdma_routing_enabled(),
             cache_registry: None,
+            state_plane: None,
         };
         (router, ledger, handoffs)
     }
@@ -687,6 +693,48 @@ impl Router {
     pub fn with_state(mut self, state: StateSnapshot) -> Self {
         self.state = Some(state);
         self
+    }
+
+    /// Attach a live state plane for warmth/occupancy updates on production traffic.
+    #[must_use]
+    pub fn with_state_plane(mut self, plane: Arc<StatePlane>) -> Self {
+        self.state_plane = Some(plane);
+        self
+    }
+
+    /// Snapshot for routing decisions — live plane when configured, else static seed.
+    #[must_use]
+    pub fn routing_snapshot(&self) -> Option<StateSnapshot> {
+        if let Some(plane) = &self.state_plane {
+            Some(plane.snapshot())
+        } else {
+            self.state.clone()
+        }
+    }
+
+    #[must_use]
+    pub fn state_plane_active(&self) -> bool {
+        self.state_plane.is_some()
+    }
+
+    /// Record block-granularity warmth after a request completes on `backend_label`.
+    pub fn record_request_warmth(&self, backend_label: &str, phase: Phase, prompt_tokens: u64) {
+        let Some(plane) = self.state_plane.as_ref() else {
+            return;
+        };
+        let blocks = default_routing_blocks(prompt_tokens);
+        let mut snap = plane.snapshot();
+        let pool = match phase {
+            Phase::Prefill => &mut snap.prefill,
+            Phase::Decode => &mut snap.decode,
+        };
+        if let Some(backend) = pool.get_mut(backend_label) {
+            for block in blocks {
+                backend.warmth.insert(block);
+            }
+            snap.generation = snap.generation.saturating_add(1);
+            plane.publish_snapshot(snap);
+        }
     }
 
     pub fn with_rebalancer_actuation(mut self, enabled: bool) -> Self {
@@ -1002,10 +1050,11 @@ impl Router {
         if sample_regret {
             if let Some(tokens) = prompt_tokens {
                 if !self.prefill.is_empty() && !self.decode.is_empty() {
+                    let snap = self.routing_snapshot();
                     let regret = pairing_regret_targets(
                         &self.prefill,
                         &self.decode,
-                        self.state.as_ref(),
+                        snap.as_ref(),
                         tokens,
                         ROUTING_TRANSFER_PENALTY,
                     );
@@ -1215,8 +1264,8 @@ fn live_queue_pressure(backends: &[Arc<Backend>]) -> f64 {
 }
 
 fn pool_pressure(router: &Router, fp_share: f64) -> PoolPressure {
-    let mut signals = router
-        .state
+    let snap = router.routing_snapshot();
+    let mut signals = snap
         .as_ref()
         .map(|s| export_pool_pressure(s, fp_share))
         .unwrap_or(PoolPressure {
@@ -1278,9 +1327,11 @@ fn route_impl(
     }
 
     let prompt_tokens = estimate_prompt_tokens(head);
+    let snap = router.routing_snapshot();
+    let snap_ref = snap.as_ref();
     if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
         if let Some((prefill, _strength)) =
-            warmth_override_target_with_identity(router, prompt_tokens, isolation)
+            warmth_override_target_with_identity(router, prompt_tokens, isolation, snap_ref)
         {
             router.tick_control(Some(false), Some(prompt_tokens), false);
             return Ok(RoutePath::Disaggregated {
@@ -1300,7 +1351,7 @@ fn route_impl(
     let pool_pi = router.dataplane.read_pi();
     let prefill = select_prefill_with_identity_pi(
         router.pool(Phase::Prefill),
-        router.state.as_ref(),
+        snap_ref,
         prompt_tokens,
         pool_pi,
         isolation,
@@ -1320,8 +1371,9 @@ fn warmth_override_target_with_identity(
     router: &Router,
     prompt_tokens: u64,
     isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
+    snap: Option<&StateSnapshot>,
 ) -> Option<(Arc<Backend>, f64)> {
-    let snap = router.state.as_ref()?;
+    let snap = snap?;
     let blocks = default_routing_blocks(prompt_tokens);
     let mut best: Option<(Arc<Backend>, f64)> = None;
     for backend in router.pool(Phase::Prefill) {
@@ -1419,6 +1471,8 @@ pub fn on_prefill_complete(
 
     let pool_pi = router.dataplane.read_pi();
     let pf_topo = router.topology_for_label(prefill_label);
+    let snap = router.routing_snapshot();
+    let snap_ref = snap.as_ref();
     let kv_bytes = handoff
         .as_ref()
         .map(|h| h.byte_len)
@@ -1431,7 +1485,7 @@ pub fn on_prefill_complete(
             use_rdma_routing: router.rdma_routing,
         },
         router.pool(Phase::Decode),
-        router.state.as_ref(),
+        snap_ref,
         signals.prompt_tokens,
         &extra,
         pool_pi,
@@ -1439,6 +1493,9 @@ pub fn on_prefill_complete(
     .or_else(|| router.pick_with_phi(Phase::Decode, phi))
     .or_else(|| router.pick_colocated())
     .ok_or(RouteError::NoBackend)?;
+
+    router.record_request_warmth(prefill_label, Phase::Prefill, signals.prompt_tokens);
+    router.record_request_warmth(&backend.label, Phase::Decode, signals.prompt_tokens);
 
     if let Some(mut h) = handoff {
         if let Some(reg) = &router.handoffs {
@@ -1473,7 +1530,7 @@ pub fn on_prefill_complete(
 
     let blocks = default_routing_blocks(signals.prompt_tokens);
     let analytic_ln = backend
-        .cost_with_warmth_pi(&extra, router.state.as_ref(), &blocks, true, pool_pi)
+        .cost_with_warmth_pi(&extra, snap_ref, &blocks, true, pool_pi)
         .ln();
     record_corrector_shadow(
         router,
@@ -1764,7 +1821,22 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
     std::hint::black_box(router.dataplane_pi());
 
     match route(&router, &head) {
-        Ok(RoutePath::Colocated(b) | RoutePath::DecodeOnly(b)) => proxy_to_backend(
+        Ok(RoutePath::Colocated(b)) => {
+            let tokens = estimate_prompt_tokens(&head);
+            let label = b.label.clone();
+            let result = proxy_to_backend(
+                &mut client,
+                &head,
+                b.as_ref(),
+                #[cfg(target_os = "linux")]
+                io_uring_session.as_mut(),
+            );
+            if result.is_ok() {
+                router.record_request_warmth(&label, Phase::Prefill, tokens);
+            }
+            result
+        }
+        Ok(RoutePath::DecodeOnly(b)) => proxy_to_backend(
             &mut client,
             &head,
             b.as_ref(),
