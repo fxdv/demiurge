@@ -317,6 +317,17 @@ Exit gates are measured on **reference fleet hardware**, not mock TCP alone.
 
 **Risk.** Wiring the controller's window cadence and violation counters to live production traffic (vs. replayed/shadow samples) is Track C work; until that rollout the router runs `δ=1`.
 
+**Validation (P/D proof gate on reference GPU fleet).**
+
+```bash
+./scripts/track-c-verify.sh              # logic + live smoke + warmth skew
+./scripts/track-c-verify.sh --quick        # skip warmth bench
+./scripts/track-c-verify.sh --logic-only   # P6/P7/P8 unit tests only
+./scripts/track-c-verify.sh --ensure-up    # start vLLM + router, then verify
+```
+
+Artifacts: `target/track-c-verify/report.md`. Passing closes the **P/D proof slice**; RDMA prod handoff, fleet-measured migration p99, live corrector wiring, and tenant auth on production traffic remain open (listed in the report).
+
 ---
 
 ## 9. Adding a requirement

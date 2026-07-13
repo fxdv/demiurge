@@ -5,6 +5,29 @@
 **Model:** Meta-Llama-3.1-8B-Instruct (NousResearch mirror)  
 **Topology:** 2 prefill (9001/9002) + 2 decode (9003/9004) via demiurge-router :8080
 
+## Track C P/D proof gate
+
+Single PASS/FAIL entry point (logic + live fleet):
+
+```bash
+cd ~/demiurge && git pull
+./scripts/track-c-verify.sh --ensure-up
+```
+
+Artifacts: `target/track-c-verify/report.md`, `summary.json`
+
+| Stage | ID | What it proves |
+|-------|-----|----------------|
+| Logic | TC-MIG-UNIT | Phase 6 migration cutover budget (unit) |
+| Logic | TC-P7-UNIT | Phase 7 cache-domain isolation on router |
+| Logic | TC-P8-UNIT | Phase 8 corrector graduation FSM |
+| Logic | TC-KV-UNIT / TC-WARM-UNIT | KV ledger + warmth routing |
+| Live | TC-LIVE-SMOKE | models + colocated + disagg via router |
+| Live | TC-WARMTH-SKEW | Prefix warmth skew on prefill workers |
+
+**Passing this gate** closes the **Track C P/D proof slice** on reference GPU hardware.  
+**Full Track C roadmap closure** still requires RDMA prod handoff, fleet-measured migration p99, live corrector wiring, and tenant auth on production traffic (listed in the gate report).
+
 ## Track B benches (mock TCP — engineering proof)
 
 | Stage | Result |
@@ -17,16 +40,15 @@
 
 Artifacts on host: `~/track-b-verify.log`, `~/demiurge/target/track-b-verify/`
 
-## Live Llama P/D (pre-handoff-shim baseline)
+## Live Llama P/D (post-handoff-shim)
 
-| Path | p50 | p99 |
-|------|-----|-----|
-| Colocated (`X-Demiurge-Tokens: 64`) | 87ms | 230ms |
-| Disaggregated (`X-Demiurge-Tokens: 1024`) | 822ms | 971ms |
+| Path | Status |
+|------|--------|
+| Colocated (`X-Demiurge-Tokens: 64`) | PASS via router :8080 |
+| Disaggregated (`X-Demiurge-Tokens: 1024`) | PASS — 2-hop P/D |
+| Warmth skew (C4 bench) | PASS — 100% on prefill worker 9101 |
 
-Log: `~/vllm-workers/llama-pd-bench.log`
-
-## Path A rollout (this commit)
+## Path A rollout components
 
 - **C2:** `DEMIURGE_DECODE_KV_CAPACITY_BYTES` + `DEMIURGE_STATE_PLANE` in `demiurge-router`
 - **C1:** `scripts/singularity/prefill_handoff_shim.py` on prefill ports
@@ -34,10 +56,10 @@ Log: `~/vllm-workers/llama-pd-bench.log`
 - **C4:** `scripts/singularity/warmth-prefix-bench.py`
 - **O1/O2:** systemd units + `scripts/singularity/bootstrap.sh`
 
-Re-run after deploy:
+Manual restart:
 
 ```bash
 ~/demiurge/scripts/singularity/start-vllm-pd.sh
 ~/demiurge/scripts/singularity/start-router.sh
-python3 ~/demiurge/scripts/singularity/warmth-prefix-bench.py
+./scripts/track-c-verify.sh
 ```

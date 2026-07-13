@@ -25,9 +25,14 @@ Router: `127.0.0.1:8080` with `DEMIURGE_DECODE_KV_CAPACITY_BYTES=30GiB`.
 ## Benches
 
 ```bash
+./scripts/track-c-verify.sh              # full Track C P/D proof gate
+./scripts/track-c-verify.sh --quick        # logic + live smoke only
+./scripts/track-c-verify.sh --ensure-up    # start vLLM/router then verify
 python3 scripts/singularity/warmth-prefix-bench.py
-python3 ~/vllm-workers/llama-pd-bench.py   # if copied to home
+python3 scripts/singularity/track-c-live-smoke.py
 ```
+
+Report: `target/track-c-verify/report.md`
 
 ## systemd
 
