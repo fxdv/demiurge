@@ -103,7 +103,7 @@ flowchart TB
 | [`design/`](design/) | Single source of truth: `demiurge.params.toml`, `requirements.toml`, bench/load gate thresholds. |
 | [`spec/`](spec/) | Target design (`demiurge.tex`); `spec/generated/` is `@generated` — never hand-edited. |
 | [`xtask/`](xtask/) | `gen`, `lint`, `spec`, `bench-gate`, `load-bench`, `fleet-pilot`. |
-| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `verify.sh`, `publish.sh`, Track A/B/C verify, [`singularity/`](scripts/singularity/), [`linux-vm/`](scripts/linux-vm/). |
+| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `verify.sh`, `publish.sh`, Track A/B/C/D verify, [`singularity/`](scripts/singularity/), [`linux-vm/`](scripts/linux-vm/). |
 
 ---
 
