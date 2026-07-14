@@ -62,48 +62,65 @@ def chat(tokens_hdr: int, max_tokens: int = 4, user_suffix: str = "") -> tuple[b
 
 
 def main() -> int:
+    hot_short = "--hot-short" in sys.argv
     checks: list[dict] = []
 
-    for port, label in (
-        (8080, "router"),
-        (9001, "prefill-shim-9001"),
-        (9003, "decode-9003"),
-    ):
-        ok, code, err = probe(f"http://127.0.0.1:{port}/health" if port != 8080 else f"{ROUTER}/v1/models")
+    if not hot_short:
+        for port, label in (
+            (8080, "router"),
+            (9001, "prefill-shim-9001"),
+            (9003, "decode-9003"),
+        ):
+            ok, code, err = probe(
+                f"http://127.0.0.1:{port}/health" if port != 8080 else f"{ROUTER}/v1/models"
+            )
+            checks.append(
+                {
+                    "id": f"TC-PROBE-{label}",
+                    "pass": ok,
+                    "http_code": code,
+                    "error": err,
+                }
+            )
+
+        ok, code, ms, err = chat(64)
         checks.append(
             {
-                "id": f"TC-PROBE-{label}",
+                "id": "TC-LIVE-COLOCATED",
                 "pass": ok,
                 "http_code": code,
+                "latency_ms": round(ms, 1),
                 "error": err,
             }
         )
 
-    ok, code, ms, err = chat(64)
-    checks.append(
-        {
-            "id": "TC-LIVE-COLOCATED",
-            "pass": ok,
-            "http_code": code,
-            "latency_ms": round(ms, 1),
-            "error": err,
-        }
-    )
-
-    ok, code, ms, err = chat(1024)
-    checks.append(
-        {
-            "id": "TC-LIVE-DISAGG",
-            "pass": ok,
-            "http_code": code,
-            "latency_ms": round(ms, 1),
-            "error": err,
-        }
-    )
+        ok, code, ms, err = chat(1024)
+        checks.append(
+            {
+                "id": "TC-LIVE-DISAGG",
+                "pass": ok,
+                "http_code": code,
+                "latency_ms": round(ms, 1),
+                "error": err,
+            }
+        )
+    else:
+        for tokens, check_id in ((32, "TC-HOT-SHORT-32"), (64, "TC-HOT-SHORT-64")):
+            ok, code, ms, err = chat(tokens, user_suffix=f"hot-{tokens}")
+            checks.append(
+                {
+                    "id": check_id,
+                    "pass": ok,
+                    "http_code": code,
+                    "latency_ms": round(ms, 1),
+                    "error": err,
+                }
+            )
 
     summary = {
         "router": ROUTER,
         "model": MODEL,
+        "mode": "hot-short" if hot_short else "full",
         "checks": checks,
         "pass": all(c["pass"] for c in checks),
     }

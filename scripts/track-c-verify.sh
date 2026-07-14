@@ -80,7 +80,8 @@ if [[ "$LOGIC_ONLY" -eq 0 ]]; then
     bash ./scripts/singularity/start-vllm-pd.sh 2>&1 | tee "$VAL/start-vllm-pd.log"
     bash ./scripts/singularity/start-router.sh 2>&1 | tee "$VAL/start-router.log"
   else
-    bold "restart router (fresh state plane for colocated smoke)"
+    bold "restart handoff shims + router (fresh shim code + state plane)"
+    bash ./scripts/singularity/restart-handoff-shims.sh 2>&1 | tee "$VAL/restart-shims.log"
     bash ./scripts/singularity/start-router.sh 2>&1 | tee "$VAL/start-router.log"
     sleep 1
   fi
@@ -102,6 +103,15 @@ if [[ "$LOGIC_ONLY" -eq 0 ]]; then
       warmth_rc=1
     fi
     set -e
+
+    bold "post-warmth short-context smoke (warmth override → disagg handoff)"
+    set +e
+    python3 ./scripts/singularity/track-c-live-smoke.py --hot-short 2>&1 | tee "$VAL/post-warmth-smoke.json"
+    post_warmth_rc=$?
+    set -e
+    if [[ "$post_warmth_rc" -ne 0 ]]; then
+      warmth_rc=1
+    fi
   else
     echo "skip warmth bench (--quick)" | tee "$VAL/warmth-bench.log"
   fi
