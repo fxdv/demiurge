@@ -1,7 +1,9 @@
 //! RCU-published fleet state snapshot.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use crate::warmth::WarmthMap;
 
@@ -54,7 +56,7 @@ impl StateSnapshot {
 /// Eventually-consistent state plane with gossip merge. [DEMI-STATE-AP]
 #[derive(Debug)]
 pub struct StatePlane {
-    inner: Mutex<StateSnapshot>,
+    inner: ArcSwap<StateSnapshot>,
 }
 
 impl StatePlane {
@@ -68,7 +70,7 @@ impl StatePlane {
             decode.insert(label.clone(), BackendSnapshot::new(label, 120_000_000));
         }
         Arc::new(Self {
-            inner: Mutex::new(StateSnapshot {
+            inner: ArcSwap::from_pointee(StateSnapshot {
                 generation: 0,
                 prefill,
                 decode,
@@ -76,18 +78,31 @@ impl StatePlane {
         })
     }
 
-    /// RCU read — clone current snapshot for routing.
-    pub fn snapshot(&self) -> StateSnapshot {
-        self.inner.lock().expect("state plane").clone()
+    /// RCU read — lock-free `Arc` clone for routing.
+    pub fn snapshot(&self) -> Arc<StateSnapshot> {
+        self.inner.load_full()
     }
 
     pub fn publish_snapshot(&self, snap: StateSnapshot) {
-        *self.inner.lock().expect("state plane") = snap;
+        self.inner.store(Arc::new(snap));
+    }
+
+    /// Copy-on-write update for publishers (warmth, gossip).
+    pub fn update_snapshot<F>(&self, f: F)
+    where
+        F: FnOnce(&mut StateSnapshot),
+    {
+        let mut snap = (*self.inner.load_full()).clone();
+        f(&mut snap);
+        self.inner.store(Arc::new(snap));
     }
 
     pub fn bump_generation(&self) -> u64 {
-        let mut inner = self.inner.lock().expect("state plane");
-        inner.generation += 1;
-        inner.generation
+        let mut generation = 0;
+        self.update_snapshot(|snap| {
+            snap.generation += 1;
+            generation = snap.generation;
+        });
+        generation
     }
 }

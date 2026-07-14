@@ -15,30 +15,30 @@ pub struct GossipUpdate {
 
 impl StatePlane {
     pub fn apply_gossip(&self, update: GossipUpdate) {
-        let mut snap = self.snapshot();
-        let pool = if update.is_decode {
-            &mut snap.decode
-        } else {
-            &mut snap.prefill
-        };
-        if let Some(backend) = pool.get_mut(&update.backend_label) {
-            for block in update.warmth_blocks {
-                backend.warmth.insert(block);
+        self.update_snapshot(|snap| {
+            let pool = if update.is_decode {
+                &mut snap.decode
+            } else {
+                &mut snap.prefill
+            };
+            if let Some(backend) = pool.get_mut(&update.backend_label) {
+                for block in update.warmth_blocks {
+                    backend.warmth.insert(block);
+                }
+                backend.occupancy = update.occupancy.clamp(0.0, 1.0);
+                backend.kv_bytes_live = update.kv_bytes_live;
             }
-            backend.occupancy = update.occupancy.clamp(0.0, 1.0);
-            backend.kv_bytes_live = update.kv_bytes_live;
-        }
-        snap.generation = snap.generation.max(update.epoch);
-        self.publish_snapshot(snap);
+            snap.generation = snap.generation.max(update.epoch);
+        });
     }
 
     /// Partition heal: merge remote warmth/telemetry without CP (max generation wins).
     pub fn heal_merge(&self, remote: &StateSnapshot) {
-        let mut local = self.snapshot();
-        merge_pool(&mut local.prefill, &remote.prefill);
-        merge_pool(&mut local.decode, &remote.decode);
-        local.generation = local.generation.max(remote.generation);
-        self.publish_snapshot(local);
+        self.update_snapshot(|local| {
+            merge_pool(&mut local.prefill, &remote.prefill);
+            merge_pool(&mut local.decode, &remote.decode);
+            local.generation = local.generation.max(remote.generation);
+        });
     }
 }
 

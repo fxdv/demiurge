@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -259,14 +259,13 @@ impl Backend {
         pool_pi: f64,
         isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
     ) -> Cost {
-        let mut discounts = Vec::new();
-        if let Some(snap) = snapshot {
+        let discount = if let Some(snap) = snapshot {
             let pool = if decode_pool {
                 &snap.decode
             } else {
                 &snap.prefill
             };
-            if let Some(bs) = pool.get(&self.label) {
+            pool.get(&self.label).and_then(|bs| {
                 let strength = match isolation {
                     Some((registry, identity)) => gated_hit_strength(
                         &bs.warmth,
@@ -278,21 +277,22 @@ impl Backend {
                     ),
                     None => bs.warmth.hit_strength(blocks),
                 };
-                if let Some(d) = warmth_discount(strength) {
-                    discounts.push(d);
-                }
-            }
-        }
-        if extra.is_empty() && discounts.is_empty() {
+                warmth_discount(strength)
+            })
+        } else {
+            None
+        };
+        if extra.is_empty() && discount.is_none() {
             return Cost::from_ln(self.selection_ln(pool_pi, !decode_pool));
         }
         let scaled = pool_core_scale(self.base_service_seconds, pool_pi, !decode_pool);
         let core = TimeCore::clamped(scaled);
-        let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
-        let mut barriers = Vec::with_capacity(1 + extra.len());
-        barriers.push(queue);
-        barriers.extend_from_slice(extra);
-        compose(core, &barriers, &discounts, Corrector::identity())
+        let mut barriers = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
+        let barrier_len = push_route_barriers(&mut barriers, self.inflight(), extra);
+        match discount {
+            Some(d) => compose(core, &barriers[..barrier_len], &[d], Corrector::identity()),
+            None => compose(core, &barriers[..barrier_len], &[], Corrector::identity()),
+        }
     }
 
     pub fn cost_with_barriers(&self, extra: &[BarrierFactor]) -> Cost {
@@ -310,11 +310,9 @@ impl Backend {
         }
         let scaled = pool_core_scale(self.base_service_seconds, pool_pi, prefill);
         let core = TimeCore::clamped(scaled);
-        let queue = BarrierFactor::clamped(1.0 + self.inflight() as f64);
-        let mut barriers = Vec::with_capacity(1 + extra.len());
-        barriers.push(queue);
-        barriers.extend_from_slice(extra);
-        compose(core, &barriers, &[], Corrector::identity())
+        let mut barriers = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
+        let barrier_len = push_route_barriers(&mut barriers, self.inflight(), extra);
+        compose(core, &barriers[..barrier_len], &[], Corrector::identity())
     }
 }
 
@@ -335,11 +333,19 @@ impl PairingTarget for Backend {
         transfer_penalty: f64,
         extra_barriers: &[BarrierFactor],
     ) -> f64 {
-        let mut barriers = extra_barriers.to_vec();
-        if prefill_label != self.label {
-            barriers.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+        let mut barriers = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
+        let mut len = 0;
+        for barrier in extra_barriers {
+            if len < MAX_ROUTE_BARRIERS {
+                barriers[len] = *barrier;
+                len += 1;
+            }
         }
-        self.cost_with_warmth(&barriers, snapshot, blocks, true)
+        if prefill_label != self.label && len < MAX_ROUTE_BARRIERS {
+            barriers[len] = BarrierFactor::clamped(transfer_penalty.max(1.0));
+            len += 1;
+        }
+        self.cost_with_warmth(&barriers[..len], snapshot, blocks, true)
             .ln()
     }
 }
@@ -388,35 +394,19 @@ fn select_decode_with_pi(
     pool_pi: f64,
 ) -> Option<Arc<Backend>> {
     let blocks = default_routing_blocks(prompt_tokens);
+    let mut barriers_a = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
+    let mut barriers_b = [BarrierFactor::clamped(1.0); MAX_ROUTE_BARRIERS];
     candidates
         .iter()
         .min_by(|a, b| {
-            let mut ba = extra_barriers.to_vec();
-            let mut bb = extra_barriers.to_vec();
-            if ctx.prefill_label != a.label {
-                let penalty = if ctx.use_rdma_routing {
-                    rdma_transfer_ln(ctx.kv_bytes, ctx.pf_topo, a.topology())
-                        .exp()
-                        .max(1.0)
-                } else {
-                    ROUTING_TRANSFER_PENALTY.max(1.0)
-                };
-                ba.push(BarrierFactor::clamped(penalty));
-            }
-            if ctx.prefill_label != b.label {
-                let penalty = if ctx.use_rdma_routing {
-                    rdma_transfer_ln(ctx.kv_bytes, ctx.pf_topo, b.topology())
-                        .exp()
-                        .max(1.0)
-                } else {
-                    ROUTING_TRANSFER_PENALTY.max(1.0)
-                };
-                bb.push(BarrierFactor::clamped(penalty));
-            }
-            a.cost_with_warmth_pi(&ba, snapshot, &blocks, true, pool_pi)
+            let len_a =
+                fill_decode_barriers(&mut barriers_a, extra_barriers, ctx.prefill_label, a, ctx);
+            let len_b =
+                fill_decode_barriers(&mut barriers_b, extra_barriers, ctx.prefill_label, b, ctx);
+            a.cost_with_warmth_pi(&barriers_a[..len_a], snapshot, &blocks, true, pool_pi)
                 .ln()
                 .total_cmp(
-                    &b.cost_with_warmth_pi(&bb, snapshot, &blocks, true, pool_pi)
+                    &b.cost_with_warmth_pi(&barriers_b[..len_b], snapshot, &blocks, true, pool_pi)
                         .ln(),
                 )
         })
@@ -509,7 +499,7 @@ pub struct Router {
     ledger: Option<Arc<ReservationLedger>>,
     handoffs: Option<Arc<HandoffRegistry>>,
     bytes_per_token: u64,
-    state: Option<StateSnapshot>,
+    state: Option<Arc<StateSnapshot>>,
     control: Arc<Mutex<ControlPlane>>,
     dataplane: Arc<RcuRoutingTable>,
     admit: Arc<AdmitBucket>,
@@ -691,7 +681,7 @@ impl Router {
     }
 
     pub fn with_state(mut self, state: StateSnapshot) -> Self {
-        self.state = Some(state);
+        self.state = Some(Arc::new(state));
         self
     }
 
@@ -704,11 +694,11 @@ impl Router {
 
     /// Snapshot for routing decisions — live plane when configured, else static seed.
     #[must_use]
-    pub fn routing_snapshot(&self) -> Option<StateSnapshot> {
+    pub fn routing_snapshot(&self) -> Option<Arc<StateSnapshot>> {
         if let Some(plane) = &self.state_plane {
             Some(plane.snapshot())
         } else {
-            self.state.clone()
+            self.state.as_ref().map(Arc::clone)
         }
     }
 
@@ -723,18 +713,18 @@ impl Router {
             return;
         };
         let blocks = default_routing_blocks(prompt_tokens);
-        let mut snap = plane.snapshot();
-        let pool = match phase {
-            Phase::Prefill => &mut snap.prefill,
-            Phase::Decode => &mut snap.decode,
-        };
-        if let Some(backend) = pool.get_mut(backend_label) {
-            for block in blocks {
-                backend.warmth.insert(block);
+        plane.update_snapshot(|snap| {
+            let pool = match phase {
+                Phase::Prefill => &mut snap.prefill,
+                Phase::Decode => &mut snap.decode,
+            };
+            if let Some(backend) = pool.get_mut(backend_label) {
+                for block in blocks {
+                    backend.warmth.insert(block);
+                }
+                snap.generation = snap.generation.saturating_add(1);
             }
-            snap.generation = snap.generation.saturating_add(1);
-            plane.publish_snapshot(snap);
-        }
+        });
     }
 
     pub fn with_rebalancer_actuation(mut self, enabled: bool) -> Self {
@@ -885,7 +875,7 @@ impl Router {
 
     #[must_use]
     pub fn state(&self) -> Option<&StateSnapshot> {
-        self.state.as_ref()
+        self.state.as_deref()
     }
 
     #[must_use]
@@ -969,42 +959,36 @@ impl Router {
             .unwrap_or_default()
     }
 
-    fn tick_control(
-        &self,
-        colocated: Option<bool>,
-        prompt_tokens: Option<u64>,
-        sample_regret: bool,
-    ) {
-        if let Some(colocated) = colocated {
-            if colocated {
-                self.colocated_routes.fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.disagg_routes.fetch_add(1, Ordering::Relaxed);
+    fn bump_route_counters(&self, colocated: bool) {
+        if colocated {
+            self.colocated_routes.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.disagg_routes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn note_fastpath_misroute(&self, prompt_tokens: u64) {
+        let threshold = ROUTING_SHORT_CONTEXT_TOKENS.max(1);
+        if prompt_tokens <= threshold && prompt_tokens * 100 / threshold >= 80 {
+            let frac = (prompt_tokens as f64 / threshold as f64).clamp(0.0, 1.0);
+            if let Ok(mut cp) = self.control.try_lock() {
+                cp.fastpath_misroute_sum += frac;
+                cp.fastpath_misroute_samples += 1;
             }
         }
+    }
 
+    /// Control-plane maintenance deferred off the classify hot path.
+    fn deferred_control_tick(&self, prompt_tokens: Option<u64>, sample_regret: bool) {
         let need_rebalancer = sample_regret
             || self.rebalancer_actuation
             || self.dataplane.age_ms() >= DATAPLANE_RCU_HEARTBEAT_MS;
 
-        let mut cp = self.control.lock().expect("control plane");
-        if let Some(colocated) = colocated {
-            // Misroute = short-context request sent disaggregated (not colocated fast path).
-            if !colocated {
-                if let Some(tokens) = prompt_tokens {
-                    let threshold = ROUTING_SHORT_CONTEXT_TOKENS.max(1);
-                    if tokens <= threshold && tokens * 100 / threshold >= 80 {
-                        let frac = (tokens as f64 / threshold as f64).clamp(0.0, 1.0);
-                        cp.fastpath_misroute_sum += frac;
-                        cp.fastpath_misroute_samples += 1;
-                    }
-                }
-            }
-        }
-
         if prompt_tokens.is_none() && !need_rebalancer {
             return;
         }
+
+        let mut cp = self.control.lock().expect("control plane");
 
         if let Some(tokens) = prompt_tokens {
             cp.predictor.record(tokens);
@@ -1054,13 +1038,27 @@ impl Router {
                     let regret = pairing_regret_targets(
                         &self.prefill,
                         &self.decode,
-                        snap.as_ref(),
+                        snap.as_deref(),
                         tokens,
                         ROUTING_TRANSFER_PENALTY,
                     );
                     cp.regret_sum += regret;
                     cp.regret_samples += 1;
                 }
+            }
+        }
+    }
+
+    fn schedule_control_tick(&self, path: &RoutePath, head: &[u8]) {
+        match path {
+            RoutePath::Colocated(_) => {
+                self.deferred_control_tick(Some(estimate_prompt_tokens(head)), false);
+            }
+            RoutePath::Disaggregated { prompt_tokens, .. } => {
+                self.deferred_control_tick(Some(*prompt_tokens), false);
+            }
+            RoutePath::DecodeOnly(_) => {
+                self.deferred_control_tick(None, false);
             }
         }
     }
@@ -1151,6 +1149,52 @@ pub fn parse_pool_with_topology(
 }
 
 const MAX_HEAD: usize = 64 * 1024;
+/// Stack cap for queue + Φ + transfer barriers on the routing hot path.
+const MAX_ROUTE_BARRIERS: usize = 16;
+
+fn push_route_barriers(
+    buf: &mut [BarrierFactor; MAX_ROUTE_BARRIERS],
+    inflight: usize,
+    extra: &[BarrierFactor],
+) -> usize {
+    buf[0] = BarrierFactor::clamped(1.0 + inflight as f64);
+    let mut len = 1;
+    for barrier in extra {
+        if len < MAX_ROUTE_BARRIERS {
+            buf[len] = *barrier;
+            len += 1;
+        }
+    }
+    len
+}
+
+fn fill_decode_barriers(
+    buf: &mut [BarrierFactor; MAX_ROUTE_BARRIERS],
+    extra: &[BarrierFactor],
+    prefill_label: &str,
+    backend: &Backend,
+    ctx: &DecodePlacementCtx<'_>,
+) -> usize {
+    let mut len = 0;
+    for barrier in extra {
+        if len < MAX_ROUTE_BARRIERS {
+            buf[len] = *barrier;
+            len += 1;
+        }
+    }
+    if prefill_label != backend.label && len < MAX_ROUTE_BARRIERS {
+        let penalty = if ctx.use_rdma_routing {
+            rdma_transfer_ln(ctx.kv_bytes, ctx.pf_topo, backend.topology())
+                .exp()
+                .max(1.0)
+        } else {
+            ROUTING_TRANSFER_PENALTY.max(1.0)
+        };
+        buf[len] = BarrierFactor::clamped(penalty);
+        len += 1;
+    }
+    len
+}
 
 const HDR_TOKENS: &[u8] = b"x-demiurge-tokens";
 const HDR_PHASE: &[u8] = b"x-demiurge-phase";
@@ -1301,7 +1345,7 @@ fn live_queue_pressure(backends: &[Arc<Backend>]) -> f64 {
 fn pool_pressure(router: &Router, fp_share: f64) -> PoolPressure {
     let snap = router.routing_snapshot();
     let mut signals = snap
-        .as_ref()
+        .as_deref()
         .map(|s| export_pool_pressure(s, fp_share))
         .unwrap_or(PoolPressure {
             fp_share,
@@ -1323,7 +1367,9 @@ fn pool_pressure(router: &Router, fp_share: f64) -> PoolPressure {
 
 /// Classify admission path from the HTTP head. [ALG-ROUTE] [DEMI-SHORT-FASTPATH] [DEMI-WARM-DISCOUNT]
 pub fn route(router: &Router, head: &[u8]) -> Result<RoutePath, RouteError> {
-    route_impl(router, head, None)
+    let path = route_impl(router, head, None)?;
+    router.schedule_control_tick(&path, head);
+    Ok(path)
 }
 
 /// `route`, but warmth-driven decisions are gated by cache-domain isolation.
@@ -1344,7 +1390,9 @@ pub fn route_with_identity(
     identity: Option<&RequestIdentity>,
 ) -> Result<RoutePath, RouteError> {
     let isolation = router.cache_registry.as_deref().zip(identity);
-    route_impl(router, head, isolation)
+    let path = route_impl(router, head, isolation)?;
+    router.schedule_control_tick(&path, head);
+    Ok(path)
 }
 
 fn route_impl(
@@ -1357,18 +1405,19 @@ fn route_impl(
             .pick(Phase::Decode)
             .map(RoutePath::DecodeOnly)
             .ok_or(RouteError::NoBackend)?;
-        router.tick_control(Some(false), None, false);
+        router.bump_route_counters(false);
         return Ok(path);
     }
 
     let prompt_tokens = estimate_prompt_tokens(head);
     let snap = router.routing_snapshot();
-    let snap_ref = snap.as_ref();
+    let snap_ref = snap.as_deref();
     if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
         if let Some((prefill, _strength)) =
             warmth_override_target_with_identity(router, prompt_tokens, isolation, snap_ref)
         {
-            router.tick_control(Some(false), Some(prompt_tokens), false);
+            router.bump_route_counters(false);
+            router.note_fastpath_misroute(prompt_tokens);
             return Ok(RoutePath::Disaggregated {
                 prefill,
                 request_id: RequestId::new(),
@@ -1379,7 +1428,7 @@ fn route_impl(
             .pick_colocated()
             .map(RoutePath::Colocated)
             .ok_or(RouteError::NoBackend)?;
-        router.tick_control(Some(true), Some(prompt_tokens), false);
+        router.bump_route_counters(true);
         return Ok(path);
     }
 
@@ -1392,7 +1441,8 @@ fn route_impl(
         isolation,
     )
     .ok_or(RouteError::NoBackend)?;
-    router.tick_control(Some(false), Some(prompt_tokens), false);
+    router.bump_route_counters(false);
+    router.note_fastpath_misroute(prompt_tokens);
     Ok(RoutePath::Disaggregated {
         prefill,
         request_id: RequestId::new(),
@@ -1507,7 +1557,7 @@ pub fn on_prefill_complete(
     let pool_pi = router.dataplane.read_pi();
     let pf_topo = router.topology_for_label(prefill_label);
     let snap = router.routing_snapshot();
-    let snap_ref = snap.as_ref();
+    let snap_ref = snap.as_deref();
     let kv_bytes = handoff
         .as_ref()
         .map(|h| h.byte_len)
@@ -1578,7 +1628,7 @@ pub fn on_prefill_complete(
         },
     );
 
-    router.tick_control(None, Some(signals.prompt_tokens), true);
+    router.deferred_control_tick(Some(signals.prompt_tokens), true);
 
     Ok(DecodePlacement {
         backend,
@@ -1839,30 +1889,32 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
     std::hint::black_box(router.dataplane_pi());
 
     match route(&router, &head) {
-        Ok(RoutePath::Colocated(b)) => {
-            let tokens = estimate_prompt_tokens(&head);
-            let label = b.label.clone();
-            let result = proxy_buffer_to_backend(&mut client, &head, b.as_ref());
-            if result.is_ok() {
-                router.record_request_warmth(&label, Phase::Prefill, tokens);
+        Ok(path) => match path {
+            RoutePath::Colocated(b) => {
+                let tokens = estimate_prompt_tokens(&head);
+                let label = b.label.clone();
+                let result = proxy_buffer_to_backend(&mut client, &head, b.as_ref());
+                if result.is_ok() {
+                    router.record_request_warmth(&label, Phase::Prefill, tokens);
+                }
+                result
             }
-            result
-        }
-        Ok(RoutePath::DecodeOnly(b)) => proxy_buffer_to_backend(&mut client, &head, b.as_ref()),
-        Ok(RoutePath::Disaggregated {
-            prefill,
-            request_id,
-            prompt_tokens,
-        }) => handle_disaggregated(
-            client,
-            head,
-            router,
-            prefill,
-            request_id,
-            prompt_tokens,
-            #[cfg(target_os = "linux")]
-            io_uring_session.as_mut(),
-        ),
+            RoutePath::DecodeOnly(b) => proxy_buffer_to_backend(&mut client, &head, b.as_ref()),
+            RoutePath::Disaggregated {
+                prefill,
+                request_id,
+                prompt_tokens,
+            } => handle_disaggregated(
+                client,
+                head,
+                router,
+                prefill,
+                request_id,
+                prompt_tokens,
+                #[cfg(target_os = "linux")]
+                io_uring_session.as_mut(),
+            ),
+        },
         Err(
             RouteError::NoBackend
             | RouteError::HandoffMissing
@@ -1876,13 +1928,44 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
     }
 }
 
+fn worker_thread_count() -> usize {
+    std::env::var("DEMIURGE_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(256)
+}
+
 pub fn serve(listener: TcpListener, router: Arc<Router>) -> io::Result<()> {
+    let workers = worker_thread_count();
+    let backlog = workers.saturating_mul(2).max(1);
+    let (tx, rx) = mpsc::sync_channel::<TcpStream>(backlog);
+    let shared_rx = Arc::new(Mutex::new(rx));
+    for _ in 0..workers {
+        let rx = Arc::clone(&shared_rx);
+        let router = Arc::clone(&router);
+        thread::spawn(move || loop {
+            let client = {
+                let guard = rx.lock().expect("worker rx");
+                match guard.recv() {
+                    Ok(client) => client,
+                    Err(_) => break,
+                }
+            };
+            let _ = handle_conn(client, Arc::clone(&router));
+        });
+    }
+
     for conn in listener.incoming() {
         let Ok(client) = conn else { continue };
-        let router = Arc::clone(&router);
-        thread::spawn(move || {
-            let _ = handle_conn(client, router);
-        });
+        match tx.try_send(client) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(mut client)) => {
+                let _ = client
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        }
     }
     Ok(())
 }
