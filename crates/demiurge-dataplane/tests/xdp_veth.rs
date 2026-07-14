@@ -111,14 +111,15 @@ impl VethNs {
     /// No listener runs on the host side: an *admitted* SYN elicits an
     /// immediate RST (fast failure), a *shed* SYN times out. Either way the
     /// SYN itself traversed the wire, which is all these tests need.
-    fn syn_probe(&self, port: u16, timeout_s: u32) {
+    /// `timeout` is passed to coreutils `timeout` (e.g. `"0.2"`, `"1"`).
+    fn syn_probe(&self, port: u16, timeout: &str) {
         let _ = Command::new("ip")
             .args([
                 "netns",
                 "exec",
                 &self.ns,
                 "timeout",
-                &timeout_s.to_string(),
+                timeout,
                 "bash",
                 "-c",
                 &format!("echo > /dev/tcp/{HOST_IP}/{port}"),
@@ -275,7 +276,7 @@ fn xdp_admit_shed_sheds_new_syns_when_exhausted() {
     let shed = XdpAdmitShed::attach(&veth.iface, config(2, 0, None)).expect("attach");
 
     for _ in 0..5 {
-        veth.syn_probe(8080, 1);
+        veth.syn_probe(8080, "1");
     }
 
     let pass = shed.pass_total().expect("pass");
@@ -301,7 +302,7 @@ fn xdp_admit_shed_gates_only_listen_port() {
     let shed = XdpAdmitShed::attach(&veth.iface, config(1, 0, Some(4242))).expect("attach");
 
     for _ in 0..3 {
-        veth.syn_probe(9999, 1);
+        veth.syn_probe(9999, "1");
     }
     assert_eq!(shed.pass_total().expect("pass"), 0, "other ports ungated");
     assert_eq!(
@@ -311,8 +312,8 @@ fn xdp_admit_shed_gates_only_listen_port() {
     );
     assert_eq!(shed.available().expect("tokens"), 1);
 
-    veth.syn_probe(4242, 1);
-    veth.syn_probe(4242, 1);
+    veth.syn_probe(4242, "1");
+    veth.syn_probe(4242, "1");
 
     assert_eq!(shed.pass_total().expect("pass"), 1, "gated port admits");
     assert!(
@@ -331,10 +332,13 @@ fn xdp_admit_shed_refills_tokens_in_kernel() {
     // that a 2.5s wait provably accrues.
     let shed = XdpAdmitShed::attach(&veth.iface, config(1, 1, None)).expect("attach");
 
-    veth.syn_probe(8080, 1); // admitted, drains the only token
-    veth.syn_probe(8080, 1); // shed (sub-second gap, nothing accrued yet)
+    // Sub-second probe timeouts on the back-to-back pair: each `syn_probe(..., "1")`
+    // blocks up to 1s waiting for bash, which is long enough for 1 token/s refill
+    // to re-arm the bucket before the shed attempt.
+    veth.syn_probe(8080, "0.2"); // admitted, drains the only token
+    veth.syn_probe(8080, "0.2"); // shed (sub-second gap, nothing accrued yet)
     std::thread::sleep(Duration::from_millis(2500));
-    veth.syn_probe(8080, 1); // admitted from refilled tokens
+    veth.syn_probe(8080, "1"); // admitted from refilled tokens
 
     let pass = shed.pass_total().expect("pass");
     let dropped = shed.shed_total().expect("shed");
