@@ -328,27 +328,33 @@ fn xdp_admit_shed_gates_only_listen_port() {
 fn xdp_admit_shed_refills_tokens_in_kernel() {
     require_root_and_bpf().expect("precheck");
     let veth = VethNs::create().expect("veth+ns");
-    // 1 token/s: slow enough that back-to-back probes exhaust, fast enough
-    // that a 2.5s wait provably accrues.
+
+    // Phase 1 — prove exhaustion without refill (deterministic on CI).
+    {
+        let shed = XdpAdmitShed::attach(&veth.iface, config(1, 0, None)).expect("attach");
+        veth.syn_probe(8080, "0.2");
+        assert_eq!(shed.available().expect("tokens"), 0);
+        veth.syn_probe(8080, "0.2");
+        assert!(
+            shed.shed_total().expect("shed") >= 1,
+            "exhausted bucket must shed (pass={}, shed={})",
+            shed.pass_total().expect("pass"),
+            shed.shed_total().expect("shed")
+        );
+    }
+
+    // Phase 2 — 1 token/s refill re-admits after a wall-clock wait.
     let shed = XdpAdmitShed::attach(&veth.iface, config(1, 1, None)).expect("attach");
-
-    // Sub-second probe timeouts on the back-to-back pair: each `syn_probe(..., "1")`
-    // blocks up to 1s waiting for bash, which is long enough for 1 token/s refill
-    // to re-arm the bucket before the shed attempt.
-    veth.syn_probe(8080, "0.2"); // admitted, drains the only token
-    veth.syn_probe(8080, "0.2"); // shed (sub-second gap, nothing accrued yet)
+    veth.syn_probe(8080, "0.2"); // drain the seeded token
+    assert_eq!(shed.available().expect("tokens"), 0);
     std::thread::sleep(Duration::from_millis(2500));
-    veth.syn_probe(8080, "1"); // admitted from refilled tokens
-
-    let pass = shed.pass_total().expect("pass");
-    let dropped = shed.shed_total().expect("shed");
+    let pass_before = shed.pass_total().expect("pass");
+    veth.syn_probe(8080, "0.2"); // admitted from refilled tokens
     assert!(
-        pass >= 2,
-        "refill must re-admit after the wait (pass={pass}, shed={dropped})"
-    );
-    assert!(
-        dropped >= 1,
-        "back-to-back probe past capacity must shed (pass={pass}, shed={dropped})"
+        shed.pass_total().expect("pass") > pass_before,
+        "refill must re-admit after wait (pass_before={pass_before}, pass={}, shed={})",
+        shed.pass_total().expect("pass"),
+        shed.shed_total().expect("shed")
     );
 }
 
