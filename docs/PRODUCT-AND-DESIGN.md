@@ -162,6 +162,7 @@ Live count from `cargo xtask lint`:
 | **A+ — Shadow tooling** | Trace replay, corrector shadow, fleet pilot | **Done** |
 | **B — Linux production** | XDP attach, io_uring forwarder, nightly binaries | **In progress** — engineering path green (`track-b-verify`); exit gates open |
 | **C — Fleet / GPU** | RDMA hand-off, migration, actuation at scale | **P/D proof PASS** on singularity (`track-c-verify`); RDMA / migration-p99 / live actuation open |
+| **D — Market economics** | $/token, goodput, OOM delta vs baselines at fleet scale | **Protocol ready** — [`design/track-d/`](../design/track-d/); no reference archive yet |
 
 ### CPU hot path (release benchmarks)
 
@@ -245,7 +246,7 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 - [x] Weekly `linux-nightly` release binaries with BPF objects
 - [ ] Production exit gates: real NIC XDP under load, x86_64 p99 budget under CP slowdown
 
-### Track C — Fleet economics
+### Track C — Fleet economics (engineering)
 
 - [x] **P/D proof on reference GPU** — Llama 3.1 8B, 4× V100, KV ledger, handoff shims, live warmth (`./scripts/track-c-verify.sh` **PASS** 2026-07-14; archive [`design/validation/singularity-2026-07-14/`](../design/validation/singularity-2026-07-14/README.md))
 - [ ] RDMA KV hand-off (production transport; TCP proof today)
@@ -253,6 +254,17 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 - [ ] Pool autoscaler actuation on real GPU fractions (shadow → canary → prod)
 - [ ] Cross-tenant cache sharing — isolation + router wiring **shipped**; real tenant auth/content verification on production traffic open
 - [ ] Learned corrector graduation — state machine **shipped**; wiring window cadence + violation counters to live production traffic open
+
+### Track D — Market economics (evidence)
+
+Protocol: [`design/track-d/README.md`](../design/track-d/README.md). Gates: [`design/fleet-economics.toml`](../design/fleet-economics.toml).
+
+- [ ] **Goodput A/B** — Demiurge vs round-robin on shared-prefix agent workload (≥10% delta target)
+- [ ] **OOM burst A/B** — KV ledger + Φ vs blind admit under long-context ramp
+- [ ] **$/token A/B** — mixed short/long workload with documented $/GPU-hour tariff (≥8% cost delta target)
+- [ ] Frozen validation archive — `design/validation/<host>-track-d-<date>/`
+
+Until Track D closes, market disruption claims remain **architectural** (see Executive summary caveat).
 
 ### Explicit non-goals for near term
 
@@ -267,6 +279,7 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 | Risk | Mitigation |
 |------|------------|
 | **Mock bench ≠ GPU fleet** | `track-c-verify` on singularity (Jul 2026); honest proof vs production labeling in gate report |
+| **No fleet economics archive** | Track D A/B protocol + gates — run on partner fleet, freeze under `design/validation/` |
 | **Incumbents add phase-aware routing** | Depth on KV accounting + invariants + open core velocity |
 | **RDMA / NIC variance** | Pluggable `HandoffTransport`; TCP proof path already shipped |
 | **Operational complexity** | Shadow modes default; actuation behind flags; fail-closed admit |

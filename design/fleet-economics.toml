@@ -1,0 +1,116 @@
+# Track D — fleet economics gates (market disruption evidence).
+# Protocol: design/track-d/README.md
+# Archives: design/validation/<host>-track-d-<date>/
+#
+# These gates are NOT in gate.sh or CI until a reference partner run is recorded.
+# Thresholds are initial hypotheses — ratchet tighter only after first archive.
+
+[settings]
+# Minimum wall-clock per A/B arm (minutes). Shorter runs are advisory only.
+min_run_minutes = 30
+# Repeat each scenario at least this many times before claiming PASS.
+min_repeats = 3
+# Demiurge arm must beat baseline by at least this fraction on primary metric.
+default_min_delta_pct = 10.0
+# Demiurge p99 latency may exceed baseline by at most this fraction (fairness cap).
+max_p99_regression_ratio = 1.05
+
+# --- Primary: goodput (tokens out per GPU-hour) --------------------------------
+
+[[scenario]]
+id = "FLEET-AB-GOODPUT"
+summary = "Shared-prefix agent workload: Demiurge vs round-robin on identical fleet"
+workload = "shared_prefix_agent"
+duration_min = 30
+concurrency = 32
+prompt_tokens = 2048
+max_tokens = 64
+warmup_requests = 50
+
+[scenario.baseline]
+mode = "round_robin"
+description = "nginx or demiurge-router with min-cost disabled / fixed RR pool pick"
+
+[scenario.treatment]
+mode = "demiurge"
+description = "Full Demiurge: P/D classify, warmth, KV ledger, pairing"
+
+[scenario.gate]
+primary_metric = "goodput_tokens_per_gpu_hour"
+min_delta_pct = 10.0
+max_p99_regression_ratio = 1.05
+max_error_rate_delta_pct = 0.5
+
+# --- OOM prevention under burst prefill --------------------------------------
+
+[[scenario]]
+id = "FLEET-AB-OOM-BURST"
+summary = "Burst long-context prefill: KV ledger + Φ vs blind admit"
+workload = "burst_prefill"
+duration_min = 20
+concurrency = 64
+prompt_tokens = 4096
+max_tokens = 8
+ramp_seconds = 120
+
+[scenario.baseline]
+mode = "round_robin"
+description = "No KV ledger / no Φ barrier (or colocated-only RR)"
+
+[scenario.treatment]
+mode = "demiurge"
+description = "KV reservation ledger + admit shed + Φ barrier active"
+
+[scenario.gate]
+primary_metric = "oom_or_cuda_oom_events"
+max_treatment_count = 0
+min_baseline_excess = 1
+min_delta_events = 3
+notes = "PASS when treatment sheds/503s gracefully and baseline records ≥1 OOM/CUDA OOM"
+
+# --- $/token proxy (fleet cost per million output tokens) ----------------------
+
+[[scenario]]
+id = "FLEET-AB-COST"
+summary = "Mixed phase workload: cost per million output tokens vs baseline"
+workload = "mixed_phase"
+duration_min = 45
+concurrency = 48
+short_prompt_tokens = 256
+long_prompt_tokens = 2048
+short_fraction = 0.6
+max_tokens = 128
+
+[scenario.baseline]
+mode = "least_conn"
+description = "Phase-blind least-connections across colocated backends"
+
+[scenario.treatment]
+mode = "demiurge"
+description = "Colocated fast path + disagg long + warmth"
+
+[scenario.gate]
+primary_metric = "usd_per_million_output_tokens"
+min_delta_pct = 8.0
+max_p99_regression_ratio = 1.08
+notes = "Uses operator $/GPU-hour; document tariff in archive README"
+
+# --- Warmth hit rate (supporting metric, not standalone market claim) --------
+
+[[scenario]]
+id = "FLEET-AB-WARMTH"
+summary = "Prefix locality: warmth skew on prefill pool after warmup"
+workload = "shared_prefix_agent"
+duration_min = 15
+concurrency = 16
+prompt_tokens = 2048
+warmup_requests = 32
+runs = 48
+
+[scenario.treatment]
+mode = "demiurge"
+
+[scenario.gate]
+primary_metric = "warmth_hit_rate"
+min_value = 0.70
+notes = "Supporting evidence for goodput delta; not sufficient alone for Track D exit"
