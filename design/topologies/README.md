@@ -19,7 +19,7 @@ east–west on **TCP today / InfiniBand target**.
 | **B — VM smoke** | Linux + root | veth (`demi-a*`) | `hybrid` or `xdp` | **on** (`DEMIURGE_XDP_IFACE`) | TCP or `DEMIURGE_IOURING=1` | TCP | optional | `./scripts/xdp-veth-smoke.sh`, `track-b-gate.sh` |
 | **B — CI Track B** | Linux CI | veth / io_uring | `kernel_xdp` (LOAD-TRACK-B-KERNEL) | on | io_uring | TCP | optional | `LOAD-TRACK-B-*` in CI |
 | **B — prod NIC (target)** | Linux x86_64 | **eth0 / bond0** (real NIC) | **`hybrid`** (recommended) | on same **client** iface | io_uring | TCP until Track C | `DEMIURGE_TOPOLOGY` | Track B exit gates (open) |
-| **C — IB GPU fleet (target)** | Linux + GPU | **Ethernet** (API) | **`hybrid`** or `xdp` | on **client** NIC only | io_uring | **RDMA / IB** (`HandoffTransport`) | **required** `label@node/rack/cluster` | Track C (planned) |
+| **C — IB GPU fleet (target)** | Linux + GPU | **Ethernet** (API) | **`hybrid`** or `xdp` | on **client** NIC only | io_uring | **TCP P/D proof PASS**; RDMA/IB target | **required** `label@node/rack/cluster` | `track-c-verify` PASS; RDMA prod open |
 
 ---
 
@@ -73,6 +73,7 @@ Same as Track B for **admit** on Ethernet. KV hand-off switches at the router la
 | Client API | TCP → router | TCP → router (unchanged) |
 | Admit | userspace / XDP on **eth** | same |
 | Prefill → decode KV | TCP proof / headers | **RDMA over IB** (`HandoffTransport`) |
+| Singularity reference (Jul 2026) | TCP handoff + KV ledger + warmth **PASS** | RDMA prod transport open |
 | Cost model | flat + topology shadow | topology-aware routing + shadow eval |
 | Config | default transport | `with_handoff_transport(ModeledRdmaTransport { ... })` or prod verbs |
 

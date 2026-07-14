@@ -43,6 +43,14 @@ Demiurge is built to exploit exactly those three facts. Full design reasoning li
 
 ```bash
 ./scripts/verify.sh full
+./scripts/verify.sh track-c --logic-only   # P6/P7/P8 unit tests (any OS)
+```
+
+On the singularity GPU fleet (Linux):
+
+```bash
+./scripts/track-c-verify.sh              # full P/D proof gate
+./scripts/track-c-verify.sh --ensure-up  # start vLLM + router, then verify
 ```
 
 If `cargo xtask gen` changes any tracked file, commit it — CI fails on stale generated artifacts.
@@ -95,7 +103,7 @@ flowchart TB
 | [`design/`](design/) | Single source of truth: `demiurge.params.toml`, `requirements.toml`, bench/load gate thresholds. |
 | [`spec/`](spec/) | Target design (`demiurge.tex`); `spec/generated/` is `@generated` — never hand-edited. |
 | [`xtask/`](xtask/) | `gen`, `lint`, `spec`, `bench-gate`, `load-bench`, `fleet-pilot`. |
-| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `verify.sh`, `publish.sh`, Track A/B verify, [`linux-vm/`](scripts/linux-vm/). |
+| [`scripts/`](scripts/) | `bootstrap.sh`, `gate.sh`, `verify.sh`, `publish.sh`, Track A/B/C verify, [`singularity/`](scripts/singularity/), [`linux-vm/`](scripts/linux-vm/). |
 
 ---
 

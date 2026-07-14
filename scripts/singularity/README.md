@@ -42,4 +42,4 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now demiurge-vllm-pd demiurge-router
 ```
 
-Validation archive: [`design/validation/singularity-2026-07-14/`](../design/validation/singularity-2026-07-14/README.md)
+Validation archive: [`design/validation/singularity-2026-07-14/`](../../design/validation/singularity-2026-07-14/README.md) — **Track C P/D proof gate PASS** (2026-07-14)

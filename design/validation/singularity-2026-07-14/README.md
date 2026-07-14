@@ -28,6 +28,24 @@ Artifacts: `target/track-c-verify/report.md`, `summary.json`
 **Passing this gate** closes the **Track C P/D proof slice** on reference GPU hardware.  
 **Full Track C roadmap closure** still requires RDMA prod handoff, fleet-measured migration p99, live corrector wiring, and tenant auth on production traffic (listed in the gate report).
 
+### Verified run — 2026-07-14
+
+| Item | Value |
+|------|-------|
+| Command | `./scripts/track-c-verify.sh` |
+| Started (UTC) | 2026-07-14T09:20:22Z |
+| Duration | ~28s |
+| Result | **PASS** (all logic + live stages) |
+| Branch | `singularity-real-pd` |
+
+| Live check | Result | Latency |
+|------------|--------|---------|
+| TC-LIVE-COLOCATED (`X-Demiurge-Tokens: 64`) | PASS | p50 ~120ms |
+| TC-LIVE-DISAGG (`X-Demiurge-Tokens: 1024`) | PASS | p50 ~125ms |
+| TC-WARMTH-SKEW (32 disagg @ 2048 tok) | PASS | p50 ~1.19s; 100% on `9101` |
+
+Report on host: `~/demiurge/target/track-c-verify/report.md`
+
 ## Track B benches (mock TCP — engineering proof)
 
 | Stage | Result |
@@ -40,13 +58,13 @@ Artifacts: `target/track-c-verify/report.md`, `summary.json`
 
 Artifacts on host: `~/track-b-verify.log`, `~/demiurge/target/track-b-verify/`
 
-## Live Llama P/D (post-handoff-shim)
+## Live Llama P/D (verified via `track-c-verify`)
 
-| Path | Status |
-|------|--------|
-| Colocated (`X-Demiurge-Tokens: 64`) | PASS via router :8080 |
-| Disaggregated (`X-Demiurge-Tokens: 1024`) | PASS — 2-hop P/D |
-| Warmth skew (C4 bench) | PASS — 100% on prefill worker 9101 |
+| Path | Status | Notes |
+|------|--------|-------|
+| Colocated (`X-Demiurge-Tokens: 64`) | PASS | decode pool via router :8080 |
+| Disaggregated (`X-Demiurge-Tokens: 1024`) | PASS | 2-hop P/D (shim → decode) |
+| Warmth skew (TC-WARMTH-SKEW) | PASS | 100% prefill on worker `9101` |
 
 ## Path A rollout components
 
