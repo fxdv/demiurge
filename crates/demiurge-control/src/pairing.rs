@@ -154,11 +154,20 @@ fn decode_cost(
             }
         }
     }
-    let mut barriers = extra_barriers.to_vec();
-    if prefill_label != backend.label {
-        barriers.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+    const MAX_BARRIERS: usize = 16;
+    let mut barriers = [BarrierFactor::clamped(1.0); MAX_BARRIERS];
+    let mut len = 0;
+    for barrier in extra_barriers {
+        if len < MAX_BARRIERS {
+            barriers[len] = *barrier;
+            len += 1;
+        }
     }
-    backend.base_cost(&barriers, &discounts)
+    if prefill_label != backend.label && len < MAX_BARRIERS {
+        barriers[len] = BarrierFactor::clamped(transfer_penalty.max(1.0));
+        len += 1;
+    }
+    backend.base_cost(&barriers[..len], &discounts)
 }
 
 fn joint_ln_scored(

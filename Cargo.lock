@@ -183,6 +183,7 @@ dependencies = [
 name = "demiurge-state"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "demiurge-auth",
  "demiurge-cost",
 ]

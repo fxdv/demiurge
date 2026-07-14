@@ -105,7 +105,15 @@ impl WarmthMap {
     /// [DEMI-S1-DOMAIN]
     #[must_use]
     pub fn hit_strength_salted(&self, blocks: &[u64], key: &CacheDomainKey) -> f64 {
-        self.hit_strength(&salted_blocks(blocks, key))
+        if blocks.is_empty() {
+            return 0.0;
+        }
+        let salt = key.salt();
+        let hits = blocks
+            .iter()
+            .filter(|b| self.keys.contains(&salt_block(**b, salt)))
+            .count();
+        hits as f64 / blocks.len() as f64
     }
 }
 
