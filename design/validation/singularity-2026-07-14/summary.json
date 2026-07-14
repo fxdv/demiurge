@@ -1,0 +1,70 @@
+{
+  "archive_date": "2026-07-14",
+  "host": "singularity",
+  "address": "176.123.167.143",
+  "gpus": "4x Tesla V100-SXM3-32GB",
+  "model": "Meta-Llama-3.1-8B-Instruct",
+  "track_c_pd_proof": {
+    "gate": "PASS",
+    "command": "./scripts/track-c-verify.sh --ensure-up",
+    "runs": [
+      {
+        "started_utc": "2026-07-14T09:20:22Z",
+        "duration_s": 28,
+        "colocated_ms": 120,
+        "disagg_ms": 125,
+        "warmth_skew": "100% on vllm-9101"
+      },
+      {
+        "started_utc": "2026-07-14T10:25:16Z",
+        "finished_utc": "2026-07-14T10:26:58Z",
+        "post_warmth_short_32_ms": 184.2,
+        "post_warmth_short_64_ms": 135.9
+      }
+    ]
+  },
+  "benchmark_all": {
+    "started_utc": "2026-07-14T11:55:55Z",
+    "finished_utc": "2026-07-14T12:04:47Z",
+    "all_ns_pass": true,
+    "all_ms_p99_pass": true,
+    "stress_admit_shed": "FAIL (0 sheds vs min 50 — VM too fast)",
+    "thin_cpu_gates": [
+      "BENCH-COMPOSE-8",
+      "BENCH-SELECT-64",
+      "BENCH-BACKEND-COST",
+      "BENCH-CLASSIFY",
+      "BENCH-ROUTE-DISPATCH",
+      "BENCH-IOURING-FWD"
+    ],
+    "load_p99_ms_max": 21.5,
+    "load_p99_ms_max_scenario": "LOAD-MIXED-PHASE",
+    "track_c_live_ms": {
+      "colocated": 260.8,
+      "disagg": 264.3,
+      "hot_short_32": 189.4,
+      "hot_short_64": 134.3
+    }
+  },
+  "kernel_xdp_veth": {
+    "scenario": "LOAD-TRACK-B-KERNEL",
+    "run_utc": "2026-07-14",
+    "p99_ms": 3.23,
+    "limit_ms": 300,
+    "pass": true,
+    "note": "sudo cargo xtask load-bench --scenario LOAD-TRACK-B-KERNEL"
+  },
+  "systemd": {
+    "units": ["demiurge-vllm-pd.service", "demiurge-router.service"],
+    "enabled": true,
+    "reboot_verified": false
+  },
+  "open_gates": [
+    "Real production NIC XDP under load",
+    "Admit p99 under CP slowdown on reference x86",
+    "RDMA production KV handoff",
+    "Migration cutover p99 on fleet",
+    "Live corrector + tenant auth on production traffic",
+    "Pool actuation at fleet scale"
+  ]
+}

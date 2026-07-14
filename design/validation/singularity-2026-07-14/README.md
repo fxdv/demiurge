@@ -5,79 +5,94 @@
 **Model:** Meta-Llama-3.1-8B-Instruct (NousResearch mirror)  
 **Topology:** 2 prefill (9001/9002) + 2 decode (9003/9004) via demiurge-router :8080
 
-## Track C P/D proof gate
-
-Single PASS/FAIL entry point (logic + live fleet):
+## Track C P/D proof gate — PASS
 
 ```bash
 cd ~/demiurge && git pull
 ./scripts/track-c-verify.sh --ensure-up
 ```
 
-Artifacts: `target/track-c-verify/report.md`, `summary.json`
+Artifacts on host: `target/track-c-verify/report.md`, `summary.json`
 
-| Stage | ID | What it proves |
-|-------|-----|----------------|
-| Logic | TC-MIG-UNIT | Phase 6 migration cutover budget (unit) |
-| Logic | TC-P7-UNIT | Phase 7 cache-domain isolation on router |
-| Logic | TC-P8-UNIT | Phase 8 corrector graduation FSM |
-| Logic | TC-KV-UNIT / TC-WARM-UNIT | KV ledger + warmth routing |
-| Live | TC-LIVE-SMOKE | models + colocated + disagg via router |
-| Live | TC-WARMTH-SKEW | Prefix warmth skew on prefill workers |
+| Stage | ID | Result |
+|-------|-----|--------|
+| Logic | TC-MIG / TC-P7 / TC-P8 / TC-KV / TC-WARM / TC-RDMA-SHADOW | PASS |
+| Live | TC-LIVE-SMOKE | PASS |
+| Live | TC-WARMTH-SKEW | PASS |
+| Live | TC-HOT-SHORT-32/64 (post-warmth disagg) | PASS |
 
-**Passing this gate** closes the **Track C P/D proof slice** on reference GPU hardware.  
-**Full Track C roadmap closure** still requires RDMA prod handoff, fleet-measured migration p99, live corrector wiring, and tenant auth on production traffic (listed in the gate report).
+### Verified runs
 
-### Verified run — 2026-07-14
+| Run (UTC) | Command | Colocated | Disagg | Warmth / hot-short |
+|-----------|---------|-----------|--------|-------------------|
+| 09:20 | `track-c-verify.sh` | ~120ms | ~125ms | 100% on `9101` |
+| 10:25–10:26 | `--ensure-up` + post-warmth | 261ms | 264ms | 32tok 189ms, 64tok 134ms |
 
-| Item | Value |
-|------|-------|
-| Command | `./scripts/track-c-verify.sh` |
-| Started (UTC) | 2026-07-14T09:20:22Z |
-| Duration | ~28s |
-| Result | **PASS** (all logic + live stages) |
-| Branch | `singularity-real-pd` |
+**Passing this gate** closes the **Track C P/D proof slice**. Full Track C closure still requires RDMA prod, migration p99, live corrector, tenant auth, fleet actuation.
 
-| Live check | Result | Latency |
-|------------|--------|---------|
-| TC-LIVE-COLOCATED (`X-Demiurge-Tokens: 64`) | PASS | p50 ~120ms |
-| TC-LIVE-DISAGG (`X-Demiurge-Tokens: 1024`) | PASS | p50 ~125ms |
-| TC-WARMTH-SKEW (32 disagg @ 2048 tok) | PASS | p50 ~1.19s; 100% on `9101` |
+## Full benchmark rollup (`benchmark-all.sh`) — PASS (ns + ms p99)
 
-Report on host: `~/demiurge/target/track-c-verify/report.md`
+**Run:** 2026-07-14T11:55–12:04 UTC · ~9 min · `target/singularity-benchmark/`
 
-## Track B benches (mock TCP — engineering proof)
+| Layer | Budget | Result |
+|-------|--------|--------|
+| CPU (11 gates) | `design/bench-gates.toml` ns | **PASS** (6 thin gates on shared VM) |
+| Load (12 scenarios) | `design/load-bench.toml` p99 ms | **PASS** (tightest: MIXED-PHASE 21.5ms / 150ms) |
+| Stress p99 | up to 5000ms | **PASS** |
+| Stress admit shed | min 50 errors on ADMIT-FLOOD | **FAIL** (0 sheds — VM too fast) |
+| Apostrophe-sim | 3 scenarios | **PASS** |
+| Track C live GPU | informal 500ms / 2s | **PASS** |
+
+Machine-readable rollup: [`summary.json`](summary.json)
+
+## Kernel XDP (veth) — PASS
+
+```bash
+sudo -E env PATH="$PATH" HOME="$HOME" \
+  cargo run --release -q --package xtask -- load-bench --scenario LOAD-TRACK-B-KERNEL
+```
+
+| Metric | Value |
+|--------|------:|
+| p99 | 3.23ms |
+| Limit | 300ms |
+| Errors | 0 |
+
+**Not in scope:** production NIC (`ens*`) XDP under saturation — Track B exit gate remains open.
+
+## Track B (mock TCP)
 
 | Stage | Result |
 |-------|--------|
 | gate + Track B gate | PASS |
 | load-bench (12 scenarios) | PASS |
-| stress (4 scenarios) | FAIL — `LOAD-STRESS-ADMIT-FLOOD` shed count (9 vs min 50) |
-| apostrophe-sim | PASS |
-| bench-flame | PASS (thin CPU gates on shared VM) |
+| stress p99 | PASS |
+| stress ADMIT-FLOOD shed count | FAIL (fast VM) |
 
-Artifacts on host: `~/track-b-verify.log`, `~/demiurge/target/track-b-verify/`
-
-## Live Llama P/D (verified via `track-c-verify`)
-
-| Path | Status | Notes |
-|------|--------|-------|
-| Colocated (`X-Demiurge-Tokens: 64`) | PASS | decode pool via router :8080 |
-| Disaggregated (`X-Demiurge-Tokens: 1024`) | PASS | 2-hop P/D (shim → decode) |
-| Warmth skew (TC-WARMTH-SKEW) | PASS | 100% prefill on worker `9101` |
-
-## Path A rollout components
-
-- **C2:** `DEMIURGE_DECODE_KV_CAPACITY_BYTES` + `DEMIURGE_STATE_PLANE` in `demiurge-router`
-- **C1:** `scripts/singularity/prefill_handoff_shim.py` on prefill ports
-- **C3:** Live warmth recording via `StatePlane`
-- **C4:** `scripts/singularity/warmth-prefix-bench.py`
-- **O1/O2:** systemd units + `scripts/singularity/bootstrap.sh`
-
-Manual restart:
+## systemd fleet
 
 ```bash
-~/demiurge/scripts/singularity/start-vllm-pd.sh
-~/demiurge/scripts/singularity/start-router.sh
-./scripts/track-c-verify.sh
+sudo cp scripts/singularity/systemd/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now demiurge-vllm-pd demiurge-router
 ```
+
+Units: `demiurge-vllm-pd` (oneshot, waits for vLLM health) → `demiurge-router` (simple, restart on failure).
+
+`user1` has passwordless sudo via `/etc/sudoers.d/90-cloud-init-users`.
+
+## Ops scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/singularity/benchmark-all.sh` | Full ns + ms budget report |
+| `scripts/singularity/restart-handoff-shims.sh` | Shim-only restart (no vLLM pkill) |
+| `scripts/track-c-verify.sh` | P/D proof gate |
+
+## Path A/C components shipped
+
+- **C1:** `prefill_handoff_shim.py` on 9001/9002
+- **C2:** KV ledger + state plane env on router
+- **C3:** Live warmth recording
+- **C4:** `warmth-prefix-bench.py`
+- **O1/O2:** systemd + `bootstrap.sh`
