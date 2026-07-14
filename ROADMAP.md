@@ -31,13 +31,14 @@ This document is the **build plan** for implementing [`spec/demiurge.tex`](spec/
 
 ## 2. Execution model
 
-Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in `requirements.toml` are unchanged; the table below maps them to three tracks.
+Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in `requirements.toml` are unchanged; the table below maps them to four tracks.
 
 | Track | Platform | Scope | Validation | Status |
 |-------|----------|-------|------------|--------|
 | **A — Local development** | macOS (primary), portable Rust | Phases 0–5 proof | `./scripts/gate.sh`, optional `./scripts/verify.sh full` | **Complete** |
 | **B — Linux production** | Linux x86_64 | Kernel dataplane (XDP, io_uring), `linux-nightly` | Gate Track B, `./scripts/track-b-verify.sh` | **In progress** |
 | **C — Fleet and scale** | Linux + GPU fleet | Migration, tenancy, corrector production | `./scripts/track-c-verify.sh` on reference hardware | **P/D proof PASS** (singularity 2026-07-14); fleet-measured gates open |
+| **D — Market economics** | Linux + GPU fleet (partner / reference) | $/token, goodput, OOM delta vs baselines | A/B protocol in [`design/track-d/`](design/track-d/); archives in [`design/validation/`](design/validation/) | **Not started** — gates in [`design/fleet-economics.toml`](design/fleet-economics.toml) |
 
 ### Platform matrix
 
@@ -56,6 +57,7 @@ Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in
 | Cross-tenant cache-domain isolation, wired into the router | Yes | Yes | Real tenant auth/content verification open |
 | Corrector shadow → canary → production graduation state machine | Yes | Yes | Live-traffic wiring open |
 | Pool actuation at scale | — | — | Planned |
+| Fleet economics A/B ($/token, goodput, OOM delta) | — | — | **Track D** (protocol ready; no archive yet) |
 
 **Scope note.** `DEMI-XDP-SHED` at `implemented` is the **userspace proof** (Track A). Runtime XDP shedding before decode saturation is Track B (Phase 5+).
 
@@ -335,7 +337,63 @@ Artifacts: `target/track-c-verify/report.md`. Passing closes the **P/D proof sli
 
 ---
 
-## 9. Adding a requirement
+## 9. Track D — Market economics
+
+**Objective.** Produce **market-credible evidence** that Demiurge improves fleet economics vs phase-blind baselines on the **same** GPU hardware — not mock TCP, not router nanoseconds.
+
+**Status (July 2026).** Protocol and gate thresholds are defined; **no reference archive yet**. Track C proves the mechanism works; Track D proves it **pays**.
+
+**Primary metrics.**
+
+| Metric | Market story |
+|--------|----------------|
+| **Goodput** (output tokens / GPU-hour) | More revenue capacity per rack |
+| **$/million output tokens** | Direct operator cost comparison |
+| **OOM events under burst** | Reliability / tail-risk reduction |
+
+**Scenarios** (see [`design/fleet-economics.toml`](design/fleet-economics.toml)):
+
+| ID | Baseline | Treatment | Initial gate |
+|----|----------|-----------|--------------|
+| `FLEET-AB-GOODPUT` | Round-robin | Demiurge full | ≥10% goodput delta, p99 ≤1.05× baseline |
+| `FLEET-AB-OOM-BURST` | Blind admit / RR | Ledger + Φ + shed | 0 treatment OOMs; ≥3 fewer than baseline |
+| `FLEET-AB-COST` | Least-connections | Demiurge full | ≥8% $/M-output-token reduction |
+| `FLEET-AB-WARMTH` | — | Warmth skew | ≥70% hit rate (supporting) |
+
+**Protocol:** [`design/track-d/README.md`](design/track-d/README.md) — fleet freeze, workloads, metrics, archive schema, statistical rules.
+
+**Exit criteria — open.**
+
+- [ ] `FLEET-AB-GOODPUT` PASS on reference fleet (≥3 repeats).
+- [ ] `FLEET-AB-OOM-BURST` PASS on reference fleet.
+- [ ] `FLEET-AB-COST` PASS on reference fleet (operator $/GPU-hour documented).
+- [ ] Frozen archive under `design/validation/<host>-track-d-<date>/` with `summary.json` + `README.md`.
+
+**Exit criteria — met.**
+
+- (none yet)
+
+**Validation (manual today).**
+
+```bash
+# Workloads reuse singularity tooling; swap router target per arm — see design/track-d/README.md
+python3 scripts/singularity/warmth-prefix-bench.py
+# Future: ./scripts/track-d-verify.sh  →  target/track-d-verify/report.md
+```
+
+**Relationship to other tracks.**
+
+| Track | Delivers | Track D needs |
+|-------|----------|---------------|
+| C | P/D proof, warmth skew | Running fleet + model |
+| B | Production admit under NIC load | Fair burst test without client-side drops |
+| A | Shadow replay | Offline sanity only; not sufficient for Track D exit |
+
+**Honest labeling.** Until Track D archives exist, disruption claims stay **architectural** — see [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md).
+
+---
+
+## 10. Adding a requirement
 
 1. Add `[[requirement]]` to `design/requirements.toml` with `status = "intended"` and correct `phase`.
 2. Add `\req{ID}` to `spec/demiurge.tex`.
@@ -345,7 +403,7 @@ Artifacts: `target/track-c-verify/report.md`. Passing closes the **P/D proof sli
 
 ---
 
-## 10. Related documents
+## 11. Related documents
 
 | Document | Role |
 |----------|------|
@@ -354,6 +412,8 @@ Artifacts: `target/track-c-verify/report.md`. Passing closes the **P/D proof sli
 | [`design/requirements.toml`](design/requirements.toml) | Requirement registry |
 | [`design/bench-gates.toml`](design/bench-gates.toml) | CPU gate thresholds |
 | [`design/load-bench.toml`](design/load-bench.toml) | Load scenarios |
+| [`design/fleet-economics.toml`](design/fleet-economics.toml) | Track D A/B gate thresholds |
+| [`design/track-d/README.md`](design/track-d/README.md) | Track D fleet economics protocol |
 | [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md) | Product narrative |
 | [`README.md`](README.md) | Quickstart |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution and CI policy |
