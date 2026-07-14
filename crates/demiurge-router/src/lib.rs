@@ -526,6 +526,9 @@ pub struct Router {
     /// disables identity-gated routing entirely (`route_with_identity`
     /// then behaves exactly like `route`). [DEMI-S1-DOMAIN]
     cache_registry: Option<Arc<SharedPrefixGroupRegistry>>,
+    /// Live AP warmth plane; when set, [`Self::routing_snapshot`] reads here
+    /// instead of the static [`Self::state`] snapshot. [DEMI-STATE-AP]
+    state_plane: Option<Arc<StatePlane>>,
 }
 
 impl Clone for Router {
@@ -537,6 +540,7 @@ impl Clone for Router {
             handoffs: self.handoffs.clone(),
             bytes_per_token: self.bytes_per_token,
             state: self.state.clone(),
+            state_plane: self.state_plane.clone(),
             control: Arc::clone(&self.control),
             dataplane: Arc::clone(&self.dataplane),
             admit: Arc::clone(&self.admit),
@@ -635,6 +639,7 @@ impl Router {
             handoff_transport: None,
             rdma_routing: rdma_routing_enabled(),
             cache_registry: None,
+            state_plane: None,
         }
     }
 
@@ -680,6 +685,7 @@ impl Router {
             handoff_transport: Some(Self::default_handoff_transport()),
             rdma_routing: rdma_routing_enabled(),
             cache_registry: None,
+            state_plane: None,
         };
         (router, ledger, handoffs)
     }
@@ -687,6 +693,48 @@ impl Router {
     pub fn with_state(mut self, state: StateSnapshot) -> Self {
         self.state = Some(state);
         self
+    }
+
+    /// Attach a live state plane for warmth/occupancy updates on production traffic.
+    #[must_use]
+    pub fn with_state_plane(mut self, plane: Arc<StatePlane>) -> Self {
+        self.state_plane = Some(plane);
+        self
+    }
+
+    /// Snapshot for routing decisions — live plane when configured, else static seed.
+    #[must_use]
+    pub fn routing_snapshot(&self) -> Option<StateSnapshot> {
+        if let Some(plane) = &self.state_plane {
+            Some(plane.snapshot())
+        } else {
+            self.state.clone()
+        }
+    }
+
+    #[must_use]
+    pub fn state_plane_active(&self) -> bool {
+        self.state_plane.is_some()
+    }
+
+    /// Record block-granularity warmth after a request completes on `backend_label`.
+    pub fn record_request_warmth(&self, backend_label: &str, phase: Phase, prompt_tokens: u64) {
+        let Some(plane) = self.state_plane.as_ref() else {
+            return;
+        };
+        let blocks = default_routing_blocks(prompt_tokens);
+        let mut snap = plane.snapshot();
+        let pool = match phase {
+            Phase::Prefill => &mut snap.prefill,
+            Phase::Decode => &mut snap.decode,
+        };
+        if let Some(backend) = pool.get_mut(backend_label) {
+            for block in blocks {
+                backend.warmth.insert(block);
+            }
+            snap.generation = snap.generation.saturating_add(1);
+            plane.publish_snapshot(snap);
+        }
     }
 
     pub fn with_rebalancer_actuation(mut self, enabled: bool) -> Self {
@@ -1002,10 +1050,11 @@ impl Router {
         if sample_regret {
             if let Some(tokens) = prompt_tokens {
                 if !self.prefill.is_empty() && !self.decode.is_empty() {
+                    let snap = self.routing_snapshot();
                     let regret = pairing_regret_targets(
                         &self.prefill,
                         &self.decode,
-                        self.state.as_ref(),
+                        snap.as_ref(),
                         tokens,
                         ROUTING_TRANSFER_PENALTY,
                     );
@@ -1041,9 +1090,15 @@ impl Router {
         }
     }
 
-    /// Colocated fast path uses the prefill pool (single hop prefill+decode).
+    /// Colocated fast path: single-hop inference. Defaults to the prefill pool;
+    /// set `DEMIURGE_COLOCATED_PHASE=decode` when prefill workers are handoff-only.
     pub fn pick_colocated(&self) -> Option<Arc<Backend>> {
-        self.pick(Phase::Prefill)
+        let phase = match std::env::var("DEMIURGE_COLOCATED_PHASE").as_deref() {
+            Ok("decode") => Phase::Decode,
+            Ok("prefill") => Phase::Prefill,
+            _ => Phase::Prefill,
+        };
+        self.pick(phase)
     }
 }
 
@@ -1199,14 +1254,43 @@ pub fn estimate_prompt_tokens(head: &[u8]) -> u64 {
         .unwrap_or(ROUTING_SHORT_CONTEXT_TOKENS + 1)
 }
 
-/// True when the client declared decode-only routing.
+fn request_line_parts(head: &[u8]) -> Option<(&[u8], &[u8])> {
+    let line = head.split(|&b| b == b'\r' || b == b'\n').next()?;
+    let mut parts = line.split(|&b| b == b' ').filter(|p| !p.is_empty());
+    let method = parts.next()?;
+    let path = parts.next()?;
+    Some((method, path))
+}
+
+fn is_admin_probe_request(head: &[u8]) -> bool {
+    let Some((method, path)) = request_line_parts(head) else {
+        return false;
+    };
+    if ascii_eq_ci(method, b"POST") {
+        return false;
+    }
+    let path = path.split(|&b| b == b'?').next().unwrap_or(path);
+    path.ends_with(b"/models")
+        || path.ends_with(b"/version")
+        || matches!(
+            path,
+            b"/health" | b"/healthz" | b"/ready" | b"/readyz" | b"/metrics"
+        )
+}
+
+/// True when the request should bypass prefill (admin GETs, explicit decode phase, etc.).
 pub fn is_decode_only(head: &[u8]) -> bool {
     if header_value_ci(head, HDR_PHASE).is_some_and(|v| ascii_eq_ci(v, b"decode")) {
         return true;
     }
-    head.split(|&b| b == b'\r' || b == b'\n')
+    if head
+        .split(|&b| b == b'\r' || b == b'\n')
         .next()
         .is_some_and(|line| contains_subslice(line, b" /decode"))
+    {
+        return true;
+    }
+    is_admin_probe_request(head)
 }
 
 fn live_queue_pressure(backends: &[Arc<Backend>]) -> f64 {
@@ -1215,8 +1299,8 @@ fn live_queue_pressure(backends: &[Arc<Backend>]) -> f64 {
 }
 
 fn pool_pressure(router: &Router, fp_share: f64) -> PoolPressure {
-    let mut signals = router
-        .state
+    let snap = router.routing_snapshot();
+    let mut signals = snap
         .as_ref()
         .map(|s| export_pool_pressure(s, fp_share))
         .unwrap_or(PoolPressure {
@@ -1278,9 +1362,11 @@ fn route_impl(
     }
 
     let prompt_tokens = estimate_prompt_tokens(head);
+    let snap = router.routing_snapshot();
+    let snap_ref = snap.as_ref();
     if prompt_tokens <= ROUTING_SHORT_CONTEXT_TOKENS {
         if let Some((prefill, _strength)) =
-            warmth_override_target_with_identity(router, prompt_tokens, isolation)
+            warmth_override_target_with_identity(router, prompt_tokens, isolation, snap_ref)
         {
             router.tick_control(Some(false), Some(prompt_tokens), false);
             return Ok(RoutePath::Disaggregated {
@@ -1300,7 +1386,7 @@ fn route_impl(
     let pool_pi = router.dataplane.read_pi();
     let prefill = select_prefill_with_identity_pi(
         router.pool(Phase::Prefill),
-        router.state.as_ref(),
+        snap_ref,
         prompt_tokens,
         pool_pi,
         isolation,
@@ -1320,8 +1406,9 @@ fn warmth_override_target_with_identity(
     router: &Router,
     prompt_tokens: u64,
     isolation: Option<(&SharedPrefixGroupRegistry, &RequestIdentity)>,
+    snap: Option<&StateSnapshot>,
 ) -> Option<(Arc<Backend>, f64)> {
-    let snap = router.state.as_ref()?;
+    let snap = snap?;
     let blocks = default_routing_blocks(prompt_tokens);
     let mut best: Option<(Arc<Backend>, f64)> = None;
     for backend in router.pool(Phase::Prefill) {
@@ -1419,6 +1506,8 @@ pub fn on_prefill_complete(
 
     let pool_pi = router.dataplane.read_pi();
     let pf_topo = router.topology_for_label(prefill_label);
+    let snap = router.routing_snapshot();
+    let snap_ref = snap.as_ref();
     let kv_bytes = handoff
         .as_ref()
         .map(|h| h.byte_len)
@@ -1431,7 +1520,7 @@ pub fn on_prefill_complete(
             use_rdma_routing: router.rdma_routing,
         },
         router.pool(Phase::Decode),
-        router.state.as_ref(),
+        snap_ref,
         signals.prompt_tokens,
         &extra,
         pool_pi,
@@ -1439,6 +1528,9 @@ pub fn on_prefill_complete(
     .or_else(|| router.pick_with_phi(Phase::Decode, phi))
     .or_else(|| router.pick_colocated())
     .ok_or(RouteError::NoBackend)?;
+
+    router.record_request_warmth(prefill_label, Phase::Prefill, signals.prompt_tokens);
+    router.record_request_warmth(&backend.label, Phase::Decode, signals.prompt_tokens);
 
     if let Some(mut h) = handoff {
         if let Some(reg) = &router.handoffs {
@@ -1473,7 +1565,7 @@ pub fn on_prefill_complete(
 
     let blocks = default_routing_blocks(signals.prompt_tokens);
     let analytic_ln = backend
-        .cost_with_warmth_pi(&extra, router.state.as_ref(), &blocks, true, pool_pi)
+        .cost_with_warmth_pi(&extra, snap_ref, &blocks, true, pool_pi)
         .ln();
     record_corrector_shadow(
         router,
@@ -1566,6 +1658,41 @@ fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+fn parse_content_length(head: &[u8]) -> Option<usize> {
+    header_value_ci(head, b"content-length")
+        .and_then(|v| std::str::from_utf8(v).ok())
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Append a fixed `Content-Length` body from `client` onto `head`.
+fn read_body_into(client: &mut TcpStream, head: &mut Vec<u8>) -> io::Result<()> {
+    if let Some(len) = parse_content_length(head) {
+        if len > 0 {
+            let mut body = vec![0u8; len];
+            client.read_exact(&mut body)?;
+            head.extend_from_slice(&body);
+        }
+    }
+    Ok(())
+}
+
+/// Proxy a fully buffered HTTP request (head + body) to `backend`.
+fn proxy_buffer_to_backend(
+    client: &mut TcpStream,
+    request: &[u8],
+    backend: &Backend,
+) -> io::Result<()> {
+    backend.incr_inflight();
+    let _guard = InflightGuard(backend);
+
+    let mut upstream = TcpStream::connect(backend.addr)?;
+    upstream.write_all(request)?;
+    let mut resp = Vec::new();
+    upstream.read_to_end(&mut resp)?;
+    client.write_all(&resp)?;
+    Ok(())
+}
+
 struct InflightGuard<'a>(&'a Backend);
 
 impl Drop for InflightGuard<'_> {
@@ -1599,53 +1726,6 @@ fn admit_conn(router: &Router) -> AdmitConn {
     AdmitConn::Proceed(Some(AdmitGuard(Arc::clone(&router.admit))))
 }
 
-fn proxy_to_backend(
-    client: &mut TcpStream,
-    head: &[u8],
-    backend: &Backend,
-    #[cfg(target_os = "linux")] io_uring_session: Option<&mut IoUringProxySession>,
-) -> io::Result<()> {
-    backend.incr_inflight();
-    let _guard = InflightGuard(backend);
-
-    let mut upstream = TcpStream::connect(backend.addr)?;
-    upstream.write_all(head)?;
-
-    #[cfg(target_os = "linux")]
-    if let Some(session) = io_uring_session {
-        use std::os::fd::AsRawFd;
-        let up_read = upstream.try_clone()?;
-        let client_write = client.try_clone()?;
-        let client_read = client.try_clone()?;
-        let pump = thread::spawn(move || {
-            if let Ok(mut pump_session) = IoUringProxySession::new() {
-                let _ = pump_session.copy_stream(
-                    up_read.as_raw_fd(),
-                    client_write.as_raw_fd(),
-                    256 * 1024,
-                );
-            }
-            let _ = client_write.shutdown(Shutdown::Write);
-        });
-        session.copy_stream(client_read.as_raw_fd(), upstream.as_raw_fd(), 256 * 1024)?;
-        let _ = upstream.shutdown(Shutdown::Write);
-        let _ = pump.join();
-        return Ok(());
-    }
-
-    let mut up_read = upstream.try_clone()?;
-    let mut client_write = client.try_clone()?;
-    let pump = thread::spawn(move || {
-        let _ = io::copy(&mut up_read, &mut client_write);
-        let _ = client_write.shutdown(Shutdown::Write);
-    });
-    let mut client_read = client.try_clone()?;
-    let _ = io::copy(&mut client_read, &mut upstream);
-    let _ = upstream.shutdown(Shutdown::Write);
-    let _ = pump.join();
-    Ok(())
-}
-
 fn handle_disaggregated(
     mut client: TcpStream,
     head: Vec<u8>,
@@ -1653,7 +1733,7 @@ fn handle_disaggregated(
     prefill: Arc<Backend>,
     request_id: RequestId,
     prompt_tokens: u64,
-    #[cfg(target_os = "linux")] io_uring_session: Option<&mut IoUringProxySession>,
+    #[cfg(target_os = "linux")] _io_uring_session: Option<&mut IoUringProxySession>,
 ) -> io::Result<()> {
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     let router2 = Arc::clone(&router);
@@ -1701,13 +1781,7 @@ fn handle_disaggregated(
         }
     };
 
-    let result = proxy_to_backend(
-        &mut client,
-        &head,
-        placement.backend.as_ref(),
-        #[cfg(target_os = "linux")]
-        io_uring_session,
-    );
+    let result = proxy_buffer_to_backend(&mut client, &head, placement.backend.as_ref());
     drop(placement.reservation);
     result
 }
@@ -1746,7 +1820,7 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
         .as_ref()
         .and_then(|fwd| fwd.open_proxy_session().ok());
 
-    let head = {
+    let mut head = {
         #[cfg(target_os = "linux")]
         {
             if let Some(ref mut session) = io_uring_session {
@@ -1761,16 +1835,20 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
             read_head(&mut client)?
         }
     };
+    read_body_into(&mut client, &mut head)?;
     std::hint::black_box(router.dataplane_pi());
 
     match route(&router, &head) {
-        Ok(RoutePath::Colocated(b) | RoutePath::DecodeOnly(b)) => proxy_to_backend(
-            &mut client,
-            &head,
-            b.as_ref(),
-            #[cfg(target_os = "linux")]
-            io_uring_session.as_mut(),
-        ),
+        Ok(RoutePath::Colocated(b)) => {
+            let tokens = estimate_prompt_tokens(&head);
+            let label = b.label.clone();
+            let result = proxy_buffer_to_backend(&mut client, &head, b.as_ref());
+            if result.is_ok() {
+                router.record_request_warmth(&label, Phase::Prefill, tokens);
+            }
+            result
+        }
+        Ok(RoutePath::DecodeOnly(b)) => proxy_buffer_to_backend(&mut client, &head, b.as_ref()),
         Ok(RoutePath::Disaggregated {
             prefill,
             request_id,

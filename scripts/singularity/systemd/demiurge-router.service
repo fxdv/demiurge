@@ -1,0 +1,26 @@
+[Unit]
+Description=Demiurge router (KV ledger + live state plane)
+After=network-online.target demiurge-vllm-pd.service
+Wants=network-online.target
+Requires=demiurge-vllm-pd.service
+
+[Service]
+Type=simple
+User=user1
+WorkingDirectory=/home/user1/demiurge
+Environment=HOME=/home/user1
+ExecStart=/home/user1/demiurge/target/release/demiurge-router
+Environment=DEMIURGE_LISTEN=127.0.0.1:8080
+Environment=DEMIURGE_ADMIT_MODE=userspace
+Environment=DEMIURGE_PREFILL=pf0@127.0.0.1:9001@0.01,pf1@127.0.0.1:9002@0.01
+Environment=DEMIURGE_DECODE=dc0@127.0.0.1:9003@0.01,dc1@127.0.0.1:9004@0.01
+Environment=DEMIURGE_BYTES_PER_TOKEN=128
+Environment=DEMIURGE_DECODE_KV_CAPACITY_BYTES=32212254720
+Environment=DEMIURGE_STATE_PLANE=1
+Environment=DEMIURGE_COLOCATED_PHASE=decode
+Environment=DEMIURGE_BANNER=0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

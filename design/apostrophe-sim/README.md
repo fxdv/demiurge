@@ -60,7 +60,9 @@ Fields map to load knobs via `demiurge-control::fleet_sim::window_knobs`.
 ## What 'sim does not claim
 
 Mock TCP backends — not real GPU prefill/decode. Proof ≠ production economics.
-Track C (reference GPU rack) remains the production exit gate.
+**Track C P/D proof** (`./scripts/track-c-verify.sh`) on the singularity GPU rack
+passed July 2026 (Llama 3.1 8B, KV ledger, warmth). Full Track C closure (RDMA prod,
+migration p99, live actuation) remains open.
 
 ## Files
 

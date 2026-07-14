@@ -158,6 +158,9 @@ print_footer() {
     echo "  ./scripts/verify.sh track-b             →  target/track-b-verify/report.md"
     echo "  ./scripts/verify.sh track-b --quick     →  gate + CPU benches only"
     echo "  ./scripts/track-b-bench.sh              →  CPU probe/gate + XDP smoke"
+    echo "Track C verification (GPU fleet P/D proof — singularity):"
+    echo "  ./scripts/verify.sh track-c             →  target/track-c-verify/report.md"
+    echo "  ./scripts/track-c-verify.sh --ensure-up →  start vLLM/router, then verify"
   else
     echo "Track B on macOS (Docker CI mirror):"
     echo "  ./scripts/linux-vm/docker-track-b.sh gate"

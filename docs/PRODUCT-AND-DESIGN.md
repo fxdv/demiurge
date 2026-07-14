@@ -4,7 +4,7 @@
 
 *Human-readable product and design brief. Synthesized from [`README.md`](../README.md), [`ROADMAP.md`](../ROADMAP.md), and the living requirement registry. For machine-checked contracts, see [`design/requirements.toml`](../design/requirements.toml); for academic notation, see [`spec/demiurge.tex`](../spec/demiurge.tex) (PDF is optional).*
 
-**Status (June 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **26 requirements** in the registry, **all 26 implemented and test-backed** — Phases 6–8 (live migration, multi-tenant cache security, corrector graduation) ship as portable Track A logic; their reference-fleet actuation gates remain open Track C work. **Track B** engineering path green on Linux VM (XDP veth, kernel admit, io_uring production TCP `serve()`, `LOAD-TRACK-B-KERNEL` in Gate + linux-nightly); **production exit gates** (real NIC XDP under load, x86_64 p99 budget) remain open. Unified **Gate** CI workflow mirrors `./scripts/gate.sh`; **`'sim`** fleet replay + **`verify.sh`** harden tiers ship observable pseudo reports.
+**Status (July 2026):** Phases **0–5 proof** shipped and gated on laptop hardware. **26 requirements** in the registry, **all 26 implemented and test-backed**. **Track C P/D proof gate** (`./scripts/track-c-verify.sh`) **passed** on singularity reference hardware (4× V100, Llama 3.1 8B, live vLLM + KV ledger + warmth). Phases 6–8 logic ships on Track A and is re-checked in that gate; fleet-measured migration p99, RDMA prod handoff, live corrector wiring, and tenant auth on production traffic remain open. **Track B** engineering path green on Linux VM; **production exit gates** (real NIC XDP under load, x86_64 p99 budget) remain open. Unified **Gate** CI mirrors `./scripts/gate.sh`; **`'sim`** fleet replay + **`verify.sh`** harden tiers ship observable pseudo reports.
 
 ---
 
@@ -14,9 +14,9 @@
 
 **The insight.** An inference request is not a packet. It is a **lease on stateful accelerator memory**. The valuable state on a GPU is the KV cache attached to a specific prompt prefix — not the TCP connection. Round-robin and least-connections ignore that completely.
 
-**What exists today.** A working Rust forwarder with cost-based routing, async prefill→decode flow, KV hand-off and memory barriers, warmth-aware placement, pool rebalancing (shadow mode), userspace dataplane proofs, abortable migration-cutover logic, tenant cache-domain isolation, and a corrector shadow→canary→production graduation state machine — all enforced by CI gates, CPU benchmarks, and load/stress suites.
+**What exists today.** A working Rust forwarder with cost-based routing, async prefill→decode flow, KV hand-off and memory barriers, warmth-aware placement, pool rebalancing (shadow mode), userspace dataplane proofs, abortable migration-cutover logic, tenant cache-domain isolation, and a corrector shadow→canary→production graduation state machine — all enforced by CI gates, CPU benchmarks, and load/stress suites. On singularity reference hardware, **real Llama 3.1 8B P/D** (colocated + disaggregated chat, KV ledger, prefix warmth skew) is verified by **`track-c-verify`** (July 2026).
 
-**What we are building toward.** Production-grade kernel admission at fleet scale (real NIC XDP under load), RDMA KV transfer, and pool/corrector actuation on real GPU clusters. The abortable live-migration cutover logic, tenant cache-domain isolation, and corrector graduation state machine already ship as portable, test-backed crates (Track A); io_uring L7 forwarding on the production TCP path is shipped. Reference-hardware validation — fleet-measured migration p99, live production traffic driving the graduation windows, GPU economics — remains.
+**What we are building toward.** Production-grade kernel admission at fleet scale (real NIC XDP under load), RDMA KV transfer, and pool/corrector actuation on real GPU clusters. The abortable live-migration cutover logic, tenant cache-domain isolation, and corrector graduation state machine already ship as portable, test-backed crates; io_uring L7 forwarding on the production TCP path is shipped. Remaining reference-hardware work: fleet-measured migration p99, live production traffic driving corrector graduation windows, RDMA prod transport, and tenant auth on live traffic.
 
 **Honest caveat.** Early proof is green on mock backends and local TCP. **Disruption depends on production economics** on real accelerators. We do not oversell kernel XDP or RDMA as shipped when they are still Track B/C work.
 
@@ -161,7 +161,7 @@ Live count from `cargo xtask lint`:
 | **A — Local proof** | macOS + Linux, mock TCP backends | **Done** (Phases 0–5) |
 | **A+ — Shadow tooling** | Trace replay, corrector shadow, fleet pilot | **Done** |
 | **B — Linux production** | XDP attach, io_uring forwarder, nightly binaries | **In progress** — engineering path green (`track-b-verify`); exit gates open |
-| **C — Fleet / GPU** | RDMA hand-off, migration, actuation at scale | **In progress** — cache-domain isolation, migration cutover logic, and corrector graduation state machine shipped (Track A); fleet-measured gates open |
+| **C — Fleet / GPU** | RDMA hand-off, migration, actuation at scale | **P/D proof PASS** on singularity (`track-c-verify`); RDMA / migration-p99 / live actuation open |
 
 ### CPU hot path (release benchmarks)
 
@@ -247,11 +247,12 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 
 ### Track C — Fleet economics
 
-- [ ] RDMA KV hand-off (production transport)
-- [ ] Live migration — abortable sub-ITL cutover **logic shipped** (Track A); fleet-measured p99 budget on reference hardware open
+- [x] **P/D proof on reference GPU** — Llama 3.1 8B, 4× V100, KV ledger, handoff shims, live warmth (`./scripts/track-c-verify.sh` **PASS** 2026-07-14; archive [`design/validation/singularity-2026-07-14/`](../design/validation/singularity-2026-07-14/README.md))
+- [ ] RDMA KV hand-off (production transport; TCP proof today)
+- [ ] Live migration — abortable sub-ITL cutover **logic shipped**; fleet-measured p99 budget on reference hardware open
 - [ ] Pool autoscaler actuation on real GPU fractions (shadow → canary → prod)
-- [ ] Cross-tenant cache sharing — cache-domain isolation, auth registry, and live-router wiring **shipped** (Track A); real tenant auth/content verification on production traffic open
-- [ ] Learned corrector graduation — shadow → canary → production state machine **shipped** (Track A); wiring window cadence + violation counters to live production traffic open
+- [ ] Cross-tenant cache sharing — isolation + router wiring **shipped**; real tenant auth/content verification on production traffic open
+- [ ] Learned corrector graduation — state machine **shipped**; wiring window cadence + violation counters to live production traffic open
 
 ### Explicit non-goals for near term
 
@@ -265,7 +266,7 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 
 | Risk | Mitigation |
 |------|------------|
-| **Mock bench ≠ GPU fleet** | Track C gates on reference hardware; honest “proof vs production” labeling |
+| **Mock bench ≠ GPU fleet** | `track-c-verify` on singularity (Jul 2026); honest proof vs production labeling in gate report |
 | **Incumbents add phase-aware routing** | Depth on KV accounting + invariants + open core velocity |
 | **RDMA / NIC variance** | Pluggable `HandoffTransport`; TCP proof path already shipped |
 | **Operational complexity** | Shadow modes default; actuation behind flags; fail-closed admit |

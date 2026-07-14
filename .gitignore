@@ -22,3 +22,6 @@ docs/**/*.pdf
 
 # Vagrant (Track B VM)
 scripts/linux-vm/.vagrant/
+
+# Remote fleet SSH keys (never commit)
+singularity.key

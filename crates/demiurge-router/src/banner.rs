@@ -195,6 +195,13 @@ pub fn render_startup_banner(
             pad(&row("kv pool", &format!("{cap} decode cap"), &style))
         );
     }
+    if router.state_plane_active() {
+        let _ = writeln!(
+            out,
+            "{}",
+            pad(&row("state plane", "live warmth · AP gossip", &style))
+        );
+    }
     let _ = writeln!(out, "╠{}╣", rule('═'));
     let ready = format!(
         "{}  {}  v{version}  {}",

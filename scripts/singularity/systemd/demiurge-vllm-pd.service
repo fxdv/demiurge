@@ -1,0 +1,17 @@
+[Unit]
+Description=Demiurge Llama P/D vLLM workers + prefill handoff shims
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=user1
+WorkingDirectory=/home/user1/demiurge
+Environment=HOME=/home/user1
+ExecStart=/home/user1/demiurge/scripts/singularity/start-vllm-pd.sh
+ExecStop=/bin/bash -c 'pkill -f prefill_handoff_shim.py; pkill -f vllm.entrypoints.openai.api_server || true'
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

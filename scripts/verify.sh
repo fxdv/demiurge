@@ -10,6 +10,7 @@
 #   ./scripts/verify.sh sim                  'sim fleet simulation spinoff
 #   ./scripts/verify.sh track-a              Track A metrics + load + stress
 #   ./scripts/verify.sh track-b [--quick]    Track B (Linux only)
+#   ./scripts/verify.sh track-c [--quick]  Track C P/D proof (Linux + GPU fleet)
 #   ./scripts/verify.sh pre-release          nightly / linux-nightly validation
 #   ./scripts/verify.sh full                 gate + load + stress + harden + 'sim
 set -euo pipefail
@@ -28,6 +29,7 @@ usage() {
   echo "  target/harden-verify/            die-hard pseudo + markdown report"
   echo "  target/track-a-verify/           Track A report.md"
   echo "  target/track-b-verify/           Track B report.md (Linux)"
+  echo "  target/track-c-verify/           Track C report.md (Linux + GPU fleet)"
   echo "  target/load-bench/               load + stress + harden + sim JSON/pseudo"
   echo "  target/reports/                  sim disclosure archive (sim-latest.*)"
   echo ""
@@ -79,6 +81,9 @@ case "$cmd" in
     ;;
   track-b)
     exec ./scripts/track-b-verify.sh "$@"
+    ;;
+  track-c)
+    exec ./scripts/track-c-verify.sh "$@"
     ;;
   pre-release)
     exec ./scripts/pre-release.sh

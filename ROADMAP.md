@@ -37,7 +37,7 @@ Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in
 |-------|----------|-------|------------|--------|
 | **A — Local development** | macOS (primary), portable Rust | Phases 0–5 proof | `./scripts/gate.sh`, optional `./scripts/verify.sh full` | **Complete** |
 | **B — Linux production** | Linux x86_64 | Kernel dataplane (XDP, io_uring), `linux-nightly` | Gate Track B, `./scripts/track-b-verify.sh` | **In progress** |
-| **C — Fleet and scale** | Linux + GPU fleet | Migration, tenancy, corrector production | Reference hardware | **In progress** (P6 + P7 + P8 logic done on Track A; fleet-measured gates open) |
+| **C — Fleet and scale** | Linux + GPU fleet | Migration, tenancy, corrector production | `./scripts/track-c-verify.sh` on reference hardware | **P/D proof PASS** (singularity 2026-07-14); fleet-measured gates open |
 
 ### Platform matrix
 
@@ -51,6 +51,7 @@ Work is organized by **where it runs**. Requirement **phase numbers (0–8)** in
 | XDP attach, io_uring forwarder | — | Yes | — |
 | `linux-nightly` pre-release | — | Yes | — |
 | Production RDMA transport | Mock | Mock | Planned |
+| Real Llama P/D + KV ledger + live warmth (TCP handoff) | — | — | **PASS** (`track-c-verify` on singularity) |
 | Live migration cutover logic + atomic KV transfer | Yes | Yes | Fleet p99 gate open |
 | Cross-tenant cache-domain isolation, wired into the router | Yes | Yes | Real tenant auth/content verification open |
 | Corrector shadow → canary → production graduation state machine | Yes | Yes | Live-traffic wiring open |
@@ -73,9 +74,9 @@ Live counts: `cargo xtask lint`.
 | 4 | A | Control plane and pairing | 2 / 2 | Complete |
 | 5 | A | Data plane hardening (proof) | 2 / 2 | Complete |
 | 5+ | B | Data plane production | — | In progress |
-| 6 | C | Live migration | 1 / 1 | Logic done (Track A; fleet p99 gate open) |
-| 7 | C | Multi-tenancy and cache security | 1 / 1 | Logic done, wired into the router (Track A; fleet-traffic rollout open) |
-| 8 | C | Learned corrector graduation | 2 / 2 | Logic done (Track A; live-traffic wiring open) |
+| 6 | C | Live migration | 1 / 1 | Logic done; **P/D proof PASS**; fleet p99 gate open |
+| 7 | C | Multi-tenancy and cache security | 1 / 1 | Logic + router wiring done; **P/D proof PASS**; tenant auth on prod traffic open |
+| 8 | C | Learned corrector graduation | 2 / 2 | Logic done; **P/D proof PASS**; live-traffic wiring open |
 
 ---
 
@@ -285,6 +286,10 @@ VM setup: [`scripts/linux-vm/README.md`](scripts/linux-vm/README.md).
 
 Exit gates are measured on **reference fleet hardware**, not mock TCP alone.
 
+**Status (July 2026).** The **P/D proof gate** (`./scripts/track-c-verify.sh`) **passed** on singularity (4× V100, Llama 3.1 8B, live vLLM + KV ledger + warmth). That validates real GPU prefill→decode routing, handoff shims, and prefix warmth skew. RDMA production transport, fleet-measured migration p99, live corrector graduation, tenant auth on production traffic, and pool actuation at GPU scale remain open — listed in `target/track-c-verify/report.md`.
+
+Archive: [`design/validation/singularity-2026-07-14/`](design/validation/singularity-2026-07-14/README.md)
+
 ### Phase 6 — Live migration
 
 **Objective.** Abortable chunked migration; cutover only if estimated stall ≤ ε × ITL; atomic KV reservation transfer.
@@ -316,6 +321,17 @@ Exit gates are measured on **reference fleet hardware**, not mock TCP alone.
 **Status.** `GraduationController` (`demiurge-control::corrector_grad`) implements the one-way-gated shadow → canary → production state machine: each evaluated window promotes one stage only if the trained δ clears `DEMI-CORR-CLAMP` (not pinned to the envelope boundary, checked via `is_clamp_saturated`) and the violation/goodput gate; any failure — at any stage, including `Production` — demotes straight back to `Shadow`. Shadow pipeline and offline eval are complete on Track A (`fleet-pilot`, corrector shadow tests).
 
 **Risk.** Wiring the controller's window cadence and violation counters to live production traffic (vs. replayed/shadow samples) is Track C work; until that rollout the router runs `δ=1`.
+
+**Validation (P/D proof gate on reference GPU fleet).**
+
+```bash
+./scripts/track-c-verify.sh              # logic + live smoke + warmth skew
+./scripts/track-c-verify.sh --quick        # skip warmth bench
+./scripts/track-c-verify.sh --logic-only   # P6/P7/P8 unit tests only
+./scripts/track-c-verify.sh --ensure-up    # start vLLM + router, then verify
+```
+
+Artifacts: `target/track-c-verify/report.md`. Passing closes the **P/D proof slice**; RDMA prod handoff, fleet-measured migration p99, live corrector wiring, and tenant auth on production traffic remain open (listed in the report).
 
 ---
 
