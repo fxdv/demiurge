@@ -81,6 +81,8 @@ Units: `demiurge-vllm-pd` (oneshot, waits for vLLM health) → `demiurge-router`
 
 `user1` has passwordless sudo via `/etc/sudoers.d/90-cloud-init-users`.
 
+**Reboot verified (2026-07-14):** cold boot → `demiurge-vllm-pd` active ~50s → `demiurge-router` active → HTTP 200 on `:8080`, `:9001`, `:9003`.
+
 ## Ops scripts
 
 | Script | Purpose |

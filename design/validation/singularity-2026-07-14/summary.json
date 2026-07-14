@@ -57,7 +57,9 @@
   "systemd": {
     "units": ["demiurge-vllm-pd.service", "demiurge-router.service"],
     "enabled": true,
-    "reboot_verified": false
+    "reboot_verified": true,
+    "reboot_health_utc": "2026-07-14",
+    "reboot_notes": "Fleet active ~50s after boot; router/shim/decode HTTP 200"
   },
   "open_gates": [
     "Real production NIC XDP under load",
