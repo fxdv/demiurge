@@ -156,9 +156,38 @@ pub fn is_decode_only(head: &[u8]) -> bool {
     if header_value_ci(head, HDR_PHASE).is_some_and(|v| ascii_eq_ci(v, b"decode")) {
         return true;
     }
-    head.split(|&b| b == b'\r' || b == b'\n')
+    if head
+        .split(|&b| b == b'\r' || b == b'\n')
         .next()
         .is_some_and(|line| contains_subslice(line, b" /decode"))
+    {
+        return true;
+    }
+    is_admin_probe_request(head)
+}
+
+fn request_line_parts(head: &[u8]) -> Option<(&[u8], &[u8])> {
+    let line = head.split(|&b| b == b'\r' || b == b'\n').next()?;
+    let mut parts = line.split(|&b| b == b' ').filter(|p| !p.is_empty());
+    let method = parts.next()?;
+    let path = parts.next()?;
+    Some((method, path))
+}
+
+fn is_admin_probe_request(head: &[u8]) -> bool {
+    let Some((method, path)) = request_line_parts(head) else {
+        return false;
+    };
+    if ascii_eq_ci(method, b"POST") {
+        return false;
+    }
+    let path = path.split(|&b| b == b'?').next().unwrap_or(path);
+    path.ends_with(b"/models")
+        || path.ends_with(b"/version")
+        || matches!(
+            path,
+            b"/health" | b"/healthz" | b"/ready" | b"/readyz" | b"/metrics"
+        )
 }
 
 /// Read an HTTP request head, bounded at [`MAX_HEAD`].

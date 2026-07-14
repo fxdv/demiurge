@@ -321,9 +321,9 @@ pub fn serve_with_max_conns(
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(mut job)) => {
                 drop(job._slot);
-                let _ = job.client.write_all(
-                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
-                );
+                let _ = job
+                    .client
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => break,
         }

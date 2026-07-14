@@ -43,7 +43,9 @@ pub use demiurge_dataplane::{
 pub use demiurge_handoff::{
     HandoffRegistry as KvHandoffRegistry, HandoffTransferMetrics, KvHandle,
 };
-pub use demiurge_state::{default_routing_blocks, BackendSnapshot, StatePlane, StateSnapshot, WarmthMap};
+pub use demiurge_state::{
+    default_routing_blocks, BackendSnapshot, StatePlane, StateSnapshot, WarmthMap,
+};
 
 pub mod backend;
 mod banner;
