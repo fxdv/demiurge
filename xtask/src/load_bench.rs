@@ -719,7 +719,11 @@ fn spawn_large_body_backend(delay_us: u64, body_bytes: usize) -> SocketAddr {
     addr
 }
 
-fn spawn_mock_backend(delay_us: u64, jitter_us: u64, kv_bytes: Option<u64>) -> SocketAddr {
+pub(crate) fn spawn_mock_backend(
+    delay_us: u64,
+    jitter_us: u64,
+    kv_bytes: Option<u64>,
+) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend");
     let addr = listener.local_addr().expect("backend addr");
     thread::spawn(move || {
@@ -951,7 +955,7 @@ fn build_pool_calibrated(
         .collect()
 }
 
-fn request_line(
+pub(crate) fn request_line(
     request_style: &str,
     long_prompt_tokens: u64,
     prefill_phase: bool,
@@ -1021,13 +1025,13 @@ fn parse_http_status(head: &[u8]) -> Option<u16> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestOutcome {
+pub(crate) enum RequestOutcome {
     Ok(u64),
     Graceful503,
     HardError,
 }
 
-fn one_request(
+pub(crate) fn one_request(
     router: SocketAddr,
     request_style: &str,
     long_prompt_tokens: u64,
@@ -1070,7 +1074,7 @@ fn one_request(
 
 // ─── Concurrency primitives ──────────────────────────────────────────────────
 
-fn percentile(sorted: &[u64], p: f64) -> u64 {
+pub(crate) fn percentile(sorted: &[u64], p: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
     }

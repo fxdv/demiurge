@@ -56,8 +56,10 @@ impl TrackBVeth {
     }
 
     pub fn attach_router(&self, router: Router) -> Result<Router, String> {
+        // Dedicated veth: gate every TCP SYN (the router binds an ephemeral
+        // port after attach, so there is no port to narrow to yet).
         router
-            .with_kernel_admit(&self.iface)
+            .with_kernel_admit(&self.iface, None)
             .map_err(|e| format!("XDP attach on {}: {e}", self.iface))
     }
 }

@@ -126,15 +126,21 @@ pub fn select_decode(
     )
 }
 
+/// Warmth discounts (0 or 1) for `label`, via the shared snapshot lookup.
+fn pool_discounts(
+    snapshot: Option<&StateSnapshot>,
+    decode_pool: bool,
+    label: &str,
+    blocks: &[u64],
+) -> Vec<demiurge_cost::Discount> {
+    snapshot
+        .and_then(|snap| warmth_discount(snap.pool_hit_strength(decode_pool, label, blocks, None)))
+        .into_iter()
+        .collect()
+}
+
 fn prefill_cost(backend: &ScoredBackend, snapshot: Option<&StateSnapshot>, blocks: &[u64]) -> Cost {
-    let mut discounts = Vec::new();
-    if let Some(snap) = snapshot {
-        if let Some(bs) = snap.prefill.get(&backend.label) {
-            if let Some(d) = warmth_discount(bs.warmth.hit_strength(blocks)) {
-                discounts.push(d);
-            }
-        }
-    }
+    let discounts = pool_discounts(snapshot, false, &backend.label, blocks);
     backend.base_cost(&[], &discounts)
 }
 
@@ -146,14 +152,7 @@ fn decode_cost(
     transfer_penalty: f64,
     extra_barriers: &[BarrierFactor],
 ) -> Cost {
-    let mut discounts = Vec::new();
-    if let Some(snap) = snapshot {
-        if let Some(bs) = snap.decode.get(&backend.label) {
-            if let Some(d) = warmth_discount(bs.warmth.hit_strength(blocks)) {
-                discounts.push(d);
-            }
-        }
-    }
+    let discounts = pool_discounts(snapshot, true, &backend.label, blocks);
     const MAX_BARRIERS: usize = 16;
     let mut barriers = [BarrierFactor::clamped(1.0); MAX_BARRIERS];
     let mut len = 0;

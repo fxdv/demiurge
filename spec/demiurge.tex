@@ -316,7 +316,15 @@ knobs and fleet gates \req{DEMI-FLEET-SIM}. The router exports
 \section{Data Plane}\label{sec:dataplane}
 The live TCP forwarder reads the last published RCU routing snapshot and never
 blocks on control-plane publish \req{DEMI-DP-RCU}. Overload shedding uses a
-token-bucket admit gate before L7 \req{DEMI-XDP-SHED}.
+token-bucket admit gate before L7 \req{DEMI-XDP-SHED}. The kernel (XDP) gate
+sheds \emph{new work only}: it drops TCP SYNs past capacity (optionally scoped
+to the router's listen port) and always passes established flows, ICMP, and
+ARP --- shedding rejects requests, never severs in-flight connections. Tokens
+are signed with fail-expensive compensation (an exhausted bucket can never wrap
+open under concurrent multi-CPU shed) and refill in kernel at
+\texttt{dataplane.admit\_refill\_per\_sec}, so recovery does not depend on
+userspace liveness. Requires Linux $\geq$ 5.12 (\texttt{BPF\_ATOMIC},
+\texttt{-mcpu=v3}).
 
 \begin{table}[h]
   \centering

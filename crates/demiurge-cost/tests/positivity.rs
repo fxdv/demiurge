@@ -94,6 +94,20 @@ proptest! {
     }
 }
 
+// [DEMI-COST-POS] [DEMI-FAIL-EXPENSIVE] — `from_ln` upholds the finite-log
+// invariant for every input: a non-finite log (broken upstream arithmetic)
+// saturates to the most expensive representable cost, never a cheap one, so
+// the C>0 guarantee holds structurally even for direct log-space construction.
+#[test]
+fn from_ln_saturates_non_finite_fail_expensive() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let c = Cost::from_ln(bad);
+        assert!(c.is_positive(), "non-finite input broke the invariant");
+        assert_eq!(c.ln(), f64::MAX, "must saturate to the most expensive cost");
+    }
+    assert_eq!(Cost::from_ln(0.5).ln(), 0.5, "finite input passes through");
+}
+
 // [DEMI-FAIL-EXPENSIVE] — a broken signal can only ever make a target look more
 // expensive (or neutral), never cheaper. A NaN latency must not undercut a
 // valid fast target; invalid discount clamps to neutral and never undercuts a

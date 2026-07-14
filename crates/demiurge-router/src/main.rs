@@ -6,7 +6,9 @@
 //!   DEMIURGE_DECODE        decode pool spec          label@host:port@seconds,...
 //!   DEMIURGE_TOPOLOGY       label@node/rack/cluster,... (optional RDMA shadow)
 //!   DEMIURGE_ADMIT_MODE    userspace | xdp | hybrid  (default userspace)
-//!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux)
+//!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux >= 5.12)
+//!   DEMIURGE_XDP_FLAGS     skb to force generic mode (default: driver, skb fallback)
+//!   DEMIURGE_BPF_PIN_DIR   pin BPF maps under this bpffs dir (telemetry survives restarts)
 //!   DEMIURGE_IOURING       1 for io_uring recv/send on production TCP proxy (Linux)
 //!   DEMIURGE_BANNER        0|1 force disable/enable startup banner (default: TTY)
 //!   DEMIURGE_HANDOFF_TRANSPORT  tcp (default) | mock_rdma | modeled_rdma
@@ -14,6 +16,10 @@
 //!   DEMIURGE_DECODE_KV_CAPACITY_BYTES  fleet decode KV budget (enables ledger + handoff)
 //!   DEMIURGE_BYTES_PER_TOKEN   bytes per KV token for reservation (default 128)
 //!   DEMIURGE_STATE_PLANE       1 to record live warmth on production traffic
+//!   DEMIURGE_CACHE_GROUPS       group@domain@template_fp@tenant1+tenant2,...
+//!                               enables cache-domain isolation on the live path
+//!   DEMIURGE_MAX_CONNS          concurrent connection cap (default from params)
+//!   DEMIURGE_WORKER_THREADS     bounded worker pool size (default 256)
 
 use std::collections::HashMap;
 use std::net::TcpListener;
@@ -24,8 +30,8 @@ use demiurge_cost::TopologyId;
 use demiurge_dataplane::AdmitMode;
 use demiurge_handoff::handoff_transport_from_env;
 use demiurge_router::{
-    parse_pool_with_topology, parse_topology_map, print_startup_banner, serve, Phase, Router,
-    StatePlane,
+    parse_cache_groups, parse_pool_with_topology, parse_topology_map, print_startup_banner,
+    serve_with_max_conns, Phase, Router, StatePlane,
 };
 
 fn main() {
@@ -110,10 +116,18 @@ fn configure() -> Result<(TcpListener, Arc<Router>), String> {
     let listener = TcpListener::bind(&listen).map_err(|e| format!("bind {listen}: {e}"))?;
 
     let mut router = build_router(prefill, decode, topology)?;
+    if let Some(registry) =
+        parse_cache_groups(&std::env::var("DEMIURGE_CACHE_GROUPS").unwrap_or_default())?
+    {
+        router = router.with_cache_registry(Arc::new(registry));
+    }
     let xdp_iface = std::env::var("DEMIURGE_XDP_IFACE").ok();
     if let Some(ref iface) = xdp_iface {
+        // Narrow the kernel SYN gate to the router's own port so unrelated
+        // services on the interface never pay the admission toll.
+        let listen_port = listener.local_addr().ok().map(|a| a.port());
         router = router
-            .with_kernel_admit(iface)
+            .with_kernel_admit(iface, listen_port)
             .map_err(|e| format!("XDP attach on {iface}: {e}"))?;
     }
 
@@ -124,7 +138,11 @@ fn configure() -> Result<(TcpListener, Arc<Router>), String> {
 
 fn run() -> Result<(), String> {
     let (listener, router) = configure()?;
-    serve(listener, router).map_err(|e| e.to_string())
+    let max_conns = std::env::var("DEMIURGE_MAX_CONNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(demiurge_cost::DATAPLANE_MAX_CONNS as usize);
+    serve_with_max_conns(listener, router, max_conns).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

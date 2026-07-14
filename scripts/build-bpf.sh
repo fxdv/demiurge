@@ -29,8 +29,10 @@ if [[ -d "/usr/include/${ARCH}-linux-gnu" ]]; then
 fi
 
 mkdir -p target/bpf
+# -mcpu=v3: BPF_ATOMIC fetch/cmpxchg instructions (token CAS + refill election).
+# Runtime floor: Linux >= 5.12.
 clang -O2 -g -Wall -Werror \
-  -target bpf \
+  -target bpf -mcpu=v3 \
   -D__TARGET_ARCH_${BPF_ARCH} \
   ${INCLUDE} \
   -c bpf/admit_shed.bpf.c \

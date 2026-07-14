@@ -8,7 +8,7 @@ mod snapshot;
 mod warmth;
 
 pub use gossip::{stale_probe, GossipUpdate};
-pub use snapshot::{BackendSnapshot, StatePlane, StateSnapshot};
+pub use snapshot::{BackendSnapshot, IsolationCtx, StatePlane, StateSnapshot};
 pub use warmth::{
     default_routing_blocks, gated_hit_strength, routing_blocks, salted_blocks, WarmthMap,
 };

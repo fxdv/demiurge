@@ -14,7 +14,9 @@ pub use admit_mode::AdmitMode;
 pub use forwarder::IoUringProxySession;
 pub use forwarder::{ForwardDecision, IoUringForwardBench, IoUringForwarder};
 pub use rcu::{pool_core_scale, DataPlaneSnapshot, RcuRoutingTable};
-pub use xdp::{XdpAdmitShed, XdpAttachError, DEFAULT_CAPACITY as XDP_DEFAULT_CAPACITY};
+pub use xdp::{
+    XdpAdmitConfig, XdpAdmitShed, XdpAttachError, DEFAULT_CAPACITY as XDP_DEFAULT_CAPACITY,
+};
 
 /// Scale base admit burst by dataplane π for control-plane actuation sync.
 pub fn admit_capacity_for_pi(base_burst: u64, pi: f64) -> u64 {

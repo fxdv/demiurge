@@ -28,6 +28,7 @@ use std::process::exit;
 use regex::Regex;
 use serde::Deserialize;
 
+mod ab_bench;
 mod apostrophe_sim;
 mod bench_flame;
 mod bench_gate;
@@ -122,6 +123,10 @@ fn main() {
             let sim = args.iter().any(|a| a == "--sim");
             load_bench::load_report(stress, harden, sim)
         }
+        "ab-bench" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            ab_bench::ab_bench(&args)
+        }
         "'sim" | "apostrophe-sim" => apostrophe_sim::apostrophe_sim(),
         "harden-verify" => {
             let args: Vec<String> = std::env::args().skip(2).collect();
@@ -135,7 +140,7 @@ fn main() {
         "product-doc" => build_product_doc(),
         other => {
             eprintln!(
-                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `bench-probe`, `bench-flame`, `load-bench`, `load-report`, `harden-verify`, `build-bpf`, `fleet-pilot`, or `'sim`"
+                "xtask: unknown subcommand {other:?}; expected `gen`, `lint`, `spec`, `product-doc`, `bench-gate`, `bench-probe`, `bench-flame`, `load-bench`, `load-report`, `ab-bench`, `harden-verify`, `build-bpf`, `fleet-pilot`, or `'sim`"
             );
             exit(2);
         }

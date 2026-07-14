@@ -204,7 +204,9 @@ impl Corrector {
 
 /// A strictly-positive cost, represented by its natural logarithm. The stored
 /// `ln` is always finite (class invariant), so the represented value is always
-/// a strictly-positive real. Constructible only via [`compose`].
+/// a strictly-positive real. Every constructor ([`compose`], [`Cost::from_ln`])
+/// enforces the invariant — non-finite inputs saturate fail-expensive instead
+/// of being stored.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Cost {
     ln: f64,
@@ -228,11 +230,21 @@ impl Cost {
         self.ln.is_finite()
     }
 
-    /// Construct from a finite log-cost (hot-path fast paths in the router).
+    /// Construct from a log-cost (hot-path fast paths in the router).
+    ///
+    /// **Fail-expensive:** a non-finite log (broken upstream arithmetic)
+    /// saturates to the largest finite log — the most expensive representable
+    /// cost — and records the event, preserving the class invariant that the
+    /// stored log is always finite. It never maps garbage to a cheap value.
+    /// [DEMI-COST-POS] [DEMI-FAIL-EXPENSIVE]
     #[inline]
     pub fn from_ln(ln: f64) -> Self {
-        debug_assert!(ln.is_finite(), "cost log must be finite");
-        Self { ln }
+        if ln.is_finite() {
+            Self { ln }
+        } else {
+            bump_clamp();
+            Self { ln: f64::MAX }
+        }
     }
 }
 
@@ -242,11 +254,14 @@ impl fmt::Display for Cost {
     }
 }
 
-/// The sole constructor of [`Cost`]. Composition is **addition in log-space**:
-/// `ln C = ln(core) + Σ ln(barrier) − Σ |ln(discount)| + ln(corrector)`. Every
-/// term is finite by the factor constructors, so the sum is finite and the
-/// represented cost is strictly positive — with no underflow-to-zero or
-/// sign-flip possible, unlike a linear product. [DEMI-COST-POS]
+/// The canonical constructor of [`Cost`]. Composition is **addition in
+/// log-space**: `ln C = ln(core) + Σ ln(barrier) − Σ |ln(discount)| +
+/// ln(corrector)`. Every term is finite by the factor constructors, so the sum
+/// is finite for any realistic factor count and the represented cost is
+/// strictly positive — with no underflow-to-zero or sign-flip possible, unlike
+/// a linear product. An overflowed sum (astronomically many max-magnitude
+/// factors) saturates fail-expensive via [`Cost::from_ln`] rather than storing
+/// a non-finite log. [DEMI-COST-POS]
 #[inline]
 pub fn compose(
     core: TimeCore,
@@ -265,8 +280,26 @@ pub fn compose(
     if c != 1.0 {
         ln += c.ln();
     }
-    debug_assert!(ln.is_finite(), "cost log overflowed: too many factors");
-    Cost { ln }
+    Cost::from_ln(ln)
+}
+
+/// The standard per-backend service cost shared by live routing
+/// (`demiurge-router`) and shadow pairing (`demiurge-control`): a clamped
+/// time core, the queue barrier `1 + inflight`, any extra barriers (Φ,
+/// transfer penalty, …) and warmth discounts. Keeping the assembly here
+/// prevents the two cost surfaces from drifting apart. [DEMI-ROUTE-MINCOST]
+pub fn service_cost(
+    core_seconds: f64,
+    inflight: usize,
+    extra_barriers: &[BarrierFactor],
+    discounts: &[Discount],
+) -> Cost {
+    let core = TimeCore::clamped(core_seconds);
+    let queue = BarrierFactor::clamped(1.0 + inflight as f64);
+    let mut barriers = Vec::with_capacity(1 + extra_barriers.len());
+    barriers.push(queue);
+    barriers.extend_from_slice(extra_barriers);
+    compose(core, &barriers, discounts, Corrector::identity())
 }
 
 #[cfg(test)]
