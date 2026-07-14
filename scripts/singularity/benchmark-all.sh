@@ -97,7 +97,8 @@ if [[ "$QUICK" -eq 0 ]]; then
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
     bold "optional: LOAD-TRACK-B-KERNEL (root XDP veth)"
     set +e
-    cargo run --release -q --package xtask -- load-bench --scenario LOAD-TRACK-B-KERNEL 2>&1 | tee "$VAL/load-kernel.log"
+    sudo -E env PATH="$PATH" HOME="$HOME" \
+      cargo run --release -q --package xtask -- load-bench --scenario LOAD-TRACK-B-KERNEL 2>&1 | tee "$VAL/load-kernel.log"
     kernel_rc=$?
     set -e
   else
