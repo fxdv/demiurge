@@ -60,27 +60,45 @@ impl VethNs {
         run_ip(&["-n", &ns, "addr", "add", "192.0.2.2/30", "dev", &b])?;
         run_ip(&["-n", &ns, "link", "set", &b, "up"])?;
         run_ip(&["-n", &ns, "link", "set", "lo", "up"])?;
+        // Static neighbors: the first ICMP probe otherwise races ARP on slow CI
+        // hosts and `ping -c N` fails on any single lost reply.
+        let host_mac = iface_mac(&a)?;
+        let peer_mac = iface_mac_in_netns(&ns, &b)?;
+        run_ip(&[
+            "neigh",
+            "add",
+            "192.0.2.2",
+            "lladdr",
+            &peer_mac,
+            "dev",
+            &a,
+            "nud",
+            "perm",
+        ])?;
+        run_ip(&[
+            "-n", &ns, "neigh", "add", HOST_IP, "lladdr", &host_mac, "dev", &b, "nud", "perm",
+        ])?;
         Ok(Self { iface: a, ns })
     }
 
-    /// Ping `HOST_IP` from inside the netns; true when every reply arrived.
+    /// Ping `HOST_IP` from inside the netns; true when a round-trip succeeds.
     /// (Same-netns `ping -I peer` cannot work here: requests traverse the
     /// veth but replies to a local address come back via loopback, which a
     /// device-bound ping ignores.)
-    fn ping(&self, count: u32) -> Result<bool, String> {
+    fn ping_reliable(&self) -> Result<bool, String> {
+        for attempt in 0..5 {
+            if self.ping_once()? {
+                return Ok(true);
+            }
+            std::thread::sleep(Duration::from_millis(50 * (attempt as u64 + 1)));
+        }
+        Ok(false)
+    }
+
+    fn ping_once(&self) -> Result<bool, String> {
         let status = Command::new("ip")
             .args([
-                "netns",
-                "exec",
-                &self.ns,
-                "ping",
-                "-c",
-                &count.to_string(),
-                "-W",
-                "1",
-                "-i",
-                "0.01",
-                HOST_IP,
+                "netns", "exec", &self.ns, "ping", "-c", "1", "-W", "2", HOST_IP,
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -128,6 +146,47 @@ fn run_ip(args: &[&str]) -> Result<(), String> {
     } else {
         Err(format!("ip exited with {status}"))
     }
+}
+
+fn parse_iface_mac(output: &[u8]) -> Result<String, String> {
+    let text = std::str::from_utf8(output).map_err(|e| format!("ip link utf8: {e}"))?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("    link/ether ") {
+            let mac = rest.split_whitespace().next().unwrap_or("");
+            if !mac.is_empty() {
+                return Ok(mac.to_string());
+            }
+        }
+    }
+    Err(format!("no link/ether in ip link output: {text}"))
+}
+
+fn iface_mac(iface: &str) -> Result<String, String> {
+    let output = Command::new("ip")
+        .args(["link", "show", iface])
+        .output()
+        .map_err(|e| format!("ip link show {iface}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ip link show {iface} exited with {}",
+            output.status
+        ));
+    }
+    parse_iface_mac(&output.stdout)
+}
+
+fn iface_mac_in_netns(ns: &str, iface: &str) -> Result<String, String> {
+    let output = Command::new("ip")
+        .args(["-n", ns, "link", "show", iface])
+        .output()
+        .map_err(|e| format!("ip -n {ns} link show {iface}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ip -n {ns} link show {iface} exited with {}",
+            output.status
+        ));
+    }
+    parse_iface_mac(&output.stdout)
 }
 
 fn require_root_and_bpf() -> Result<(), String> {
@@ -197,7 +256,7 @@ fn xdp_admit_shed_passes_non_syn_traffic() {
     let veth = VethNs::create().expect("veth+ns");
     let shed = XdpAdmitShed::attach(&veth.iface, config(1, 0, None)).expect("attach");
 
-    let ok = veth.ping(8).expect("ping probes");
+    let ok = veth.ping_reliable().expect("ping probes");
     assert!(ok, "ICMP must pass regardless of bucket state");
     assert_eq!(shed.shed_total().expect("shed"), 0, "ICMP is never gated");
     assert_eq!(
