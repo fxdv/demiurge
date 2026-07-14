@@ -13,7 +13,7 @@ east–west on **TCP today / InfiniBand target**.
 | Topology | Platform | Client ingress NIC | `DEMIURGE_ADMIT_MODE` | Kernel XDP | L7 forward | KV hand-off | Topology labels | Primary validation |
 |----------|----------|-------------------|------------------------|------------|------------|-------------|-----------------|-------------------|
 | **A — local dev** | macOS / Linux | lo / veth (mock) | `userspace` (default) | off | TCP | TCP headers (`HeaderPassthroughTransport`) | optional | `./scripts/gate.sh --quick` |
-| **A — load / stress** | Linux VM | mock TCP backends | `userspace` | off | TCP | TCP + KV pool | optional | `./scripts/load-bench.sh`, `load-stress.sh` |
+| **A — load / stress** | Linux VM | mock TCP backends | `userspace` | off | TCP | TCP + KV pool | optional | `./scripts/load-bench.sh`, `load-stress.sh`, `cargo xtask ab-bench` |
 | **A+ — fleet shadow** | macOS + Linux | n/a (offline) | n/a | off | n/a | shadow only | trace JSONL | `cargo xtask fleet-pilot` |
 | **'sim L1/L2** | macOS + Linux | mock TCP | `userspace` (via load-bench) | off | TCP | TCP + KV pool | trace-driven knobs | `./scripts/apostrophe-sim.sh` |
 | **B — VM smoke** | Linux + root | veth (`demi-a*`) | `hybrid` or `xdp` | **on** (`DEMIURGE_XDP_IFACE`) | TCP or `DEMIURGE_IOURING=1` | TCP | optional | `./scripts/xdp-veth-smoke.sh`, `track-b-gate.sh` |
@@ -32,6 +32,11 @@ export DEMIURGE_LISTEN=127.0.0.1:8080
 export DEMIURGE_ADMIT_MODE=userspace
 export DEMIURGE_PREFILL='pf0@127.0.0.1:9001@0.01'
 export DEMIURGE_DECODE='dc0@127.0.0.1:9002@0.01'
+# Optional router tuning:
+# export DEMIURGE_MAX_CONNS=1024
+# export DEMIURGE_WORKER_THREADS=256
+# export DEMIURGE_CACHE_GROUPS='group@domain@template_fp@tenant1+tenant2'
+# export DEMIURGE_COLOCATED_PHASE=1
 # DEMIURGE_TOPOLOGY optional for RDMA shadow experiments
 cargo run --release -p demiurge-router
 ```
@@ -57,6 +62,8 @@ export DEMIURGE_ADMIT_MODE=hybrid
 export DEMIURGE_XDP_IFACE=eth0             # API / north-south ONLY
 export DEMIURGE_IOURING=1
 export DEMIURGE_REBALANCER_ACTUATE=1       # π → admit capacity sync
+export DEMIURGE_MAX_CONNS=1024             # concurrent connection cap (503 when full)
+export DEMIURGE_WORKER_THREADS=256         # bounded L7 worker pool
 export DEMIURGE_PREFILL='pf0@10.0.0.11:9001@0.01,pf1@10.0.0.12:9001@0.01'
 export DEMIURGE_DECODE='dc0@10.0.0.21:9002@0.01,dc1@10.0.0.22:9002@0.01'
 export DEMIURGE_TOPOLOGY='pf0@node0/rack0/cluster0,pf1@node1/rack0/cluster0,dc0@node2/rack1/cluster0,dc1@node3/rack1/cluster0'
@@ -145,6 +152,8 @@ Run full stress locally: `./scripts/load-stress.sh` or `./scripts/verify.sh stre
 | `bpf/admit_shed.bpf.c` | Kernel token bucket (front door) |
 | `crates/demiurge-dataplane/src/admission.rs` | Userspace token bucket |
 | `crates/demiurge-dataplane/src/admit_mode.rs` | `userspace` / `xdp` / `hybrid` |
+| `crates/demiurge-router/src/serve.rs` | Bounded worker pool + `max_conns` cap |
+| `docs/THREAT-MODEL.md` | Wire-protocol trust boundaries and security backlog |
 | `crates/demiurge-handoff/src/transport.rs` | TCP vs mock/modeled RDMA |
 | `design/load-bench.toml` | Scenario presets (`LOAD-TRACK-B-*`, `LOAD-RDMA-TOPO`, `SIM-FLEET-*`) |
 | `design/apostrophe-sim/README.md` | 'sim fleet tiers |

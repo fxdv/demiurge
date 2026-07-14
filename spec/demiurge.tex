@@ -333,9 +333,9 @@ userspace liveness. Requires Linux $\geq$ 5.12 (\texttt{BPF\_ATOMIC},
     \toprule
     Capability & Track~A proof & Track~B production \\
     \midrule
-    RCU snapshot read & Userspace \texttt{DataPlaneSnapshot} & Same + pinned reader threads \\
+    RCU snapshot read & Userspace \texttt{DataPlaneSnapshot} & Same (lock-free read in worker pool) \\
     Admit / shed & \texttt{AdmitBucket} in router & eBPF/XDP map + token bucket \\
-    L7 proxy & \texttt{TcpStream} copy & \texttt{io\_uring} registered buffers \\
+    L7 proxy & \texttt{TcpStream} copy & \texttt{io\_uring} + bounded worker pool (\texttt{max\_conns}) \\
     \bottomrule
   \end{tabular}
   \caption{Dataplane proof vs production (honest scope for Phase~5).}
@@ -355,6 +355,7 @@ Design conformance is enforced in CI and locally via \texttt{./scripts/gate.sh}:
   \item \texttt{cargo xtask bench-gate} --- release-mode CPU gates (\texttt{bench-gates.toml}).
   \item \texttt{cargo xtask spec} --- \texttt{gen} + \LaTeX{} build $\to$ \texttt{spec/demiurge.pdf}.
   \item \texttt{./scripts/load-bench.sh} / \texttt{load-stress.sh} --- TCP load scenarios (stress local-only).
+  \item \texttt{cargo xtask ab-bench} --- routing policy A/B vs baselines.
   \item \texttt{cargo xtask fleet-pilot} --- shadow fleet replay (Track~A+).
   \item \texttt{cargo xtask apostrophe-sim} --- trace $\to$ live load fleet simulation \req{DEMI-FLEET-SIM}.
   \item \texttt{./scripts/verify.sh full} --- gate + load + stress + harden + \texttt{'sim} pseudo report.
@@ -364,6 +365,7 @@ Design conformance is enforced in CI and locally via \texttt{./scripts/gate.sh}:
 \textbf{Operational posture.} The data plane is fail-closed on admit exhaustion
 (503 before backend work). Invalid cost signals fail expensive, never cheap.
 Warmth and occupancy are AP: stale state causes cache miss, not policy violation.
+Cross-host wire formats must satisfy \texttt{docs/THREAT-MODEL.md} before merge.
 \intent{Cross-tenant cache authorization remains CP-strong (\S\ref{sec:sharing}).}
 
 \textbf{Release artifacts.} Tagged macOS releases via \texttt{scripts/publish.sh};

@@ -39,6 +39,10 @@ remain under the repository license.
 5. **Phased delivery.** Pick work from [`ROADMAP.md`](ROADMAP.md); register new
    requirement IDs before implementing; close a phase by flipping `status` to
    `implemented` with named tests.
+6. **Wire-protocol / security.** Any feature that moves state across a machine
+   boundary (gossip, KV hand-off, control-plane RPC) must cite
+   [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) in its design review before
+   fixing the wire format.
 
 ## Before you push
 
@@ -53,7 +57,8 @@ The full gate adds release build, CPU bench gates, load smoke, fleet-pilot, Trac
 (Linux), and optional spec PDF — same as CI.
 
 For heavy local validation after Phase 2 changes, run `./scripts/load-stress.sh`
-(strict zero-error gates; not part of `gate.sh` or CI). Before a release tag,
+(strict zero-error gates; not part of `gate.sh` or CI). Compare routing policies
+with `cargo xtask ab-bench`. Before a release tag,
 run `./scripts/pre-release.sh` (full gate + load + stress + harden + `'sim`, incl. `LOAD-STEP-ACTUATE`
 + stress).
 

@@ -7,7 +7,8 @@
 //! `bench-flame` renders the gate call hierarchy as a flame SVG with headroom
 //! heat and median trends, `load-bench` runs local TCP load scenarios,
 //! `load-report` renders the
-//! pseudo-graphical report from the last run, `'sim` runs the fleet simulation
+//! pseudo-graphical report from the last run, `ab-bench` compares routing
+//! policies against baselines, `'sim` runs the fleet simulation
 //! spinoff, and `harden-verify` runs Tiers 1–4 die-hard checks with an aggregate observable report.
 //!
 //! ```text

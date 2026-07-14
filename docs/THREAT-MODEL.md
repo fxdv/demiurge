@@ -185,9 +185,10 @@ test would fail on the old logic.
 via interface existence on the RCU heartbeat (falls back to the userspace
 bucket); an admin-forced `ip link set … xdp off` detach is not observable
 this way and would leave Hybrid unenforced at L4 (L7 caps still hold).
-**Residual gap — G6 (low):** thread-per-connection remains within the cap;
-1024 threads is acceptable on target hosts, but the io_uring path should
-eventually own the accept loop.
+**Residual gap — G6 (low):** L7 uses a bounded worker pool
+(`DEMIURGE_WORKER_THREADS`, default 256) under the `max_conns` cap; excess
+connections shed 503 immediately. The io_uring path should eventually own the
+accept loop instead of the worker pool.
 
 ### T6 — Cost-function manipulation (M1, M2 → A2)
 
@@ -217,5 +218,4 @@ disaggregated path (self-harm). The corrector multiplier is clamped to
    (blocks: any networked state plane).
 3. **G3/G4** — hand-off byte ceiling, per-backend reservation quota, signed
    descriptors (blocks: cross-host hand-off transport).
-4. **G5** — CAS-based BPF token bucket.
-5. **G6** — io_uring-owned accept loop replacing thread-per-connection.
+4. **G6** — io_uring-owned accept loop replacing the bounded worker pool.

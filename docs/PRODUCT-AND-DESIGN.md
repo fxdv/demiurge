@@ -43,7 +43,7 @@ When prefill and decode share one pool, you get the worst of both worlds: comput
 ### What Demiurge does
 
 1. **Classifies** each request: short-context fast path (colocated) vs disaggregated prefill→decode.
-2. **Admits** under overload (userspace token bucket on all platforms; kernel XDP on Linux when `DEMIURGE_ADMIT_MODE=xdp`).
+2. **Admits** under overload (userspace token bucket on all platforms; kernel XDP on Linux when `DEMIURGE_ADMIT_MODE=xdp` or **`hybrid`** — recommended prod rollout with userspace fallback).
 3. **Selects** the minimum-cost backend within each phase pool using live signals — queue depth, KV pressure, warmth hits, length predictions.
 4. **Hands off** the KV cache explicitly between prefill and decode backends.
 5. **Reserves memory** with honest overhead accounting so bursts cannot silently exhaust decode GPUs.
@@ -243,6 +243,7 @@ That discipline is how a small team ships a trustworthy dataplane without a QA a
 
 - [x] Runtime XDP attach + kernel admit on Linux (veth smoke, router `AdmitMode`, actuation map sync)
 - [x] io_uring L7 forwarder on production TCP `serve()` loop (`IoUringProxySession` recv/send)
+- [x] Router hardening — module split (`backend`/`http`/`config`/`routing`/`serve`), bounded worker pool (`DEMIURGE_WORKER_THREADS`), connection cap (`DEMIURGE_MAX_CONNS`), live tenant wire (`DEMIURGE_CACHE_GROUPS`, `p7_live_wire`)
 - [x] Weekly `linux-nightly` release binaries with BPF objects
 - [ ] Production exit gates: real NIC XDP under load, x86_64 p99 budget under CP slowdown
 
@@ -309,6 +310,7 @@ Until Track D closes, market disruption claims remain **architectural** (see Exe
 ./scripts/bootstrap.sh
 ./scripts/gate.sh
 cargo run --release -q --package xtask -- load-bench --ci
+cargo run --release -q --package xtask -- ab-bench   # routing policy A/B
 ```
 
 ---
@@ -320,6 +322,7 @@ cargo run --release -q --package xtask -- load-bench --ci
 | **This file** | Partners, investors, YC committee | Narrative product + design |
 | [`README.md`](../README.md) | Engineers landing in repo | Orientation + quickstart |
 | [`ROADMAP.md`](../ROADMAP.md) | Contributors | Phased build plan + exit gates |
+| [`docs/THREAT-MODEL.md`](THREAT-MODEL.md) | Security / wire-protocol authors | Trust boundaries, threats, hardening backlog |
 | [`spec/demiurge.tex`](../spec/demiurge.tex) | Implementers | Target design contract (PDF optional) |
 | [`design/requirements.toml`](../design/requirements.toml) | CI / tooling | Shipped vs intended truth |
 | Release one-pager | Per-tag artifact | Validation numbers for a specific build |

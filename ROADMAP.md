@@ -117,6 +117,7 @@ Track B gates ship in the same PR as the code they measure. Production TCP io_ur
 ```bash
 ./scripts/load-bench.sh                              # full suite + pseudo report
 cargo run --release -q --package xtask -- load-bench --ci
+cargo run --release -q --package xtask -- ab-bench   # routing policy A/B vs baselines
 ```
 
 **Stress** — strict local runs with zero-error gates. Not in `gate.sh` or CI.
@@ -247,18 +248,20 @@ Optional deep report: `./scripts/track-a-verify.sh` → `target/track-a-verify/r
 
 **Objective.** Production kernel dataplane: XDP admission, io_uring L7 forwarder, reference-hardware exit gates.
 
-**Status (June 2026).** Engineering path green on Linux VM (`./scripts/track-b-verify.sh` PASS): veth XDP, kernel admit + BPF map sync, `IoUringProxySession` on production `serve()`, Track B load scenarios, full load/stress.
+**Status (July 2026).** Engineering path green on Linux VM (`./scripts/track-b-verify.sh` PASS): veth XDP (SYN-only shed, ICMP pass-through, in-kernel refill), kernel admit + BPF map sync, `IoUringProxySession` on production `serve()`, Track B load scenarios, full load/stress. Router hardening (module split, bounded worker pool, connection cap, live tenant wire) merged July 2026.
 
 **Shipped.**
 
 | Component | Notes |
 |-----------|--------|
-| `bpf/admit_shed.bpf.c` | XDP token-bucket; CI artifact `target/bpf/admit_shed.o` |
-| `XdpAdmitShed` (aya) | Load, attach, map seed/reseed; veth packet shed tests |
+| `bpf/admit_shed.bpf.c` | XDP token-bucket (SYN-only); ICMP/ARP pass; fail-closed signed tokens; in-kernel refill |
+| `XdpAdmitShed` (aya) | Load, attach, map seed/reseed; veth smoke (`xdp_veth.rs`) |
 | Router kernel admit | `AdmitMode`, hybrid mode, actuation map sync |
+| Router hardening | Module split (`backend`/`http`/`config`/`routing`/`serve`); `DEMIURGE_MAX_CONNS`, `DEMIURGE_WORKER_THREADS`; deferred CP tick; live tenant wire (`DEMIURGE_CACHE_GROUPS`, `p7_live_wire`) |
 | `IoUringProxySession` | Production TCP recv/send; `DEMIURGE_IOURING=1` |
-| Load / bench | `LOAD-TRACK-B-*`, `BENCH-IOURING-FWD` |
+| Load / bench | `LOAD-TRACK-B-*`, `BENCH-IOURING-FWD`, `cargo xtask ab-bench` |
 | Scripts | `track-b-gate.sh`, `track-b-verify.sh`, `track-b-bench.sh`, Vagrant bootstrap |
+| Security | [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) — trust boundaries, gossip wire requirements |
 
 **Exit criteria — open.**
 
@@ -310,7 +313,7 @@ Archive: [`design/validation/singularity-2026-07-14/`](design/validation/singula
 
 **Requirement.** `DEMI-S1-DOMAIN` (implemented — Track A logic, tests, and live-router wiring; fleet-traffic rollout open).
 
-**Status.** `demiurge-auth` ships the Shared-Prefix Group registry with content-verified templates and tenant-salted cache-domain keys; `demiurge-state` gates salted warmth lookups on synchronous membership. `demiurge-router` now wires this into the live routing decision: `Router::with_cache_registry` attaches the registry, and `route_with_identity` gates the short-context warmth override and long-context prefill selection through `gated_hit_strength` — proven end-to-end against real `Backend`/`Router` selection (`p7_cache_isolation` integration tests), not just at the state-plane unit level. `route` (no identity) is unchanged. What remains open is wiring real tenant authentication and content verification — currently the caller's responsibility per `RequestIdentity`'s contract — onto live production traffic.
+**Status.** `demiurge-auth` ships the Shared-Prefix Group registry with content-verified templates and tenant-salted cache-domain keys; `demiurge-state` gates salted warmth lookups on synchronous membership. `demiurge-router` now wires this into the live routing decision: `Router::with_cache_registry` attaches the registry, and `route_with_identity` gates the short-context warmth override and long-context prefill selection through `gated_hit_strength` — proven end-to-end against real `Backend`/`Router` selection (`p7_cache_isolation`, `p7_live_wire` integration tests), not just at the state-plane unit level. `route` (no identity) is unchanged. What remains open is wiring real tenant authentication and content verification — currently the caller's responsibility per `RequestIdentity`'s contract — onto live production traffic.
 
 ---
 
@@ -414,6 +417,7 @@ python3 scripts/singularity/warmth-prefix-bench.py
 | [`design/load-bench.toml`](design/load-bench.toml) | Load scenarios |
 | [`design/fleet-economics.toml`](design/fleet-economics.toml) | Track D A/B gate thresholds |
 | [`design/track-d/README.md`](design/track-d/README.md) | Track D fleet economics protocol |
+| [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) | Wire-protocol trust boundaries and security backlog |
 | [`docs/PRODUCT-AND-DESIGN.md`](docs/PRODUCT-AND-DESIGN.md) | Product narrative |
 | [`README.md`](README.md) | Quickstart |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution and CI policy |
