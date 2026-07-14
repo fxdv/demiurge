@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Eventually-consistent state plane: warmth maps, occupancy, and gossip."
 
 [dependencies]
+arc-swap = "1"
 demiurge-auth = { path = "../demiurge-auth" }
 demiurge-cost = { path = "../demiurge-cost" }
 
