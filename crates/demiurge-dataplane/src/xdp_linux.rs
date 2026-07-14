@@ -13,6 +13,34 @@ use super::{XdpAdmitConfig, XdpAdmitShed, XdpAttachError, OBJECT_FILE, PROGRAM_N
 
 const STATE_KEY: u32 = 0;
 
+/// `bpf_ktime_get_ns()` uses `CLOCK_MONOTONIC`; seed the refill clock in
+/// userspace so an empty bucket never sees a bogus multi-second accrual when
+/// `last_refill_ns` was left at zero and the per-packet CAS loses.
+#[cfg(target_os = "linux")]
+fn monotonic_ns() -> u64 {
+    #[repr(C)]
+    struct Timespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+    extern "C" {
+        fn clock_gettime(clk_id: i32, tp: *mut Timespec) -> i32;
+    }
+    const CLOCK_MONOTONIC: i32 = 1;
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid out-pointer for one `timespec`.
+    let rc = unsafe { clock_gettime(CLOCK_MONOTONIC, &mut ts) };
+    if rc != 0 {
+        return 0;
+    }
+    (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64)
+}
+
 /// Layout must match `struct demi_admit_state` in `bpf/admit_shed.bpf.c`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -103,8 +131,6 @@ fn read_admit_stats(bpf: &Ebpf) -> Result<AdmitMapStats, XdpAttachError> {
 }
 
 /// Initial attach: seed the whole state before the program goes live.
-/// `last_refill_ns` starts at 0 — the first gated SYN accrues a huge elapsed
-/// window, but the capacity clamp makes that a no-op on a full bucket.
 fn seed_admit_state(bpf: &mut Ebpf, config: &XdpAdmitConfig) -> Result<(), XdpAttachError> {
     let cap = config.capacity.max(1);
     write_admit_state(
@@ -113,7 +139,7 @@ fn seed_admit_state(bpf: &mut Ebpf, config: &XdpAdmitConfig) -> Result<(), XdpAt
             tokens: cap as i64,
             capacity: cap,
             refill_per_sec: config.refill_per_sec,
-            last_refill_ns: 0,
+            last_refill_ns: monotonic_ns(),
             listen_port: u64::from(config.listen_port.unwrap_or(0)),
         },
     )
@@ -126,6 +152,7 @@ fn reseed_admit_state(bpf: &mut Ebpf, capacity: u64) -> Result<(), XdpAttachErro
     let mut state = read_admit_state(bpf)?;
     state.tokens = cap as i64;
     state.capacity = cap;
+    state.last_refill_ns = monotonic_ns();
     write_admit_state(bpf, state)
 }
 
