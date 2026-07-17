@@ -80,14 +80,14 @@ mismatches fall back to a tenant-private cache-domain key, so their lookup
 can only hit their own warmth. Enforced end-to-end on the live TCP path
 (`p7_live_wire::live_tcp_path_gates_warmth_by_identity`). [DEMI-S1-DOMAIN]
 
-**Residual gap — G1 (high):** cache-domain salts come from
-`DefaultHasher` (SipHash-1-3 with *fixed, public* keys) over
-`(owner, domain, shared)`. An adversary can compute any domain's salt
-offline and search for routing-block collisions across domains. The same
-applies to `PrefixFingerprint::of`. Before multi-tenant production:
-derive salts with a keyed PRF (e.g. BLAKE3 keyed mode or SipHash with a
-per-deployment secret key) and make `PrefixFingerprint` a keyed hash of the
-prefix bytes. Tracked as the top hardening item.
+**Mitigated (G1, partial):** `CacheDomainKey::salt` and
+`PrefixFingerprint::of` mix `DEMIURGE_AUTH_SECRET` (keyed double-hash).
+Optional `X-Demiurge-Prefix-Content` must keyed-hash to the claimed
+`Prefix-Fp` or identity is rejected. Production must set a strong secret;
+the unset default is a fixed **dev-only** placeholder.
+**Residual gap — G1b (medium):** replace the double-`DefaultHasher` mix with
+a real keyed PRF (BLAKE3 keyed / SipHash with secret key material) before
+hostile multi-tenant exposure.
 
 **Residual gap — G2 (medium):** warmth timing is still observable *within*
 a legitimately shared group; a member can probe whether a co-member has
@@ -146,10 +146,11 @@ router's buffer.
 - Duplicate reservations are rejected by request id; reservations are
   RAII-released. [DEMI-KV-HANDOFF]
 
-**Residual gap — G3 (medium):** there is no *upper* sanity bound on claimed
-KV bytes, so one backend can still reserve the whole decode ledger a few
-requests at a time. Add a per-request ceiling (multiple of the analytic
-expectation) and per-backend outstanding-reservation quota.
+**Mitigated (G3, partial):** claimed KV bytes must lie in
+`[expected, expected × handoff_byte_ceiling_multiple]` and each prefill
+source label is capped at `max_outstanding_per_source_fraction` of ledger
+capacity. Handoff headers are parsed only up to the first `\r\n\r\n` so
+body-injected `x-demiurge-kv-*` lines cannot override claims.
 **Residual gap — G4 (medium):** hand-off descriptors are unsigned; when the
 hand-off transport leaves localhost it needs the same authentication story
 as gossip (§T3 requirements apply verbatim).
@@ -213,9 +214,8 @@ disaggregated path (self-harm). The corrector multiplier is clamped to
 
 ## 6. Hardening backlog (priority order)
 
-1. **G1** — keyed salts + keyed prefix fingerprints (`demiurge-auth`).
+1. **G1b** — real keyed PRF for salts/fingerprints (BLAKE3 / keyed SipHash).
 2. **T3** — authenticated gossip wire protocol per §4 requirements
    (blocks: any networked state plane).
-3. **G3/G4** — hand-off byte ceiling, per-backend reservation quota, signed
-   descriptors (blocks: cross-host hand-off transport).
+3. **G4** — signed hand-off descriptors (blocks: cross-host hand-off transport).
 4. **G6** — io_uring-owned accept loop replacing the bounded worker pool.

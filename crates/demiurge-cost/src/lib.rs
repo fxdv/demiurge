@@ -283,6 +283,9 @@ pub fn compose(
     Cost::from_ln(ln)
 }
 
+/// Max barriers assembled into [`service_cost`] (queue + extras).
+pub const MAX_SERVICE_BARRIERS: usize = 16;
+
 /// The standard per-backend service cost shared by live routing
 /// (`demiurge-router`) and shadow pairing (`demiurge-control`): a clamped
 /// time core, the queue barrier `1 + inflight`, any extra barriers (Φ,
@@ -296,10 +299,17 @@ pub fn service_cost(
 ) -> Cost {
     let core = TimeCore::clamped(core_seconds);
     let queue = BarrierFactor::clamped(1.0 + inflight as f64);
-    let mut barriers = Vec::with_capacity(1 + extra_barriers.len());
-    barriers.push(queue);
-    barriers.extend_from_slice(extra_barriers);
-    compose(core, &barriers, discounts, Corrector::identity())
+    let mut barriers = [BarrierFactor::clamped(1.0); MAX_SERVICE_BARRIERS];
+    barriers[0] = queue;
+    let mut len = 1;
+    for barrier in extra_barriers {
+        if len >= MAX_SERVICE_BARRIERS {
+            break;
+        }
+        barriers[len] = *barrier;
+        len += 1;
+    }
+    compose(core, &barriers[..len], discounts, Corrector::identity())
 }
 
 #[cfg(test)]

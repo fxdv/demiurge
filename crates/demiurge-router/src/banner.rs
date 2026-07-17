@@ -70,7 +70,8 @@ impl Style {
 fn admit_label(mode: AdmitMode, kernel: bool) -> &'static str {
     match mode {
         AdmitMode::Userspace => "userspace token bucket",
-        AdmitMode::KernelXdp => "kernel XDP shed",
+        AdmitMode::KernelXdp if kernel => "kernel XDP shed",
+        AdmitMode::KernelXdp => "kernel XDP · userspace fallback",
         AdmitMode::Hybrid if kernel => "hybrid · kernel XDP live",
         AdmitMode::Hybrid => "hybrid · userspace fallback",
     }

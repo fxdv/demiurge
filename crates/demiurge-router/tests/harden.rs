@@ -164,7 +164,8 @@ fn harden_handoff_duplicate_rejects_and_releases() {
 fn harden_hybrid_admit_mode_matrix() {
     assert!(AdmitMode::Userspace.uses_userspace_admit(false));
     assert!(AdmitMode::Userspace.uses_userspace_admit(true));
-    assert!(!AdmitMode::KernelXdp.uses_userspace_admit(false));
+    // KernelXdp falls back to userspace when the shed is missing — never fail-open.
+    assert!(AdmitMode::KernelXdp.uses_userspace_admit(false));
     assert!(!AdmitMode::KernelXdp.uses_userspace_admit(true));
     assert!(AdmitMode::Hybrid.uses_userspace_admit(false));
     assert!(!AdmitMode::Hybrid.uses_userspace_admit(true));
@@ -174,6 +175,13 @@ fn harden_hybrid_admit_mode_matrix() {
     assert!(!router.kernel_admit_attached());
     router.sync_admit_capacity(2);
     assert!(router.admit_bucket().try_admit().is_ok());
+
+    let pf = Backend::new("pf", "127.0.0.1:1".parse().unwrap(), 0.01);
+    let xdp_router = Router::new(vec![pf], vec![]).with_admit_mode(AdmitMode::KernelXdp);
+    assert!(!xdp_router.kernel_admit_attached());
+    assert!(xdp_router
+        .admit_mode()
+        .uses_userspace_admit(xdp_router.kernel_admit_attached()));
     harden_report(2, "hybrid_admit_mode_matrix", "PASS", "fallback=userspace");
 }
 

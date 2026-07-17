@@ -18,6 +18,7 @@
 //!   DEMIURGE_STATE_PLANE       1 to record live warmth on production traffic
 //!   DEMIURGE_CACHE_GROUPS       group@domain@template_fp@tenant1+tenant2,...
 //!                               enables cache-domain isolation on the live path
+//!   DEMIURGE_AUTH_SECRET        keyed salts/fingerprints (required for multi-tenant prod)
 //!   DEMIURGE_MAX_CONNS          concurrent connection cap (default from params)
 //!   DEMIURGE_WORKER_THREADS     bounded worker pool size (default 256)
 
@@ -30,11 +31,12 @@ use demiurge_cost::TopologyId;
 use demiurge_dataplane::AdmitMode;
 use demiurge_handoff::handoff_transport_from_env;
 use demiurge_router::{
-    parse_cache_groups, parse_pool_with_topology, parse_topology_map, print_startup_banner,
-    serve_with_max_conns, Phase, Router, StatePlane,
+    configure_auth_secret_from_env, parse_cache_groups, parse_pool_with_topology,
+    parse_topology_map, print_startup_banner, serve_with_max_conns, Phase, Router, StatePlane,
 };
 
 fn main() {
+    configure_auth_secret_from_env();
     if let Err(e) = run() {
         eprintln!("demiurge-router: {e}");
         exit(1);

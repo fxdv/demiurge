@@ -51,6 +51,7 @@ use std::time::{Duration, Instant};
 
 use demiurge_cost::{
     kv_breakdown, percentile90, phi_barrier_marginal, BarrierFactor, KV_ABANDONED_SESSION_TTL_S,
+    KV_MAX_OUTSTANDING_PER_SOURCE_FRACTION,
 };
 
 const RECENT_SAMPLES: usize = 256;
@@ -83,27 +84,35 @@ impl std::error::Error for AdmitError {}
 struct ReservationEntry {
     bytes: u64,
     created: Instant,
+    source_label: Option<String>,
 }
 
 /// Fleet-aggregate reservation ledger with TTL reclaim.
 #[derive(Debug)]
 pub struct ReservationLedger {
     capacity_bytes: u64,
+    /// Soft cap on outstanding bytes attributed to one prefill source (G3).
+    max_per_source: u64,
     reserved_bytes: AtomicU64,
     admit_rejects: AtomicU64,
     reservation_errors: AtomicU64,
     reservations: Mutex<HashMap<u64, ReservationEntry>>,
+    source_outstanding: Mutex<HashMap<String, u64>>,
     recent_sizes: Mutex<VecDeque<u64>>,
 }
 
 impl ReservationLedger {
     pub fn new(capacity_bytes: u64) -> Arc<Self> {
+        let frac = KV_MAX_OUTSTANDING_PER_SOURCE_FRACTION.clamp(0.0, 1.0);
+        let max_per_source = ((capacity_bytes as f64) * frac).ceil() as u64;
         Arc::new(Self {
             capacity_bytes,
+            max_per_source: max_per_source.max(1),
             reserved_bytes: AtomicU64::new(0),
             admit_rejects: AtomicU64::new(0),
             reservation_errors: AtomicU64::new(0),
             reservations: Mutex::new(HashMap::new()),
+            source_outstanding: Mutex::new(HashMap::new()),
             recent_sizes: Mutex::new(VecDeque::with_capacity(RECENT_SAMPLES)),
         })
     }
@@ -143,6 +152,17 @@ impl ReservationLedger {
         request_id: u64,
         bytes: u64,
     ) -> Result<ReservationGuard, AdmitError> {
+        self.try_reserve_from(None, request_id, bytes)
+    }
+
+    /// Like [`Self::try_reserve`], additionally enforcing a per-source outstanding
+    /// byte quota so one compromised prefill cannot monopolize the ledger (G3).
+    pub fn try_reserve_from(
+        self: &Arc<Self>,
+        source_label: Option<&str>,
+        request_id: u64,
+        bytes: u64,
+    ) -> Result<ReservationGuard, AdmitError> {
         if bytes == 0 {
             self.admit_rejects.fetch_add(1, Ordering::Relaxed);
             return Err(AdmitError::OverCapacity);
@@ -159,13 +179,25 @@ impl ReservationLedger {
             return Err(AdmitError::OverCapacity);
         }
 
+        let mut sources = self.source_outstanding.lock().expect("source lock");
+        if let Some(label) = source_label {
+            let outstanding = sources.get(label).copied().unwrap_or(0);
+            if outstanding.saturating_add(bytes) > self.max_per_source {
+                self.admit_rejects.fetch_add(1, Ordering::Relaxed);
+                return Err(AdmitError::OverCapacity);
+            }
+            *sources.entry(label.to_string()).or_insert(0) += bytes;
+        }
+
         reservations.insert(
             request_id,
             ReservationEntry {
                 bytes,
                 created: Instant::now(),
+                source_label: source_label.map(str::to_string),
             },
         );
+        drop(sources);
         self.reserved_bytes.fetch_add(bytes, Ordering::Relaxed);
 
         let mut recent = self.recent_sizes.lock().expect("recent lock");
@@ -196,6 +228,15 @@ impl ReservationLedger {
         if let Some(entry) = reservations.remove(&request_id) {
             self.reserved_bytes
                 .fetch_sub(entry.bytes, Ordering::Relaxed);
+            if let Some(label) = entry.source_label.as_deref() {
+                let mut sources = self.source_outstanding.lock().expect("source lock");
+                if let Some(out) = sources.get_mut(label) {
+                    *out = out.saturating_sub(entry.bytes);
+                    if *out == 0 {
+                        sources.remove(label);
+                    }
+                }
+            }
             true
         } else {
             self.reservation_errors.fetch_add(1, Ordering::Relaxed);
@@ -305,6 +346,25 @@ mod tests {
         assert!(ledger.try_reserve(99, per_req).is_err());
         assert_eq!(ledger.fleet_reserved(), capacity);
         drop(guards);
+        assert_eq!(ledger.fleet_reserved(), 0);
+    }
+
+    #[test]
+    fn per_source_outstanding_quota_sheds() {
+        // capacity 1000 → 25% per-source = 250.
+        let ledger = ReservationLedger::new(1000);
+        let g1 = ledger
+            .try_reserve_from(Some("pf-a"), 1, 200)
+            .expect("first");
+        assert!(
+            ledger.try_reserve_from(Some("pf-a"), 2, 100).is_err(),
+            "same source over quota"
+        );
+        let g2 = ledger
+            .try_reserve_from(Some("pf-b"), 3, 200)
+            .expect("other source ok");
+        drop(g1);
+        drop(g2);
         assert_eq!(ledger.fleet_reserved(), 0);
     }
 

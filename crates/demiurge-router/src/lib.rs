@@ -32,7 +32,10 @@ use demiurge_cost::{
 use demiurge_dataplane::{admit_capacity_for_pi, AdmitBucket, DataPlaneSnapshot};
 use demiurge_handoff::{HandoffRegistry, HandoffTransport, HeaderPassthroughTransport};
 
-pub use demiurge_auth::{GroupId, PrefixFingerprint, SharedPrefixGroupRegistry, TenantId};
+pub use demiurge_auth::{
+    configure_auth_secret, configure_auth_secret_from_env, GroupId, PrefixFingerprint,
+    SharedPrefixGroupRegistry, TenantId,
+};
 pub use demiurge_control::{LedgerMetrics, ReservationLedger as KvReservationLedger};
 #[cfg(target_os = "linux")]
 pub use demiurge_dataplane::IoUringProxySession;
@@ -632,7 +635,12 @@ impl Router {
             return;
         }
 
-        let mut cp = self.control.lock().expect("control plane");
+        // Prefer try_lock so a busy control plane never stalls the accept worker.
+        // Dropped ticks are safe: predictor samples and rebalancer heartbeats are
+        // best-effort; the next request retries.
+        let Ok(mut cp) = self.control.try_lock() else {
+            return;
+        };
 
         if let Some(tokens) = prompt_tokens {
             cp.predictor.record(tokens);

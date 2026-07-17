@@ -65,13 +65,20 @@ impl HandoffDescriptor {
     }
 }
 
-/// Parse prefill response headers from an HTTP head or full response prefix.
+/// Parse prefill response **headers** only (stop at the first `\r\n\r\n`).
+/// Body lines that look like `x-demiurge-kv-*` are ignored so a compromised
+/// or confused backend cannot inject ledger claims via the body.
 pub fn parse_prefill_handoff(
-    head: &[u8],
+    response: &[u8],
     request_id: u64,
     source_label: &str,
 ) -> Option<HandoffDescriptor> {
-    let text = String::from_utf8_lossy(head);
+    let header_end = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(response.len());
+    let text = String::from_utf8_lossy(&response[..header_end]);
     let mut kv_handle = None;
     let mut byte_len = None;
     for line in text.lines() {
@@ -234,6 +241,19 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nx-demiurge-kv-handle: 42\r\nx-demiurge-kv-bytes: 8192\r\n\r\n";
         let d = parse_prefill_handoff(head, 7, "pf-a").expect("parsed");
         assert_eq!(d.request_id, 7);
+        assert_eq!(d.kv_handle.raw(), 42);
+        assert_eq!(d.byte_len, 8192);
+    }
+
+    #[test]
+    fn parse_handoff_ignores_body_injected_headers() {
+        let response = b"HTTP/1.1 200 OK\r\n\
+x-demiurge-kv-handle: 42\r\n\
+x-demiurge-kv-bytes: 8192\r\n\
+\r\n\
+x-demiurge-kv-handle: 99\r\n\
+x-demiurge-kv-bytes: 999999999\r\n";
+        let d = parse_prefill_handoff(response, 7, "pf-a").expect("parsed");
         assert_eq!(d.kv_handle.raw(), 42);
         assert_eq!(d.byte_len, 8192);
     }

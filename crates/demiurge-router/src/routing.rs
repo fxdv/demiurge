@@ -260,12 +260,14 @@ pub fn on_prefill_complete(
 
             let expected =
                 kv_breakdown(signals.prompt_tokens, router.bytes_per_token()).kv_reserved;
-            if handoff.byte_len < expected {
+            let ceiling = expected.saturating_mul(demiurge_cost::KV_HANDOFF_BYTE_CEILING_MULTIPLE);
+            // Floor (analytic) and ceiling (G3) — reject under/over-claim.
+            if handoff.byte_len < expected || handoff.byte_len > ceiling {
                 return Err(RouteError::HandoffMissing);
             }
 
             let reservation = ledger
-                .try_reserve(handoff.request_id, handoff.byte_len)
+                .try_reserve_from(Some(prefill_label), handoff.request_id, handoff.byte_len)
                 .map_err(|e| match e {
                     AdmitError::OverCapacity | AdmitError::DuplicateRequest => {
                         RouteError::KvAdmitRejected

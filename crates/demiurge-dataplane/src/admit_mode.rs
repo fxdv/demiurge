@@ -6,7 +6,9 @@ pub enum AdmitMode {
     /// Token bucket in userspace (`AdmitBucket`) on each accepted TCP connection.
     #[default]
     Userspace,
-    /// Kernel XDP program on `DEMIURGE_XDP_IFACE`; userspace admit skipped.
+    /// Kernel XDP program on `DEMIURGE_XDP_IFACE` when attached; userspace
+    /// bucket as fallback when the shed is missing (same honesty as Hybrid —
+    /// never silently lose L4 admission).
     KernelXdp,
     /// Kernel XDP when attached; userspace bucket as fallback when not.
     Hybrid,
@@ -30,11 +32,12 @@ impl AdmitMode {
     }
 
     /// Whether `handle_conn` should call userspace `AdmitBucket::try_admit`.
+    /// Both `KernelXdp` and `Hybrid` fall back when the shed is not attached
+    /// so a failed attach or cleared link never opens L4 unbounded.
     pub fn uses_userspace_admit(self, kernel_attached: bool) -> bool {
         match self {
             Self::Userspace => true,
-            Self::KernelXdp => false,
-            Self::Hybrid => !kernel_attached,
+            Self::KernelXdp | Self::Hybrid => !kernel_attached,
         }
     }
 
