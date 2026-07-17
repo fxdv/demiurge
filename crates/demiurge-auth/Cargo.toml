@@ -7,3 +7,4 @@ repository.workspace = true
 description = "Tenant cache-domain authorization (Track C scaffolding)"
 
 [dependencies]
+blake3 = "1"

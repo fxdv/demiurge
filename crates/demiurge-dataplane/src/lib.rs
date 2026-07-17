@@ -10,9 +10,9 @@ mod xdp;
 
 pub use admission::{AdmitBucket, ShedReason};
 pub use admit_mode::AdmitMode;
-#[cfg(target_os = "linux")]
-pub use forwarder::IoUringProxySession;
 pub use forwarder::{ForwardDecision, IoUringForwardBench, IoUringForwarder};
+#[cfg(target_os = "linux")]
+pub use forwarder::{IoUringAcceptLoop, IoUringProxySession};
 pub use rcu::{pool_core_scale, DataPlaneSnapshot, RcuRoutingTable};
 pub use xdp::{
     XdpAdmitConfig, XdpAdmitShed, XdpAttachError, DEFAULT_CAPACITY as XDP_DEFAULT_CAPACITY,

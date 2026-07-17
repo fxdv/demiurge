@@ -161,7 +161,7 @@ pub fn render_startup_banner(
     let _ = writeln!(out, "{}", pad(&row("kernel xdp", &xdp, &style)));
     #[cfg(target_os = "linux")]
     let io_uring = if router.io_uring_enabled() {
-        "production TCP proxy"
+        "accept + TCP proxy"
     } else {
         "off"
     };

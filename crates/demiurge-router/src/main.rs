@@ -9,7 +9,7 @@
 //!   DEMIURGE_XDP_IFACE     attach kernel admit-shed on this iface (Linux >= 5.12)
 //!   DEMIURGE_XDP_FLAGS     skb to force generic mode (default: driver, skb fallback)
 //!   DEMIURGE_BPF_PIN_DIR   pin BPF maps under this bpffs dir (telemetry survives restarts)
-//!   DEMIURGE_IOURING       1 for io_uring recv/send on production TCP proxy (Linux)
+//!   DEMIURGE_IOURING       1 for io_uring accept + recv/send on production TCP (Linux)
 //!   DEMIURGE_BANNER        0|1 force disable/enable startup banner (default: TTY)
 //!   DEMIURGE_HANDOFF_TRANSPORT  tcp (default) | mock_rdma | modeled_rdma
 //!   DEMIURGE_RDMA_ROUTING       1 to use topology transfer model in decode placement
