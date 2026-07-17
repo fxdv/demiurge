@@ -1,11 +1,13 @@
 //! Deployment-keyed hashing for cache-domain salts and prefix fingerprints.
-//! [DEMI-S1-DOMAIN] Threat-model G1.
+//! [DEMI-S1-DOMAIN] Threat-model G1 / G1b.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 static AUTH_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
+static AUTH_KEY: OnceLock<[u8; blake3::KEY_LEN]> = OnceLock::new();
+
+/// BLAKE3 derive_key context — hardcoded, app-specific (see blake3::derive_key).
+const AUTH_KEY_CONTEXT: &str = "demiurge auth 2026-07-17 keyed salt/fp v1";
 
 /// Install the deployment secret used by [`keyed_hash`]. Idempotent: the first
 /// call wins. Prefer setting `DEMIURGE_AUTH_SECRET` before any salt/fp work.
@@ -33,18 +35,51 @@ fn auth_secret() -> &'static [u8] {
     })
 }
 
-/// Keyed digest — secret + domain tag + data, then re-mixed. Not a full PRF,
-/// but removes the public DefaultHasher offline collision surface of G1.
+fn auth_key() -> &'static [u8; blake3::KEY_LEN] {
+    AUTH_KEY.get_or_init(|| blake3::derive_key(AUTH_KEY_CONTEXT, auth_secret()))
+}
+
+/// Keyed PRF digest (BLAKE3 keyed hash) over `domain || 0x00 || data`.
+/// Returns the first 8 bytes of the 256-bit MAC as a little-endian `u64`.
 #[must_use]
 pub fn keyed_hash(domain: &[u8], data: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    auth_secret().hash(&mut h);
-    domain.hash(&mut h);
-    data.hash(&mut h);
-    let a = h.finish();
-    let mut h2 = DefaultHasher::new();
-    auth_secret().hash(&mut h2);
-    a.hash(&mut h2);
-    data.len().hash(&mut h2);
-    h2.finish()
+    let mut hasher = blake3::Hasher::new_keyed(auth_key());
+    hasher.update(domain);
+    hasher.update(&[0]);
+    hasher.update(data);
+    let hash = hasher.finalize();
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&hash.as_bytes()[..8]);
+    u64::from_le_bytes(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyed_hash_stable_and_domain_separated() {
+        let a = keyed_hash(b"prefix-fp", b"hello");
+        let b = keyed_hash(b"prefix-fp", b"hello");
+        let c = keyed_hash(b"cache-domain-salt", b"hello");
+        let d = keyed_hash(b"prefix-fp", b"other");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn keyed_hash_differs_from_plain_blake3() {
+        // Must not equal an unkeyed BLAKE3 truncation of the same layout.
+        let mut h = blake3::Hasher::new();
+        h.update(b"prefix-fp");
+        h.update(&[0]);
+        h.update(b"hello");
+        let plain = {
+            let mut out = [0u8; 8];
+            out.copy_from_slice(&h.finalize().as_bytes()[..8]);
+            u64::from_le_bytes(out)
+        };
+        assert_ne!(keyed_hash(b"prefix-fp", b"hello"), plain);
+    }
 }

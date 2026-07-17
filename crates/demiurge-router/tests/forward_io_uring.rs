@@ -41,6 +41,37 @@ fn forwards_with_io_uring_proxy_session() {
     );
 }
 
+/// G6 — `IoUringAcceptLoop` accepts a live TCP connection.
+#[test]
+fn harden_io_uring_accept_forwards() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    use demiurge_dataplane::IoUringAcceptLoop;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let front = listener.local_addr().unwrap();
+    let mut acceptor = IoUringAcceptLoop::new(listener.as_raw_fd()).expect("accept loop");
+
+    let client = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(20));
+        let mut c = TcpStream::connect(front).unwrap();
+        c.write_all(b"ping").unwrap();
+        c
+    });
+
+    let fd = acceptor.accept_one().expect("accept_one");
+    assert!(fd >= 0, "accepted fd must be non-negative");
+    // SAFETY: fd owned by this test after Accept CQE.
+    let mut accepted = unsafe { TcpStream::from_raw_fd(fd) };
+    let mut buf = [0u8; 4];
+    accepted.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"ping");
+    drop(accepted);
+    let _ = client.join();
+    drop(listener);
+    harden_report(2, "io_uring_accept_forwards", "PASS", "accept_one");
+}
+
 // Tier 2 — io_uring copy_stream respects max_bytes cap (256 KiB production limit).
 #[test]
 fn harden_io_uring_copy_respects_max_bytes() {

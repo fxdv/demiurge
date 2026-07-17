@@ -49,7 +49,7 @@ impl IoUringForwarder {
 mod io_uring_impl;
 
 #[cfg(target_os = "linux")]
-pub use io_uring_impl::IoUringProxySession;
+pub use io_uring_impl::{IoUringAcceptLoop, IoUringProxySession};
 
 #[cfg(target_os = "linux")]
 impl IoUringForwarder {

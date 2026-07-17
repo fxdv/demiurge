@@ -11,7 +11,7 @@ use std::thread;
 use demiurge_cost::DATAPLANE_MAX_CONNS;
 use demiurge_dataplane::AdmitBucket;
 #[cfg(target_os = "linux")]
-use demiurge_dataplane::IoUringProxySession;
+use demiurge_dataplane::{IoUringAcceptLoop, IoUringForwarder, IoUringProxySession};
 
 #[cfg(target_os = "linux")]
 use crate::http::MAX_HEAD;
@@ -340,13 +340,84 @@ pub fn serve(listener: TcpListener, router: Arc<Router>) -> io::Result<()> {
     serve_with_max_conns(listener, router, DATAPLANE_MAX_CONNS as usize)
 }
 
+/// Spawn the bounded handle_conn worker pool; returns per-worker senders.
+fn spawn_conn_workers(router: &Arc<Router>, workers: usize) -> Vec<mpsc::SyncSender<ConnJob>> {
+    let per_worker_backlog = 2usize;
+    let mut senders = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let (tx, rx) = mpsc::sync_channel::<ConnJob>(per_worker_backlog);
+        senders.push(tx);
+        let router = Arc::clone(router);
+        thread::Builder::new()
+            .name("demiurge-conn".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    let _ = handle_conn(job.client, Arc::clone(&router));
+                }
+            })
+            .expect("conn worker");
+    }
+    senders
+}
+
+/// Round-robin try_send into per-worker queues; sheds 503 when all are full.
+fn dispatch_conn(
+    mut client: TcpStream,
+    live: &Arc<AtomicUsize>,
+    max_conns: usize,
+    senders: &[mpsc::SyncSender<ConnJob>],
+    next: &mut usize,
+) -> bool {
+    let Some(slot) = try_conn_slot(live, max_conns) else {
+        let _ = client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+        return true;
+    };
+    let mut job = ConnJob {
+        client,
+        _slot: slot,
+    };
+    let workers = senders.len();
+    for attempt in 0..workers {
+        let idx = (*next + attempt) % workers;
+        match senders[idx].try_send(job) {
+            Ok(()) => {
+                *next = idx.wrapping_add(1);
+                return true;
+            }
+            Err(mpsc::TrySendError::Full(j)) => {
+                job = j;
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+        }
+    }
+    drop(job._slot);
+    let _ = job
+        .client
+        .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+    true
+}
+
 /// `serve`, with an explicit cap on concurrent proxied connections. Excess
 /// connections shed `503` immediately instead of spawning an unbounded
 /// thread per accept — the L7 analogue of the admit bucket.
 ///
-/// Each worker owns a private `Receiver` (round-robin dispatch) so dequeue
+/// On Linux with `DEMIURGE_IOURING=1` (or a router built with io_uring), accept
+/// is owned by an io_uring `Accept` loop (G6). Otherwise std `incoming()` is used.
+/// Accepted sockets are dispatched round-robin to per-worker queues so dequeue
 /// never contends on a shared mutex.
 pub fn serve_with_max_conns(
+    listener: TcpListener,
+    router: Arc<Router>,
+    max_conns: usize,
+) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if router.io_uring_enabled() || IoUringForwarder::io_uring_enabled_from_env() {
+        return serve_iouring_accept(listener, router, max_conns);
+    }
+    serve_std_accept(listener, router, max_conns)
+}
+
+fn serve_std_accept(
     listener: TcpListener,
     router: Arc<Router>,
     max_conns: usize,
@@ -354,54 +425,48 @@ pub fn serve_with_max_conns(
     let live = Arc::new(AtomicUsize::new(0));
     let max_conns = max_conns.max(1);
     let workers = worker_thread_count().max(1);
-    let per_worker_backlog = 2usize;
-
-    let mut senders = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let (tx, rx) = mpsc::sync_channel::<ConnJob>(per_worker_backlog);
-        senders.push(tx);
-        let router = Arc::clone(&router);
-        thread::Builder::new()
-            .name("demiurge-accept".into())
-            .spawn(move || {
-                while let Ok(job) = rx.recv() {
-                    let _ = handle_conn(job.client, Arc::clone(&router));
-                }
-            })
-            .expect("accept worker");
-    }
-
+    let senders = spawn_conn_workers(&router, workers);
     let _ = pump_pool_tx();
 
     let mut next = 0usize;
-    'accept: for conn in listener.incoming() {
-        let Ok(mut client) = conn else { continue };
-        let Some(slot) = try_conn_slot(&live, max_conns) else {
-            let _ =
-                client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
-            continue;
-        };
-        let mut job = ConnJob {
-            client,
-            _slot: slot,
-        };
-        for attempt in 0..workers {
-            let idx = (next + attempt) % workers;
-            match senders[idx].try_send(job) {
-                Ok(()) => {
-                    next = idx.wrapping_add(1);
-                    continue 'accept;
-                }
-                Err(mpsc::TrySendError::Full(j)) => {
-                    job = j;
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => break 'accept,
-            }
+    for conn in listener.incoming() {
+        let Ok(client) = conn else { continue };
+        if !dispatch_conn(client, &live, max_conns, &senders, &mut next) {
+            break;
         }
-        drop(job._slot);
-        let _ = job
-            .client
-            .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+    }
+    Ok(())
+}
+
+/// Linux: io_uring `Accept` owns the listen fd; workers still run `handle_conn`.
+#[cfg(target_os = "linux")]
+fn serve_iouring_accept(
+    listener: TcpListener,
+    router: Arc<Router>,
+    max_conns: usize,
+) -> io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let live = Arc::new(AtomicUsize::new(0));
+    let max_conns = max_conns.max(1);
+    let workers = worker_thread_count().max(1);
+    let senders = spawn_conn_workers(&router, workers);
+    let _ = pump_pool_tx();
+
+    // Keep `listener` alive so the fd is not closed under the accept loop.
+    let mut acceptor = IoUringAcceptLoop::new(listener.as_raw_fd())?;
+    let mut next = 0usize;
+    loop {
+        let client_fd = match acceptor.accept_one() {
+            Ok(fd) => fd,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        // SAFETY: fd freshly returned by io_uring Accept; sole owner.
+        let client = unsafe { TcpStream::from_raw_fd(client_fd) };
+        if !dispatch_conn(client, &live, max_conns, &senders, &mut next) {
+            break;
+        }
     }
     Ok(())
 }

@@ -2,12 +2,55 @@
 
 use std::io;
 use std::os::fd::RawFd;
+use std::ptr;
 
 use io_uring::{opcode, types, IoUring};
 
 use super::IoUringForwarder;
 
 const IOV_MAX: usize = 64 * 1024;
+
+/// io_uring-owned accept loop over a listening TCP fd (threat-model G6).
+pub struct IoUringAcceptLoop {
+    ring: IoUring,
+    listen_fd: RawFd,
+}
+
+impl IoUringAcceptLoop {
+    pub fn new(listen_fd: RawFd) -> io::Result<Self> {
+        Ok(Self {
+            ring: IoUring::new(64)?,
+            listen_fd,
+        })
+    }
+
+    /// Block until one connection is accepted; returns the client fd.
+    pub fn accept_one(&mut self) -> io::Result<RawFd> {
+        let accept =
+            opcode::Accept::new(types::Fd(self.listen_fd), ptr::null_mut(), ptr::null_mut())
+                .build()
+                .user_data(1);
+        // SAFETY: null addr/addrlen is valid for accept(2) when peer address
+        // is unused; listen_fd remains open for the lifetime of this loop.
+        unsafe {
+            self.ring
+                .submission()
+                .push(&accept)
+                .map_err(|_| io::Error::other("io_uring submission full"))?;
+        }
+        self.ring.submit_and_wait(1)?;
+        let cqe = self
+            .ring
+            .completion()
+            .next()
+            .ok_or_else(|| io::Error::other("missing io_uring accept cqe"))?;
+        let fd = cqe.result();
+        if fd < 0 {
+            return Err(io::Error::from_raw_os_error(-fd));
+        }
+        Ok(fd)
+    }
+}
 
 /// Reused io_uring ring for production TCP proxy (one session per connection worker).
 pub struct IoUringProxySession {

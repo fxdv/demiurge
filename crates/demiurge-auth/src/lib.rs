@@ -8,7 +8,7 @@
 //! template match are checked on the strongly consistent (synchronous,
 //! in-process) authorization path before any warmth discount is applied.
 //!
-//! Salts and prefix fingerprints are mixed with `DEMIURGE_AUTH_SECRET` (G1).
+//! Salts and prefix fingerprints use a BLAKE3 keyed PRF over `DEMIURGE_AUTH_SECRET` (G1/G1b).
 
 mod secret;
 

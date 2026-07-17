@@ -80,14 +80,13 @@ mismatches fall back to a tenant-private cache-domain key, so their lookup
 can only hit their own warmth. Enforced end-to-end on the live TCP path
 (`p7_live_wire::live_tcp_path_gates_warmth_by_identity`). [DEMI-S1-DOMAIN]
 
-**Mitigated (G1, partial):** `CacheDomainKey::salt` and
-`PrefixFingerprint::of` mix `DEMIURGE_AUTH_SECRET` (keyed double-hash).
-Optional `X-Demiurge-Prefix-Content` must keyed-hash to the claimed
-`Prefix-Fp` or identity is rejected. Production must set a strong secret;
-the unset default is a fixed **dev-only** placeholder.
-**Residual gap — G1b (medium):** replace the double-`DefaultHasher` mix with
-a real keyed PRF (BLAKE3 keyed / SipHash with secret key material) before
-hostile multi-tenant exposure.
+**Mitigated (G1 / G1b):** `CacheDomainKey::salt` and
+`PrefixFingerprint::of` use a BLAKE3 keyed PRF: `DEMIURGE_AUTH_SECRET` is
+fed through `blake3::derive_key` into a 256-bit key, then
+`blake3::Hasher::new_keyed` over domain-separated inputs. Optional
+`X-Demiurge-Prefix-Content` must keyed-hash to the claimed `Prefix-Fp` or
+identity is rejected. Production must set a strong secret; the unset
+default is a fixed **dev-only** placeholder.
 
 **Residual gap — G2 (medium):** warmth timing is still observable *within*
 a legitimately shared group; a member can probe whether a co-member has
@@ -186,10 +185,11 @@ test would fail on the old logic.
 via interface existence on the RCU heartbeat (falls back to the userspace
 bucket); an admin-forced `ip link set … xdp off` detach is not observable
 this way and would leave Hybrid unenforced at L4 (L7 caps still hold).
-**Residual gap — G6 (low):** L7 uses a bounded worker pool
-(`DEMIURGE_WORKER_THREADS`, default 256) under the `max_conns` cap; excess
-connections shed 503 immediately. The io_uring path should eventually own the
-accept loop instead of the worker pool.
+**Mitigated (G6):** On Linux with `DEMIURGE_IOURING=1` (or a router built
+with io_uring), accept is owned by an io_uring `Accept` loop
+(`IoUringAcceptLoop`); accepted fds are still dispatched to a bounded
+`handle_conn` worker pool under the `max_conns` cap (excess shed 503).
+Non-io_uring platforms keep std `TcpListener::incoming()`.
 
 ### T6 — Cost-function manipulation (M1, M2 → A2)
 
@@ -214,8 +214,8 @@ disaggregated path (self-harm). The corrector multiplier is clamped to
 
 ## 6. Hardening backlog (priority order)
 
-1. **G1b** — real keyed PRF for salts/fingerprints (BLAKE3 / keyed SipHash).
-2. **T3** — authenticated gossip wire protocol per §4 requirements
+1. **T3** — authenticated gossip wire protocol per §4 requirements
    (blocks: any networked state plane).
-3. **G4** — signed hand-off descriptors (blocks: cross-host hand-off transport).
-4. **G6** — io_uring-owned accept loop replacing the bounded worker pool.
+2. **G4** — signed hand-off descriptors (blocks: cross-host hand-off transport).
+3. **G5b** — observe admin-forced XDP detach under Hybrid (not only iface
+   disappearance on the RCU heartbeat).
