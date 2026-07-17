@@ -197,11 +197,20 @@ impl PairingTarget for Backend {
         transfer_penalty: f64,
         extra_barriers: &[BarrierFactor],
     ) -> f64 {
-        let mut barriers = extra_barriers.to_vec();
-        if prefill_label != self.label {
-            barriers.push(BarrierFactor::clamped(transfer_penalty.max(1.0)));
+        const MAX_BARRIERS: usize = 16;
+        let mut barriers = [BarrierFactor::clamped(1.0); MAX_BARRIERS];
+        let mut len = 0;
+        for barrier in extra_barriers {
+            if len < MAX_BARRIERS {
+                barriers[len] = *barrier;
+                len += 1;
+            }
         }
-        self.cost_with_warmth(&barriers, snapshot, blocks, true)
+        if prefill_label != self.label && len < MAX_BARRIERS {
+            barriers[len] = BarrierFactor::clamped(transfer_penalty.max(1.0));
+            len += 1;
+        }
+        self.cost_with_warmth(&barriers[..len], snapshot, blocks, true)
             .ln()
     }
 }

@@ -132,6 +132,19 @@ fn parse_request_identity_requires_all_headers() {
 
     let garbage = b"GET / HTTP/1.1\r\nx-demiurge-tenant: bogus\r\nx-demiurge-group: 7\r\nx-demiurge-prefix-fp: 42\r\n\r\n";
     assert_eq!(parse_request_identity(garbage), None, "non-numeric tenant");
+
+    let fp = PrefixFingerprint::of(b"shared system prompt");
+    let mut matching = format!(
+        "GET / HTTP/1.1\r\nx-demiurge-tenant: 5\r\nx-demiurge-group: 7\r\nx-demiurge-prefix-fp: {}\r\nx-demiurge-prefix-content: shared system prompt\r\n\r\n",
+        fp.raw()
+    );
+    assert!(parse_request_identity(matching.as_bytes()).is_some());
+    matching = matching.replace("shared system prompt", "wrong content!!!!");
+    assert_eq!(
+        parse_request_identity(matching.as_bytes()),
+        None,
+        "prefix-content must match claimed fp"
+    );
 }
 
 // [DEMI-S1-DOMAIN] — env spec → registry parsing round-trips membership.

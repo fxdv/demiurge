@@ -4,7 +4,8 @@
 use std::io::{self, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use demiurge_cost::DATAPLANE_MAX_CONNS;
@@ -17,6 +18,51 @@ use crate::http::MAX_HEAD;
 use crate::http::{parse_request_identity, read_head};
 use crate::routing::{route_with_identity, RouteError, RoutePath};
 use crate::{Backend, RequestId, Router};
+
+/// Reverse-direction byte pump job for the shared pump pool.
+struct PumpJob {
+    from: TcpStream,
+    to: TcpStream,
+    done: SyncSender<()>,
+}
+
+fn pump_pool_size() -> usize {
+    std::env::var("DEMIURGE_PUMP_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| worker_thread_count().max(32))
+}
+
+fn pump_pool_tx() -> &'static SyncSender<PumpJob> {
+    static TX: OnceLock<SyncSender<PumpJob>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let workers = pump_pool_size();
+        let (tx, rx) = mpsc::sync_channel::<PumpJob>(workers.saturating_mul(4).max(32));
+        let shared = Arc::new(Mutex::new(rx));
+        for _ in 0..workers {
+            let shared = Arc::clone(&shared);
+            thread::Builder::new()
+                .name("demiurge-pump".into())
+                .spawn(move || loop {
+                    let job = {
+                        let guard = shared.lock().expect("pump rx");
+                        match guard.recv() {
+                            Ok(j) => j,
+                            Err(_) => break,
+                        }
+                    };
+                    let mut from = job.from;
+                    let mut to = job.to;
+                    let _ = io::copy(&mut from, &mut to);
+                    let _ = to.shutdown(Shutdown::Write);
+                    let _ = job.done.send(());
+                })
+                .expect("pump worker");
+        }
+        tx
+    })
+}
 
 struct InflightGuard<'a>(&'a Backend);
 
@@ -69,7 +115,10 @@ fn proxy_to_backend(
         let up_read = upstream.try_clone()?;
         let client_write = client.try_clone()?;
         let client_read = client.try_clone()?;
-        let pump = thread::spawn(move || {
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        // io_uring reverse direction still needs its own session; use a one-shot
+        // thread (pool is std::io::copy based). Cap concurrency via max_conns.
+        thread::spawn(move || {
             if let Ok(mut pump_session) = IoUringProxySession::new() {
                 let _ = pump_session.copy_stream(
                     up_read.as_raw_fd(),
@@ -78,23 +127,39 @@ fn proxy_to_backend(
                 );
             }
             let _ = client_write.shutdown(Shutdown::Write);
+            let _ = done_tx.send(());
         });
         session.copy_stream(client_read.as_raw_fd(), upstream.as_raw_fd(), 256 * 1024)?;
         let _ = upstream.shutdown(Shutdown::Write);
-        let _ = pump.join();
+        let _ = done_rx.recv();
         return Ok(());
     }
 
-    let mut up_read = upstream.try_clone()?;
-    let mut client_write = client.try_clone()?;
-    let pump = thread::spawn(move || {
-        let _ = io::copy(&mut up_read, &mut client_write);
-        let _ = client_write.shutdown(Shutdown::Write);
-    });
+    let up_read = upstream.try_clone()?;
+    let client_write = client.try_clone()?;
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    // Reverse direction on the bounded pump pool (join via done ack).
+    match pump_pool_tx().try_send(PumpJob {
+        from: up_read,
+        to: client_write,
+        done: done_tx,
+    }) {
+        Ok(()) => {}
+        Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
+            // Pool saturated: one-shot fallback (still joinable).
+            thread::spawn(move || {
+                let mut from = job.from;
+                let mut to = job.to;
+                let _ = io::copy(&mut from, &mut to);
+                let _ = to.shutdown(Shutdown::Write);
+                let _ = job.done.send(());
+            });
+        }
+    }
     let mut client_read = client.try_clone()?;
     let _ = io::copy(&mut client_read, &mut upstream);
     let _ = upstream.shutdown(Shutdown::Write);
-    let _ = pump.join();
+    let _ = done_rx.recv();
     Ok(())
 }
 
@@ -107,7 +172,7 @@ fn handle_disaggregated(
     prompt_tokens: u64,
     #[cfg(target_os = "linux")] io_uring_session: Option<&mut IoUringProxySession>,
 ) -> io::Result<()> {
-    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
     let router2 = Arc::clone(&router);
     let prefill_label = prefill.label.clone();
     let _prefill_worker = crate::routing::dispatch_prefill(
@@ -198,8 +263,6 @@ fn handle_conn(client: TcpStream, router: Arc<Router>) -> io::Result<()> {
             read_head(&mut client)?
         }
     };
-    std::hint::black_box(router.dataplane_pi());
-
     // Cache-domain isolation on the live path: resolve the edge-authenticated
     // identity (if any) so warmth discounts are gated per tenant/group.
     // Missing headers fail closed to identity-less routing. [DEMI-S1-DOMAIN]
@@ -280,6 +343,9 @@ pub fn serve(listener: TcpListener, router: Arc<Router>) -> io::Result<()> {
 /// `serve`, with an explicit cap on concurrent proxied connections. Excess
 /// connections shed `503` immediately instead of spawning an unbounded
 /// thread per accept — the L7 analogue of the admit bucket.
+///
+/// Each worker owns a private `Receiver` (round-robin dispatch) so dequeue
+/// never contends on a shared mutex.
 pub fn serve_with_max_conns(
     listener: TcpListener,
     router: Arc<Router>,
@@ -287,46 +353,55 @@ pub fn serve_with_max_conns(
 ) -> io::Result<()> {
     let live = Arc::new(AtomicUsize::new(0));
     let max_conns = max_conns.max(1);
-    let workers = worker_thread_count();
-    let backlog = workers.saturating_mul(2).max(1);
-    let (tx, rx) = mpsc::sync_channel::<ConnJob>(backlog);
-    let shared_rx = Arc::new(Mutex::new(rx));
+    let workers = worker_thread_count().max(1);
+    let per_worker_backlog = 2usize;
 
+    let mut senders = Vec::with_capacity(workers);
     for _ in 0..workers {
-        let rx = Arc::clone(&shared_rx);
+        let (tx, rx) = mpsc::sync_channel::<ConnJob>(per_worker_backlog);
+        senders.push(tx);
         let router = Arc::clone(&router);
-        thread::spawn(move || loop {
-            let job = {
-                let guard = rx.lock().expect("worker rx");
-                match guard.recv() {
-                    Ok(job) => job,
-                    Err(_) => break,
+        thread::Builder::new()
+            .name("demiurge-accept".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    let _ = handle_conn(job.client, Arc::clone(&router));
                 }
-            };
-            let _ = handle_conn(job.client, Arc::clone(&router));
-        });
+            })
+            .expect("accept worker");
     }
 
-    for conn in listener.incoming() {
+    let _ = pump_pool_tx();
+
+    let mut next = 0usize;
+    'accept: for conn in listener.incoming() {
         let Ok(mut client) = conn else { continue };
         let Some(slot) = try_conn_slot(&live, max_conns) else {
             let _ =
                 client.write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
             continue;
         };
-        match tx.try_send(ConnJob {
+        let mut job = ConnJob {
             client,
             _slot: slot,
-        }) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(mut job)) => {
-                drop(job._slot);
-                let _ = job
-                    .client
-                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
+        };
+        for attempt in 0..workers {
+            let idx = (next + attempt) % workers;
+            match senders[idx].try_send(job) {
+                Ok(()) => {
+                    next = idx.wrapping_add(1);
+                    continue 'accept;
+                }
+                Err(mpsc::TrySendError::Full(j)) => {
+                    job = j;
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => break 'accept,
             }
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
         }
+        drop(job._slot);
+        let _ = job
+            .client
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n");
     }
     Ok(())
 }

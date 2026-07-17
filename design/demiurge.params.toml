@@ -52,6 +52,10 @@ min_barrier = 1.0
 metadata_overhead_fraction = 0.08
 fragmentation_slack = 0.05
 abandoned_session_ttl_s = 300
+# Reject claimed handoff bytes above this multiple of analytic expectation (G3).
+handoff_byte_ceiling_multiple = 4
+# Cap outstanding reserved bytes per prefill source as a fraction of ledger capacity (G3).
+max_outstanding_per_source_fraction = 0.25
 
 # Phase 4 — dynamic pool rebalancing (shipped shadow; actuation Phase 5)
 [pool]

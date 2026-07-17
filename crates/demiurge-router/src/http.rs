@@ -17,6 +17,8 @@ const HDR_PHASE: &[u8] = b"x-demiurge-phase";
 const HDR_TENANT: &[u8] = b"x-demiurge-tenant";
 const HDR_GROUP: &[u8] = b"x-demiurge-group";
 const HDR_PREFIX_FP: &[u8] = b"x-demiurge-prefix-fp";
+/// Optional template bytes; when present must keyed-hash to Prefix-Fp (G1/S7).
+const HDR_PREFIX_CONTENT: &[u8] = b"x-demiurge-prefix-content";
 
 #[inline]
 fn trim_ascii_ws(bytes: &[u8]) -> &[u8] {
@@ -140,14 +142,23 @@ pub fn estimate_prompt_tokens(head: &[u8]) -> u64 {
 /// as [`RequestIdentity`] documents. All three must be present; a partial set
 /// yields `None` and the request routes without any warmth discount gating
 /// benefit (fail-closed: no identity, no shared-domain warmth).
+///
+/// When `X-Demiurge-Prefix-Content` is also present, the claimed fingerprint
+/// must equal [`PrefixFingerprint::of`] of those bytes — fail closed otherwise.
 pub fn parse_request_identity(head: &[u8]) -> Option<RequestIdentity> {
     let tenant = header_value_ci(head, HDR_TENANT).and_then(parse_u64_maybe_hex)?;
     let group = header_value_ci(head, HDR_GROUP).and_then(parse_u64_maybe_hex)?;
     let fp = header_value_ci(head, HDR_PREFIX_FP).and_then(parse_u64_maybe_hex)?;
+    let content_fp = PrefixFingerprint::new(fp);
+    if let Some(content) = header_value_ci(head, HDR_PREFIX_CONTENT) {
+        if PrefixFingerprint::of(content) != content_fp {
+            return None;
+        }
+    }
     Some(RequestIdentity {
         tenant: TenantId::new(tenant),
         group: GroupId::new(group),
-        content_fp: PrefixFingerprint::new(fp),
+        content_fp,
     })
 }
 
@@ -191,12 +202,18 @@ fn is_admin_probe_request(head: &[u8]) -> bool {
 }
 
 /// Read an HTTP request head, bounded at [`MAX_HEAD`].
+/// Buffered (not byte-at-a-time) to keep accept-path syscall cost low.
 pub(crate) fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(1024);
-    let mut byte = [0u8; 1];
-    while stream.read(&mut byte)? == 1 {
-        buf.push(byte[0]);
-        if buf.ends_with(b"\r\n\r\n") || buf.len() >= MAX_HEAD {
+    let mut buf = Vec::with_capacity(1024.min(MAX_HEAD));
+    let mut chunk = [0u8; 1024];
+    loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        let take = n.min(MAX_HEAD.saturating_sub(buf.len()));
+        buf.extend_from_slice(&chunk[..take]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() >= MAX_HEAD {
             break;
         }
     }

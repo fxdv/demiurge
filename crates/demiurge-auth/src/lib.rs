@@ -7,10 +7,14 @@
 //! A non-member never resolves to a shared cache-domain key. Membership and
 //! template match are checked on the strongly consistent (synchronous,
 //! in-process) authorization path before any warmth discount is applied.
+//!
+//! Salts and prefix fingerprints are mixed with `DEMIURGE_AUTH_SECRET` (G1).
 
-use std::collections::hash_map::DefaultHasher;
+mod secret;
+
+pub use secret::{configure_auth_secret, configure_auth_secret_from_env, keyed_hash};
+
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TenantId(u64);
@@ -52,12 +56,10 @@ impl PrefixFingerprint {
         Self(raw)
     }
 
-    /// Fingerprint arbitrary prefix bytes (dependency-free `DefaultHasher`).
+    /// Fingerprint arbitrary prefix bytes with the deployment auth secret (G1).
     #[must_use]
     pub fn of(bytes: &[u8]) -> Self {
-        let mut h = DefaultHasher::new();
-        bytes.hash(&mut h);
-        Self(h.finish())
+        Self(keyed_hash(b"prefix-fp", bytes))
     }
 
     #[must_use]
@@ -80,12 +82,15 @@ pub struct CacheDomainKey {
 
 impl CacheDomainKey {
     /// Salt mixed into warmth block ids. Identical for all members of a shared
-    /// domain; unique per tenant for a private domain.
+    /// domain; unique per tenant for a private domain. Keyed with the
+    /// deployment auth secret so salts are not offline-computable (G1).
     #[must_use]
     pub fn salt(&self) -> u64 {
-        let mut h = DefaultHasher::new();
-        (self.owner, self.domain, self.shared).hash(&mut h);
-        h.finish()
+        let mut payload = [0u8; 17];
+        payload[..8].copy_from_slice(&self.owner.to_le_bytes());
+        payload[8..16].copy_from_slice(&self.domain.to_le_bytes());
+        payload[16] = u8::from(self.shared);
+        keyed_hash(b"cache-domain-salt", &payload)
     }
 }
 
@@ -211,6 +216,25 @@ mod tests {
             42,
         );
         reg
+    }
+
+    #[test]
+    fn keyed_salt_differs_from_unmixed_layout() {
+        let key = CacheDomainKey {
+            owner: 7,
+            domain: 42,
+            shared: true,
+        };
+        // Stable for a fixed secret; changing DEMIURGE_AUTH_SECRET changes salts.
+        assert_ne!(key.salt(), 0);
+        assert_eq!(
+            PrefixFingerprint::of(b"shared system prompt"),
+            PrefixFingerprint::of(b"shared system prompt")
+        );
+        assert_ne!(
+            PrefixFingerprint::of(b"shared system prompt"),
+            PrefixFingerprint::of(b"other prompt")
+        );
     }
 
     #[test]
