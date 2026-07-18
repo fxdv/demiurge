@@ -234,6 +234,23 @@ fn xdp_admit_shed_attaches_and_seeds_map() {
     assert!(shed.link_alive());
 }
 
+/// G5b — admin `ip link set … xdp off` must clear `link_alive` while the
+/// iface still exists (Hybrid falls back to the userspace bucket).
+#[test]
+#[ignore = "needs root + veth; run ./scripts/xdp-veth-smoke.sh"]
+fn xdp_admit_shed_detects_admin_xdp_off() {
+    require_root_and_bpf().expect("precheck");
+    let veth = VethPair::create().expect("veth");
+    let shed = XdpAdmitShed::attach(&veth.iface, config(4, 0, None)).expect("attach");
+    assert!(shed.link_alive(), "fresh attach must report alive");
+
+    run_ip(&["link", "set", "dev", &veth.iface, "xdp", "off"]).expect("xdp off");
+    assert!(
+        !shed.link_alive(),
+        "admin xdp off must be visible to link_alive"
+    );
+}
+
 #[test]
 #[ignore = "needs root + veth; run ./scripts/xdp-veth-smoke.sh"]
 fn xdp_admit_shed_reseed_updates_tokens() {

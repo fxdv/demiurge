@@ -13,6 +13,7 @@ demiurge-cost = { path = "../demiurge-cost" }
 [target.'cfg(target_os = "linux")'.dependencies]
 aya = "0.13.1"
 io-uring = "0.7.8"
+libc = "0.2"
 
 [dev-dependencies]
 proptest = "1"

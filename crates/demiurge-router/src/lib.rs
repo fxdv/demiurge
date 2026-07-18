@@ -454,6 +454,7 @@ impl Router {
 
     /// Drop a dead kernel admit link so Hybrid mode fails back to the
     /// userspace bucket instead of running with no admission at all.
+    /// Detects iface disappearance and admin `ip link set … xdp off` (G5b).
     /// Called on the RCU heartbeat cadence.
     fn check_kernel_admit_link(&self) {
         let Ok(mut guard) = self.kernel_admit.lock() else {
@@ -461,7 +462,7 @@ impl Router {
         };
         if guard.as_ref().is_some_and(|s| !s.link_alive()) {
             eprintln!(
-                "demiurge-router: kernel admit-shed link lost; falling back to userspace bucket"
+                "demiurge-router: kernel admit-shed detached or iface lost; falling back to userspace bucket"
             );
             *guard = None;
         }

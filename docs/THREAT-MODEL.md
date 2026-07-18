@@ -181,10 +181,12 @@ exhaustion and left the bucket permanently fail-open (unbounded over-admit
 during overload — worse than the original "at most one packet" estimate).
 Tokens are now signed with `prev <= 0` compensation; the concurrent model
 test would fail on the old logic.
-**Residual gap — G5b (low):** Hybrid-mode kernel-link liveness is detected
-via interface existence on the RCU heartbeat (falls back to the userspace
-bucket); an admin-forced `ip link set … xdp off` detach is not observable
-this way and would leave Hybrid unenforced at L4 (L7 caps still hold).
+**Mitigated (G5b):** The admit-shed attaches via netlink XDP (so it remains
+visible to `IFLA_XDP` / `ip link`) and Hybrid liveness on the RCU heartbeat
+checks both interface existence and the iface's current XDP program id
+(`RTM_GETLINK`). Admin `ip link set … xdp off` (or replacement by another
+program) clears `link_alive`, drops the shed handle, and falls back to the
+userspace bucket.
 **Mitigated (G6):** On Linux with `DEMIURGE_IOURING=1` (or a router built
 with io_uring), accept is owned by an io_uring `Accept` loop
 (`IoUringAcceptLoop`); accepted fds are still dispatched to a bounded
@@ -217,5 +219,3 @@ disaggregated path (self-harm). The corrector multiplier is clamped to
 1. **T3** — authenticated gossip wire protocol per §4 requirements
    (blocks: any networked state plane).
 2. **G4** — signed hand-off descriptors (blocks: cross-host hand-off transport).
-3. **G5b** — observe admin-forced XDP detach under Hybrid (not only iface
-   disappearance on the RCU heartbeat).
