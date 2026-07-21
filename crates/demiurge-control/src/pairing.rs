@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use demiurge_cost::{warmth_discount, BarrierFactor, Cost};
+use demiurge_cost::{
+    append_barriers_fail_expensive, warmth_discount, BarrierFactor, Cost, MAX_SERVICE_BARRIERS,
+};
 use demiurge_state::{default_routing_blocks, StateSnapshot};
 
 use crate::scored::ScoredBackend;
@@ -153,18 +155,15 @@ fn decode_cost(
     extra_barriers: &[BarrierFactor],
 ) -> Cost {
     let discounts = pool_discounts(snapshot, true, &backend.label, blocks);
-    const MAX_BARRIERS: usize = 16;
-    let mut barriers = [BarrierFactor::clamped(1.0); MAX_BARRIERS];
+    let mut barriers = [BarrierFactor::clamped(1.0); MAX_SERVICE_BARRIERS];
     let mut len = 0;
-    for barrier in extra_barriers {
-        if len < MAX_BARRIERS {
-            barriers[len] = *barrier;
-            len += 1;
-        }
-    }
-    if prefill_label != backend.label && len < MAX_BARRIERS {
-        barriers[len] = BarrierFactor::clamped(transfer_penalty.max(1.0));
-        len += 1;
+    append_barriers_fail_expensive(&mut barriers, &mut len, extra_barriers);
+    if prefill_label != backend.label {
+        append_barriers_fail_expensive(
+            &mut barriers,
+            &mut len,
+            &[BarrierFactor::clamped(transfer_penalty.max(1.0))],
+        );
     }
     backend.base_cost(&barriers[..len], &discounts)
 }

@@ -206,6 +206,27 @@ already $1$.
 
 Violations increment \texttt{FACTOR\_CLAMP\_EVENTS} (process-global health gauge).
 
+Barrier assembly into the fixed stack used by \texttt{service\_cost} follows
+the same policy: overflow replaces the last slot with $B_{\max}$ rather than
+silently dropping a penalty.
+
+\paragraph{Cost vs admission.}
+The algebra \emph{ranks} placement candidates. Hard KV and connection
+capacity are enforced by the reservation ledger and admit bucket.
+The $\Phi$ barrier soft-caps utilization at $0.999$ so $B_\Phi$ remains
+finite; cost alone is not a hard reject wall.
+
+\paragraph{Warmth envelope.}
+The maximum warmth discount $\rho_{\max}$ (\texttt{warmth.max\_discount})
+is a first-class parameter: at full hit it can dominate the corrector
+band $\alpha$. Forged warmth is a trust-boundary concern (threat model T1/T3),
+not merely a tuning knob.
+
+\paragraph{Observed vs claimed $T_{\mathrm{core}}$.}
+Live routing uses $\max(T_{\mathrm{claimed}},\, T_{\mathrm{ewma}})$ where
+$T_{\mathrm{ewma}}$ tracks measured prefill wall, so under-reported claims
+cannot undercut observation (threat model T6).
+
 \section{Corrector envelope}
 
 The learned multiplier $\delta$ adjusts analytic cost within a fixed band.

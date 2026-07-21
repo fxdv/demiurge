@@ -57,6 +57,35 @@ fn corrector_shadow_records_on_prefill_complete() {
     assert!(samples[0].analytic_ln.is_finite());
 }
 
+/// T6 — under-reported claim cannot undercut observed prefill wall.
+#[test]
+fn observed_prefill_wall_raises_effective_t_core() {
+    use demiurge_router::Phase;
+
+    let pf = parse_pool("pf0@127.0.0.1:9211@0.001").unwrap(); // claim 1ms
+    let dc = parse_pool("dc0@127.0.0.1:9212@0.01").unwrap();
+    let (router, _ledger, _handoffs) = Router::with_kv_pool(pf, dc, 64 * 1024 * 1024, 128);
+    let pf_backend = router.pool(Phase::Prefill)[0].clone();
+    let claimed_ln = pf_backend.cost().ln();
+
+    let head = handoff_head(512, 128, 12);
+    let signals = PrefillSignals {
+        request_id: RequestId::new(),
+        prompt_tokens: 512,
+        prefill_wall: Duration::from_millis(50), // observed 50ms >> claim
+    };
+    on_prefill_complete(&router, &signals, head.as_bytes(), "pf0").expect("decode");
+
+    assert!(
+        pf_backend.effective_base_seconds() > 0.001,
+        "ewma must lift effective base above under-claim"
+    );
+    assert!(
+        pf_backend.cost().ln() > claimed_ln,
+        "observed wall must raise routing cost vs bare claim"
+    );
+}
+
 #[test]
 fn fast_path_ratio_tracks_colocated_routes() {
     let pf = parse_pool("pf0@127.0.0.1:9301@0.01").unwrap();

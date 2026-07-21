@@ -6,12 +6,13 @@
 //! two can never drift apart.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use demiurge_control::PairingTarget;
 use demiurge_cost::{
-    rdma_transfer_ln, service_cost, warmth_discount, BarrierFactor, Cost, Discount, TopologyId,
+    append_barriers_fail_expensive, rdma_transfer_ln, service_cost, warmth_discount, BarrierFactor,
+    Cost, Discount, TopologyId, MAX_SERVICE_BARRIERS, ROUTING_OBSERVED_LATENCY_EWMA_ALPHA,
     ROUTING_TRANSFER_PENALTY,
 };
 use demiurge_dataplane::pool_core_scale;
@@ -29,6 +30,8 @@ pub struct Backend {
     base_service_seconds: f64,
     /// ln(base_service_seconds) — valid bases only; invalid inputs fail-expensive at construction.
     ln_base: f64,
+    /// EWMA of observed prefill wall (`f64` bits; 0 = unset). T6.
+    observed_ewma_bits: AtomicU64,
     inflight: AtomicUsize,
 }
 
@@ -78,6 +81,7 @@ impl Backend {
             topology,
             base_service_seconds,
             ln_base,
+            observed_ewma_bits: AtomicU64::new(0),
             inflight: AtomicUsize::new(0),
         })
     }
@@ -99,18 +103,83 @@ impl Backend {
         self.inflight.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Fold an observed service wall into the EWMA used for effective T_core.
+    /// Non-finite / non-positive samples are ignored. [T6]
+    pub fn note_observed_seconds(&self, secs: f64) {
+        if !secs.is_finite() || secs <= 0.0 {
+            return;
+        }
+        let alpha = ROUTING_OBSERVED_LATENCY_EWMA_ALPHA.clamp(0.0, 1.0);
+        loop {
+            let prev_bits = self.observed_ewma_bits.load(Ordering::Relaxed);
+            let next = if prev_bits == 0 {
+                secs
+            } else {
+                let prev = f64::from_bits(prev_bits);
+                alpha * secs + (1.0 - alpha) * prev
+            };
+            if self
+                .observed_ewma_bits
+                .compare_exchange_weak(
+                    prev_bits,
+                    next.to_bits(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+
+    /// `max(claimed, observed_ewma)` — under-reported claim cannot undercut
+    /// measured prefill wall. [T6]
+    #[inline]
+    pub fn effective_base_seconds(&self) -> f64 {
+        let claimed = if self.base_service_seconds.is_finite() && self.base_service_seconds > 0.0 {
+            self.base_service_seconds
+        } else {
+            f64::MAX
+        };
+        let bits = self.observed_ewma_bits.load(Ordering::Relaxed);
+        if bits == 0 {
+            return claimed;
+        }
+        let observed = f64::from_bits(bits);
+        if observed.is_finite() && observed > claimed {
+            observed
+        } else {
+            claimed
+        }
+    }
+
+    #[inline]
+    fn effective_ln_base(&self) -> f64 {
+        let effective = self.effective_base_seconds();
+        if (effective - self.base_service_seconds).abs() < f64::EPSILON {
+            self.ln_base
+        } else if effective.is_finite() && effective > 0.0 {
+            effective.ln()
+        } else {
+            f64::MAX.ln()
+        }
+    }
+
     pub fn cost(&self) -> Cost {
-        Cost::from_ln(self.ln_base + queue_ln(self.inflight()))
+        Cost::from_ln(self.effective_ln_base() + queue_ln(self.inflight()))
     }
 
     #[inline]
     pub(crate) fn selection_ln(&self, pool_pi: f64, prefill: bool) -> f64 {
-        self.ln_base + pool_core_scale(1.0, pool_pi, prefill).ln() + queue_ln(self.inflight())
+        self.effective_ln_base()
+            + pool_core_scale(1.0, pool_pi, prefill).ln()
+            + queue_ln(self.inflight())
     }
 
     #[inline]
     pub(crate) fn ln_base(&self) -> f64 {
-        self.ln_base
+        self.effective_ln_base()
     }
 
     pub fn cost_with_warmth(
@@ -156,7 +225,7 @@ impl Backend {
         if extra.is_empty() && discount.is_none() {
             return Cost::from_ln(self.selection_ln(pool_pi, !decode_pool));
         }
-        let scaled = pool_core_scale(self.base_service_seconds, pool_pi, !decode_pool);
+        let scaled = pool_core_scale(self.effective_base_seconds(), pool_pi, !decode_pool);
         let ds = discount.map(|d| [d]);
         let discounts: &[Discount] = ds.as_ref().map_or(&[], |a| a.as_slice());
         service_cost(scaled, self.inflight(), extra, discounts)
@@ -175,7 +244,7 @@ impl Backend {
         if extra.is_empty() {
             return Cost::from_ln(self.selection_ln(pool_pi, prefill));
         }
-        let scaled = pool_core_scale(self.base_service_seconds, pool_pi, prefill);
+        let scaled = pool_core_scale(self.effective_base_seconds(), pool_pi, prefill);
         service_cost(scaled, self.inflight(), extra, &[])
     }
 }
@@ -197,18 +266,15 @@ impl PairingTarget for Backend {
         transfer_penalty: f64,
         extra_barriers: &[BarrierFactor],
     ) -> f64 {
-        const MAX_BARRIERS: usize = 16;
-        let mut barriers = [BarrierFactor::clamped(1.0); MAX_BARRIERS];
+        let mut barriers = [BarrierFactor::clamped(1.0); MAX_SERVICE_BARRIERS];
         let mut len = 0;
-        for barrier in extra_barriers {
-            if len < MAX_BARRIERS {
-                barriers[len] = *barrier;
-                len += 1;
-            }
-        }
-        if prefill_label != self.label && len < MAX_BARRIERS {
-            barriers[len] = BarrierFactor::clamped(transfer_penalty.max(1.0));
-            len += 1;
+        append_barriers_fail_expensive(&mut barriers, &mut len, extra_barriers);
+        if prefill_label != self.label {
+            append_barriers_fail_expensive(
+                &mut barriers,
+                &mut len,
+                &[BarrierFactor::clamped(transfer_penalty.max(1.0))],
+            );
         }
         self.cost_with_warmth(&barriers[..len], snapshot, blocks, true)
             .ln()
