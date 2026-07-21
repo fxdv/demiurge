@@ -30,6 +30,14 @@ short_context_tokens = 512
 short_context_warmth_override = 0.15
 # Cross-node KV transfer barrier when pf label != dc label (Phase 4 pairing).
 transfer_penalty = 1.05
+# EWMA weight when folding observed prefill wall into effective T_core (T6).
+# effective = max(claimed, ewma); alpha closer to 1 tracks observations faster.
+observed_latency_ewma_alpha = 0.25
+
+# Warmth discount envelope (Phase 3). First-class trust surface — ρ_max can
+# swing placement more than the corrector band α.
+[warmth]
+max_discount = 0.85
 
 # RDMA topology distance ladder (shadow cost model; production routing still flat penalty).
 [topology]

@@ -84,6 +84,11 @@ pub fn fleet_marginal_bytes_wrong(fleet_reserved: u64, p90_increment: u64, n: u6
 /// Φ memory-pressure barrier from fleet utilization in `[0, 1)`.
 ///
 /// Monotonic: higher reserved/capacity → higher penalty (≥ 1).
+///
+/// Util is soft-capped at `0.999` so \(B_Φ\) stays finite — cost ranks
+/// candidates but is **not** a hard KV wall. Over-capacity is shed by the
+/// reservation ledger / admit path; do not treat a large Φ alone as reject.
+/// [DEMI-BARRIER-PHI]
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // byte counts at token scale fit f64 mantissa
 pub fn phi_barrier(fleet_reserved: u64, capacity_bytes: u64) -> BarrierFactor {

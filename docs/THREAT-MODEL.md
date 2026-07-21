@@ -88,6 +88,12 @@ fed through `blake3::derive_key` into a 256-bit key, then
 identity is rejected. Production must set a strong secret; the unset
 default is a fixed **dev-only** placeholder.
 
+**Warmth magnitude (first-class):** the max fractional discount ρ_max
+(`warmth.max_discount` in `design/demiurge.params.toml`, default 0.85)
+can swing placement more than the corrector band α. Treat forged or
+poisoned warmth (T3) as a primary routing-integrity threat, not a cost
+footnote. [DEMI-WARM-DISCOUNT]
+
 **Residual gap — G2 (medium):** warmth timing is still observable *within*
 a legitimately shared group; a member can probe whether a co-member has
 already warmed a template. Accepted: sharing a cache domain is opt-in and
@@ -200,12 +206,22 @@ A backend that under-reports latency (or a tenant that inflates
 
 **Mitigated structurally:** the cost algebra is fail-expensive — broken or
 out-of-range signals saturate toward *more expensive*, never cheaper
-([DEMI-FAIL-EXPENSIVE], [DEMI-COST-POS]); `Cost::from_ln` now saturates
-non-finite logs the same way, so no arithmetic path can mint an artificially
-cheap target. Token-count inflation only pushes a request onto the slower
-disaggregated path (self-harm). The corrector multiplier is clamped to
-`[1−α, 1+α]`, bounding any learned component's influence.
+([DEMI-FAIL-EXPENSIVE], [DEMI-COST-POS]); `Cost::from_ln` saturates
+non-finite logs the same way. Barrier assembly overflow saturates the last
+slot to a max barrier (never silently drops a penalty). Token-count
+inflation only pushes a request onto the slower disaggregated path
+(self-harm). The corrector multiplier is clamped to `[1−α, 1+α]`.
 [DEMI-CORR-CLAMP]
+
+**Mitigated (partial, observed T_core):** each backend keeps an EWMA of
+measured prefill wall (`note_observed_seconds`); routing uses
+`effective_base = max(claimed, ewma)` so an under-reported `@seconds`
+claim cannot undercut observed latency. Decode-path observation and
+peer-cross-check remain open.
+
+**Cost is advisory to admission:** `service_cost` / Φ rank candidates;
+hard capacity is the reservation ledger and admit bucket. Φ soft-caps
+util at 0.999 so \(B_Φ\) stays finite — a large Φ alone is not a reject.
 
 ## 5. Explicit non-goals (current phase)
 

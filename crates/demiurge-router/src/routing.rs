@@ -279,18 +279,24 @@ pub fn on_prefill_complete(
         _ => (None, None),
     };
 
+    // T6: fold measured prefill wall into the prefill backend's effective T_core.
+    if let Some(pf) = router
+        .pool(Phase::Prefill)
+        .iter()
+        .find(|b| b.label == prefill_label)
+    {
+        pf.note_observed_seconds(signals.prefill_wall.as_secs_f64());
+    }
+
     let phi = router
         .ledger()
         .map(|l| l.phi_barrier())
         .filter(|b| b.get() > 1.0);
-    const MAX_BARRIERS: usize = 16;
-    let mut extra_buf = [BarrierFactor::clamped(1.0); MAX_BARRIERS];
-    let extra_len = if let Some(phi) = phi {
-        extra_buf[0] = phi;
-        1
-    } else {
-        0
-    };
+    let mut extra_buf = [BarrierFactor::clamped(1.0); demiurge_cost::MAX_SERVICE_BARRIERS];
+    let mut extra_len = 0;
+    if let Some(phi) = phi {
+        demiurge_cost::append_barriers_fail_expensive(&mut extra_buf, &mut extra_len, &[phi]);
+    }
 
     let pool_pi = router.dataplane_pi();
     let snap = router.routing_snapshot();
