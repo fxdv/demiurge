@@ -184,9 +184,9 @@ test would fail on the old logic.
 **Mitigated (G5b):** The admit-shed attaches via netlink XDP (so it remains
 visible to `IFLA_XDP` / `ip link`) and Hybrid liveness on the RCU heartbeat
 checks both interface existence and the iface's current XDP program id
-(`RTM_GETLINK`). Admin `ip link set … xdp off` (or replacement by another
-program) clears `link_alive`, drops the shed handle, and falls back to the
-userspace bucket.
+(`RTM_GETLINK`). Admin detach (`ip link set … xdp off` or `xdpgeneric off`
+for SKB mode — or replacement by another program) clears `link_alive`,
+drops the shed handle, and falls back to the userspace bucket.
 **Mitigated (G6):** On Linux with `DEMIURGE_IOURING=1` (or a router built
 with io_uring), accept is owned by an io_uring `Accept` loop
 (`IoUringAcceptLoop`); accepted fds are still dispatched to a bounded

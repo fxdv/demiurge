@@ -454,7 +454,7 @@ impl Router {
 
     /// Drop a dead kernel admit link so Hybrid mode fails back to the
     /// userspace bucket instead of running with no admission at all.
-    /// Detects iface disappearance and admin `ip link set … xdp off` (G5b).
+    /// Detects iface disappearance and admin XDP detach (G5b).
     /// Called on the RCU heartbeat cadence.
     fn check_kernel_admit_link(&self) {
         let Ok(mut guard) = self.kernel_admit.lock() else {

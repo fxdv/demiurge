@@ -157,10 +157,20 @@ fn reseed_admit_state(bpf: &mut Ebpf, capacity: u64) -> Result<(), XdpAttachErro
 }
 
 /// Netlink XDP attach (not aya `bpf_link`): visible to `IFLA_XDP` / `ip link`,
-/// and detachable via `ip link set … xdp off` — required for Hybrid G5b.
+/// and detachable via `ip link set … xdp[generic] off` — required for Hybrid G5b.
 ///
-/// Flags mirror linux/if_link.h `XDP_FLAGS_*`.
+/// Flags mirror linux/if_link.h `XDP_FLAGS_*`. Detach must use the same mode
+/// bit as attach: flags=0 / DRV clears only driver XDP; SKB needs SKB_MODE
+/// (`ip link set … xdpgeneric off`).
 const XDP_FLAGS_SKB_MODE: u32 = 1 << 1;
+const XDP_FLAGS_DRV_MODE: u32 = 1 << 2;
+
+fn xdp_detach_flags(mode: &str) -> u32 {
+    match mode {
+        "skb" | "skb-fallback" => XDP_FLAGS_SKB_MODE,
+        _ => XDP_FLAGS_DRV_MODE,
+    }
+}
 
 /// Attach preference: forced SKB via env, otherwise driver/native first with
 /// generic (SKB) fallback for NICs without native XDP support.
@@ -393,8 +403,9 @@ impl XdpAdmitShed {
     }
 
     /// Liveness for Hybrid fallback: false when the iface is gone **or** when
-    /// XDP was detached/replaced (`ip link set … xdp off`). Query failure
-    /// fails closed (treat as dead) so Hybrid never silently loses L4 admit.
+    /// XDP was detached/replaced (`ip link set … xdp off` / `xdpgeneric off`).
+    /// Query failure fails closed (treat as dead) so Hybrid never silently
+    /// loses L4 admit.
     pub fn link_alive(&self) -> bool {
         if !Path::new("/sys/class/net").join(&self.iface).exists() {
             return false;
@@ -423,7 +434,15 @@ impl XdpAdmitShed {
 impl Drop for XdpAdmitShed {
     fn drop(&mut self) {
         if self.ifindex != 0 {
-            let _ = netlink_xdp_set(self.ifindex as i32, None, 0);
+            // Mode-matched detach first; also clear the other mode so a
+            // mis-labeled attach cannot leave a stale XDP prog on the iface.
+            let _ = netlink_xdp_set(self.ifindex as i32, None, xdp_detach_flags(self.mode));
+            let other = if xdp_detach_flags(self.mode) == XDP_FLAGS_SKB_MODE {
+                XDP_FLAGS_DRV_MODE
+            } else {
+                XDP_FLAGS_SKB_MODE
+            };
+            let _ = netlink_xdp_set(self.ifindex as i32, None, other);
         }
     }
 }
