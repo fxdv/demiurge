@@ -286,11 +286,39 @@ pub fn compose(
 /// Max barriers assembled into [`service_cost`] (queue + extras).
 pub const MAX_SERVICE_BARRIERS: usize = 16;
 
+/// Append `extras` into `buf` starting at `*len`.
+///
+/// On overflow the **last** slot is replaced with a max barrier (fail-expensive)
+/// and remaining extras are dropped — never silently omit a penalty.
+/// [DEMI-FAIL-EXPENSIVE]
+pub fn append_barriers_fail_expensive(
+    buf: &mut [BarrierFactor],
+    len: &mut usize,
+    extras: &[BarrierFactor],
+) {
+    for barrier in extras {
+        if *len >= buf.len() {
+            if !buf.is_empty() {
+                buf[buf.len() - 1] = BarrierFactor::clamped(f64::MAX);
+                bump_clamp();
+            }
+            return;
+        }
+        buf[*len] = *barrier;
+        *len += 1;
+    }
+}
+
 /// The standard per-backend service cost shared by live routing
 /// (`demiurge-router`) and shadow pairing (`demiurge-control`): a clamped
 /// time core, the queue barrier `1 + inflight`, any extra barriers (Φ,
 /// transfer penalty, …) and warmth discounts. Keeping the assembly here
 /// prevents the two cost surfaces from drifting apart. [DEMI-ROUTE-MINCOST]
+///
+/// **Advisory vs admission:** this cost ranks placement candidates. Hard KV /
+/// connection capacity is enforced by the reservation ledger and admit bucket,
+/// not by making \(B_Φ\) infinite — `phi_barrier` soft-caps util at 0.999 so
+/// cost stays finite while admit/ledger can still shed. [DEMI-BARRIER-PHI]
 pub fn service_cost(
     core_seconds: f64,
     inflight: usize,
@@ -302,19 +330,43 @@ pub fn service_cost(
     let mut barriers = [BarrierFactor::clamped(1.0); MAX_SERVICE_BARRIERS];
     barriers[0] = queue;
     let mut len = 1;
-    for barrier in extra_barriers {
-        if len >= MAX_SERVICE_BARRIERS {
-            break;
-        }
-        barriers[len] = *barrier;
-        len += 1;
-    }
+    append_barriers_fail_expensive(&mut barriers, &mut len, extra_barriers);
     compose(core, &barriers[..len], discounts, Corrector::identity())
 }
 
 #[cfg(test)]
 mod unit {
     use super::*;
+
+    #[test]
+    fn barrier_overflow_fail_expensive_not_silent_drop() {
+        let before = FACTOR_CLAMP_EVENTS.load(Ordering::Relaxed);
+        let mut buf = [BarrierFactor::clamped(1.0); 2];
+        let mut len = 0;
+        append_barriers_fail_expensive(
+            &mut buf,
+            &mut len,
+            &[
+                BarrierFactor::new(2.0).unwrap(),
+                BarrierFactor::new(3.0).unwrap(),
+                BarrierFactor::new(4.0).unwrap(), // overflows → last slot = MAX
+            ],
+        );
+        assert_eq!(len, 2);
+        assert_eq!(buf[0].get(), 2.0);
+        assert_eq!(buf[1].get(), f64::MAX);
+        assert!(
+            FACTOR_CLAMP_EVENTS.load(Ordering::Relaxed) > before,
+            "overflow must bump FACTOR_CLAMP_EVENTS"
+        );
+        // service_cost with more extras than stack also saturates, not drops.
+        let many: Vec<_> = (0..MAX_SERVICE_BARRIERS)
+            .map(|_| BarrierFactor::new(1.1).unwrap())
+            .collect();
+        let overflowed = service_cost(1.0, 0, &many, &[]);
+        let with_max = service_cost(1.0, 0, &[BarrierFactor::clamped(f64::MAX)], &[]);
+        assert!(overflowed.ln() >= with_max.ln() - 1e-9);
+    }
 
     #[test]
     fn rejects_nonpositive_core() {
