@@ -283,7 +283,7 @@ fn push_nla_bytes(buf: &mut Vec<u8>, nla_type: u16, payload: &[u8]) {
     buf.extend_from_slice(&(nla_len as u16).to_ne_bytes());
     buf.extend_from_slice(&nla_type.to_ne_bytes());
     buf.extend_from_slice(payload);
-    while buf.len() % 4 != 0 {
+    while !buf.len().is_multiple_of(4) {
         buf.push(0);
     }
 }
