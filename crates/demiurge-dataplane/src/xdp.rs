@@ -81,6 +81,10 @@ pub struct XdpAdmitShed {
     pub(super) bpf: aya::Ebpf,
     pub(super) iface: String,
     pub(super) mode: &'static str,
+    /// Interface index at attach time (0 if unresolved).
+    pub(super) ifindex: u32,
+    /// BPF program id we attached; used to detect admin `xdp off` / replace.
+    pub(super) prog_id: u32,
 }
 
 #[cfg(target_os = "linux")]
@@ -89,6 +93,8 @@ impl std::fmt::Debug for XdpAdmitShed {
         f.debug_struct("XdpAdmitShed")
             .field("iface", &self.iface)
             .field("mode", &self.mode)
+            .field("ifindex", &self.ifindex)
+            .field("prog_id", &self.prog_id)
             .finish_non_exhaustive()
     }
 }
