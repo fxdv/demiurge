@@ -35,7 +35,11 @@ phase = 0
 section = "4.5"
 summary = "Invalid signals saturate toward expensive; never cheapen a target."
 requires_test = true
-tests = ["invalid_signal_never_cheapens"]
+tests = [
+  "invalid_signal_never_cheapens",
+  "dynamo_nan_overlap_poisons_rank_demiurge_stays_finite",
+  "service_cost_broken_signals_never_undercut_healthy",
+]
 
 [[requirement]]
 id = "DEMI-ROUTE-MINCOST"
@@ -135,7 +139,13 @@ phase = 3
 section = "state"
 summary = "Warmth hit applies a bounded discount; miss applies none."
 requires_test = true
-tests = ["warmth_discount_bounded", "warmth_aware_routing_improves_hit_ratio", "warmth_override_forces_disaggregated_path"]
+tests = [
+  "warmth_discount_bounded",
+  "warmth_aware_routing_improves_hit_ratio",
+  "warmth_override_forces_disaggregated_path",
+  "warmth_respects_rho_max_envelope",
+  "demiurge_rho_max_caps_warmth_unlike_unbounded_overlap",
+]
 
 [[requirement]]
 id = "DEMI-STATE-AP"

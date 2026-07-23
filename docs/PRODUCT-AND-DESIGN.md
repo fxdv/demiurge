@@ -132,6 +132,20 @@ Each backend gets a score. Lower is better. The score combines:
 
 **Invariant we refuse to break:** cost is always **> 0 by construction** (log-space composition). Broken telemetry **fails expensive**, never cheap — a sick backend cannot be accidentally preferred.
 
+### Competitive contrast — linear block cost vs fail-expensive algebra
+
+NVIDIA Dynamo's KV router ranks workers with an operational **linear block** score (overlap-adjusted prefill load + active decode blocks). That is a strong TTFT / load heuristic and a fair Track D baseline — but it is not a closed fail-expensive algebra: unbounded or non-finite overlap credits can collapse the prefill term or poison ranking.
+
+Demiurge's moat on this surface is structural and CI-gated:
+
+| Property | Dynamo-style block cost (foil) | Demiurge |
+|----------|--------------------------------|----------|
+| Broken / NaN signal | With `max(raw − credits, 0)`, NaN credits can collapse to **free prefill** | Saturates **fail-expensive**; `Cost::ln` always finite |
+| Cache-hit reward | Overlap credits unbounded in the formula | Warmth capped by **ρ_max** (`warmth.max_discount`, default 0.85) |
+| Positivity | Not an algebraic invariant | **C > 0** by log-space construction |
+
+Property suite: `crates/demiurge-cost/tests/dynamo_contrast.rs` (plus `positivity.rs`). Track D should still A/B against Dynamo's cost *shape* on real fleets — this contrast is about failure modes under poisoned or broken signals, not TTFT on honest telemetry.
+
 ---
 
 ## What we have built (proof points)
@@ -180,7 +194,7 @@ Routing logic is **sub-microsecond to low-microsecond** on laptop-class hardware
 
 - **Design conformance** — spec ↔ code ↔ test traceability; generated artifacts cannot drift.
 - **Blur guard** — `intended` requirements appear only in “design intent” prose; `implemented` ones appear in normative sections.
-- **Property tests** — cost positivity, corrector bounds, fail-expensive clamping.
+- **Property tests** — cost positivity, corrector bounds, fail-expensive clamping, Dynamo-style block-cost contrast (ρ_max / NaN).
 - **CPU bench gates** — hot-path regressions fail the build.
 - **Load regression** — `LOAD-CI-SMOKE` + `LOAD-TRACK-B-IOURING` on Linux CI; kernel XDP+veth load under root (optional locally via `optional = true`).
 
